@@ -74,6 +74,7 @@ describe('App', () => {
     const withChecks: PrView = { ...prView(1), checks: [
       { name: 'fast-checks / ESLint', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
         elapsedSeconds: 60, expectedSeconds: 180, url: null,
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
     ] };
     mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [

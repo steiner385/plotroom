@@ -6,6 +6,7 @@ import type { CheckView } from '../types';
 const check = (over: Partial<CheckView>): CheckView => ({
   name: 'fast-checks / ESLint', status: 'COMPLETED', conclusion: 'SUCCESS', isRequired: true, workflowName: null,
   elapsedSeconds: 180, expectedSeconds: 200, url: 'https://x/run1',
+  expectedLowSeconds: null, expectedHighSeconds: null,
   waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null,
   ...over,
 });
@@ -26,6 +27,85 @@ describe('ganttScale', () => {
   it('falls back to 60 when no check has any duration', () => {
     expect(ganttScale([check({ elapsedSeconds: null, expectedSeconds: null })])).toBe(60);
     expect(ganttScale([])).toBe(60);
+  });
+
+  it('includes expectedHighSeconds (p90) in the panel scale', () => {
+    expect(ganttScale([
+      check({ elapsedSeconds: 100, expectedSeconds: 200, expectedLowSeconds: 50, expectedHighSeconds: 900 }),
+    ])).toBe(900);
+    // high below elapsed/expected does not shrink the scale
+    expect(ganttScale([
+      check({ elapsedSeconds: 400, expectedSeconds: 300, expectedLowSeconds: 100, expectedHighSeconds: 350 }),
+    ])).toBe(400);
+  });
+});
+
+describe('CheckGantt — duration bound band (p10–p90)', () => {
+  it('renders a range band from low/scale to high/scale when both bounds are present', () => {
+    // long row pins the scale at 600; banded row: low 120 → 20%, high 480 → 80%
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'long', elapsedSeconds: 600, expectedSeconds: null, status: 'IN_PROGRESS', conclusion: null }),
+      check({ name: 'banded', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: 120, expectedHighSeconds: 480, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    const rows = container.querySelectorAll('.g-row');
+    expect(rows[0]!.querySelector('.band')).toBeNull();
+    const band = rows[1]!.querySelector('.band') as HTMLElement;
+    expect(band).not.toBeNull();
+    expect(band.style.left).toBe('20%');
+    expect(band.style.width).toBe('60%');
+  });
+
+  it('clamps the band at 100% when high defines the scale', () => {
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'banded', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: 120, expectedHighSeconds: 480, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    // scale = max(240, 300, 480) = 480 → band 25%..100%
+    const band = container.querySelector('.band') as HTMLElement;
+    expect(band.style.left).toBe('25%');
+    expect(band.style.width).toBe('75%');
+  });
+
+  it('keeps the p50 tick alongside the band', () => {
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'banded', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: 120, expectedHighSeconds: 480, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    expect(container.querySelector('.exp')).not.toBeNull();
+    expect(container.querySelector('.band')).not.toBeNull();
+  });
+
+  it('renders the band behind the elapsed fill (band precedes the fill in DOM order)', () => {
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'banded', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: 120, expectedHighSeconds: 480, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    const bar = container.querySelector('.g-bar')!;
+    const children = Array.from(bar.children);
+    expect(children.findIndex((el) => el.classList.contains('band')))
+      .toBeLessThan(children.findIndex((el) => el.tagName === 'I'));
+  });
+
+  it('adds a tooltip with p50 and the p10–p90 bounds on the bar', () => {
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'banded', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: 120, expectedHighSeconds: 480, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    const bar = container.querySelector('.g-bar') as HTMLElement;
+    expect(bar.title).toBe('expected ~5m (p10 2m – p90 8m)');
+  });
+
+  it('renders no band and no tooltip when bounds are null (rows without history unchanged)', () => {
+    const { container } = render(<CheckGantt stage="ci" checks={[
+      check({ name: 'plain', elapsedSeconds: 240, expectedSeconds: 300,
+        expectedLowSeconds: null, expectedHighSeconds: null, status: 'IN_PROGRESS', conclusion: null }),
+    ]} />);
+    expect(container.querySelector('.band')).toBeNull();
+    const bar = container.querySelector('.g-bar') as HTMLElement;
+    expect(bar.getAttribute('title')).toBeNull();
+    // the p50 tick still renders as before
+    expect(container.querySelector('.exp')).not.toBeNull();
   });
 });
 

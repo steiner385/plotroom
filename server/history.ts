@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { median, percentile } from './math';
 
-export interface Expected { p50: number; p90: number; n: number; }
+export interface Expected { p10: number; p50: number; p90: number; n: number; }
 export interface MergedPrInput {
   repo: string; number: number; title: string; url: string;
   mergedAt: string; mergeCommitSha: string | null;
@@ -163,7 +163,10 @@ export class HistoryStore {
     const rows = this.stmtSelectDurations.all(repo, name, event) as { duration_secs: number }[];
     if (rows.length === 0) return null;
     const sorted = rows.map((r) => r.duration_secs).sort((a, b) => a - b);
-    return { p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9), n: sorted.length };
+    return {
+      p10: percentile(sorted, 0.1), p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9),
+      n: sorted.length,
+    };
   }
 
   /** Raw last-20 SUCCESS duration samples for (repo, check, event), newest first. */

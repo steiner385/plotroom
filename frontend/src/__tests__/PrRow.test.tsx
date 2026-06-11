@@ -10,9 +10,11 @@ const pr = (over: Partial<PrView>): PrView => ({
   checks: [
     { name: 'fast-checks / ESLint', status: 'COMPLETED', conclusion: 'SUCCESS', isRequired: true, workflowName: null,
       elapsedSeconds: 180, expectedSeconds: 200, url: 'https://x/run1',
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
     { name: 'lighthouse', status: 'IN_PROGRESS', conclusion: null, isRequired: false, workflowName: null,
       elapsedSeconds: 60, expectedSeconds: 300, url: null,
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
   ],
   groupChecks: null,
@@ -46,12 +48,15 @@ describe('PrRow', () => {
     render(<PrRow pr={pr({ checks: [
       { name: 'static-checks / TypeScript', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
         elapsedSeconds: 120, expectedSeconds: 240, url: null,
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
       { name: 'pr-affected-tests', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
         elapsedSeconds: 240, expectedSeconds: 540, url: null,
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
       { name: 'lighthouse', status: 'IN_PROGRESS', conclusion: null, isRequired: false, workflowName: null,
         elapsedSeconds: 600, expectedSeconds: 700, url: null,
+        expectedLowSeconds: null, expectedHighSeconds: null,
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
     ] })} hasDeploy />);
     expect(screen.getByText('72% · pr-affected-tests running 4m of ~9m')).toBeInTheDocument();
@@ -170,6 +175,7 @@ describe('PrRow', () => {
   it('queued PR with groupChecks shows the merge-group section first, then PR checks (Y2)', () => {
     const groupCheck = { name: 'ci', status: 'IN_PROGRESS', conclusion: null, isRequired: true,
       workflowName: 'CI', elapsedSeconds: 300, expectedSeconds: 600, url: 'https://x/group',
+      expectedLowSeconds: null, expectedHighSeconds: null,
       waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null };
     render(<PrRow pr={pr({
       stage: { stage: 'queue', substate: null, percent: 50, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
@@ -215,9 +221,11 @@ describe('PrRow', () => {
       checks: [
         { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
           elapsedSeconds: null, expectedSeconds: null, url: null,
+          expectedLowSeconds: null, expectedHighSeconds: null,
           waitKind: 'runner', blockedOn: null, waitingSeconds: 60, expectedRunnerWaitSeconds: 90 },
         { name: 'integration-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
           elapsedSeconds: null, expectedSeconds: null, url: null,
+          expectedLowSeconds: null, expectedHighSeconds: null,
           waitKind: 'runner', blockedOn: null, waitingSeconds: 30, expectedRunnerWaitSeconds: 120 },
       ],
     })} hasDeploy />);
@@ -231,6 +239,7 @@ describe('PrRow', () => {
       checks: [
         { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
           elapsedSeconds: null, expectedSeconds: null, url: null,
+          expectedLowSeconds: null, expectedHighSeconds: null,
           waitKind: 'runner', blockedOn: null, waitingSeconds: 45, expectedRunnerWaitSeconds: null },
       ],
     })} hasDeploy />);
@@ -243,9 +252,11 @@ describe('PrRow', () => {
       checks: [
         { name: 'static-checks / TypeScript', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
           elapsedSeconds: 120, expectedSeconds: 240, url: null,
+          expectedLowSeconds: null, expectedHighSeconds: null,
           waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
         { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
           elapsedSeconds: null, expectedSeconds: null, url: null,
+          expectedLowSeconds: null, expectedHighSeconds: null,
           waitKind: 'runner', blockedOn: null, waitingSeconds: 30, expectedRunnerWaitSeconds: 60 },
       ],
     })} hasDeploy />);

@@ -86,6 +86,14 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .g-running .g-bar i { background: var(--accent); }
 .g-overdue .g-bar i { background: var(--amber); }
 .g-failed .g-bar i { background: var(--fail); }
+/* row color exposed for the p10–p90 band tint (matches the fill color) */
+.g-done { --row-color: var(--done); }
+.g-running { --row-color: var(--accent); }
+.g-overdue { --row-color: var(--amber); }
+.g-failed { --row-color: var(--fail); }
+/* p10–p90 expected-duration band: subtle static tint behind the elapsed fill */
+.g-bar .band { position: absolute; top: 0; bottom: 0; border-radius: 3px;
+  background: color-mix(in srgb, var(--row-color, var(--muted)) 22%, transparent); }
 .g-queued .g-bar i, .g-skipped .g-bar i { background: var(--muted); opacity: 0.35; }
 .g-runner-wait .g-bar i {
   background: repeating-linear-gradient(

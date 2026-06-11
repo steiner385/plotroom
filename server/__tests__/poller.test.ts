@@ -2045,10 +2045,11 @@ describe('Poller groupChecks payload (Y1)', () => {
   }
 
   it('a queued PR exposes the merge-group build as groupChecks with merge_group expectations', async () => {
-    // merge_group history for 'ci': p50 = 480s
-    for (let i = 0; i < 5; i++) {
+    // merge_group history for 'ci': durations 4/6/8/10/12m → p10=240, p50=480, p90=720
+    const mins = [4, 6, 8, 10, 12];
+    for (let i = 0; i < mins.length; i++) {
       history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
-        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:08:00Z`, 'SUCCESS');
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:${String(mins[i]).padStart(2, '0')}:00Z`, 'SUCCESS');
     }
     const p = new Poller({ client: groupClient() as never, history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });
@@ -2062,12 +2063,16 @@ describe('Poller groupChecks payload (Y1)', () => {
     expect(pr.groupChecks).toHaveLength(1);
     expect(pr.groupChecks![0]).toMatchObject({
       name: 'ci', status: 'IN_PROGRESS', isRequired: true, workflowName: 'CI',
-      expectedSeconds: 480, url: 'gu',
+      expectedSeconds: 480, expectedLowSeconds: 240, expectedHighSeconds: 720, url: 'gu',
     });
     // elapsed since 11:50 → 600s
     expect(pr.groupChecks![0]!.elapsedSeconds).toBe(600);
-    // head-commit PR checks stay their own list
+    // head-commit PR checks stay their own list; their single ingested 3m sample
+    // populates all three expectations (p10 = p50 = p90 at n=1)
     expect(pr.checks.map((c) => c.name)).toEqual(['fast-checks / ESLint']);
+    expect(pr.checks[0]).toMatchObject({
+      expectedSeconds: 180, expectedLowSeconds: 180, expectedHighSeconds: 180,
+    });
   });
 
   it('groupChecks is null while the group rollup has not been fetched yet', async () => {

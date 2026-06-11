@@ -4,10 +4,11 @@ import { formatDur } from './format';
 
 type RowKind = 'done' | 'running' | 'overdue' | 'failed' | 'queued' | 'skipped';
 
-/** Bar scale for the panel: the longest check (elapsed or expected) defines 100%. */
+/** Bar scale for the panel: the longest check (elapsed, expected, or its p90
+ *  upper bound) defines 100% — so the p10–p90 band never overflows a bar. */
 export function ganttScale(checks: CheckView[]): number {
   const max = checks.reduce(
-    (acc, c) => Math.max(acc, c.elapsedSeconds ?? 0, c.expectedSeconds ?? 0), 0);
+    (acc, c) => Math.max(acc, c.elapsedSeconds ?? 0, c.expectedSeconds ?? 0, c.expectedHighSeconds ?? 0), 0);
   return max > 0 ? max : 60;
 }
 
@@ -61,6 +62,12 @@ function GanttRow({ c, scale }: { c: CheckView; scale: number }) {
     && c.waitingSeconds > 2 * c.expectedRunnerWaitSeconds;
   const extraClass = isRunnerWait ? (isAmber ? ' g-runner-wait g-runner-wait-amber' : ' g-runner-wait') : '';
 
+  // p10–p90 expected-duration band: only when both bounds are known
+  const hasBand = c.expectedLowSeconds != null && c.expectedHighSeconds != null;
+  const barTitle = hasBand && c.expectedSeconds != null
+    ? `expected ~${formatDur(c.expectedSeconds)} (p10 ${formatDur(c.expectedLowSeconds!)} – p90 ${formatDur(c.expectedHighSeconds!)})`
+    : undefined;
+
   return (
     <li className={`g-row g-${kind}${extraClass}`}>
       <span className="g-name">
@@ -68,7 +75,12 @@ function GanttRow({ c, scale }: { c: CheckView; scale: number }) {
           ? <a href={c.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{c.name}</a>
           : <span>{c.name}</span>}
       </span>
-      <span className="g-bar">
+      <span className="g-bar" title={barTitle}>
+        {hasBand && (() => {
+          const lowPct = Math.min(100, (c.expectedLowSeconds! / scale) * 100);
+          const highPct = Math.min(100, (c.expectedHighSeconds! / scale) * 100);
+          return <span className="band" style={{ left: `${lowPct}%`, width: `${highPct - lowPct}%` }} />;
+        })()}
         <i style={{ width: `${fillPct}%` }} />
         {c.expectedSeconds != null && (() => {
           const pct = Math.min(100, (c.expectedSeconds / scale) * 100);

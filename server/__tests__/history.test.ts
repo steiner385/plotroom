@@ -19,6 +19,32 @@ describe('check durations', () => {
     expect(e!.n).toBeLessThanOrEqual(20);
     expect(e!.p50).toBeGreaterThan(0);
     expect(e!.p90).toBeGreaterThanOrEqual(e!.p50);
+    expect(e!.p10).toBeGreaterThan(0);
+    expect(e!.p10).toBeLessThanOrEqual(e!.p50);
+  });
+
+  it('computes p10 by nearest rank over the same last-20 SUCCESS window', () => {
+    // 20 samples: 1..20 minutes (distinct completed_at so none dedupe)
+    for (let i = 1; i <= 20; i++) {
+      const mm = String(i).padStart(2, '0');
+      h.recordCheckDuration(REPO, 'Build', 'pull_request',
+        `2026-06-10T10:${mm}:00Z`, `2026-06-10T10:${mm}:${String(i).padStart(2, '0')}Z`, 'SUCCESS');
+    }
+    // durations are 1..20 seconds; nearest rank: p10 → ceil(0.1·20)=2nd smallest = 2s
+    const e = h.expected(REPO, 'Build', 'pull_request')!;
+    expect(e.n).toBe(20);
+    expect(e.p10).toBe(2);
+    expect(e.p50).toBe(10);
+    expect(e.p90).toBe(18);
+  });
+
+  it('a single sample yields p10 = p50 = p90', () => {
+    h.recordCheckDuration(REPO, 'Solo', 'pull_request',
+      '2026-06-10T10:00:00Z', '2026-06-10T10:05:00Z', 'SUCCESS');
+    const e = h.expected(REPO, 'Solo', 'pull_request')!;
+    expect(e.p10).toBe(300);
+    expect(e.p50).toBe(300);
+    expect(e.p90).toBe(300);
   });
 
   it('rejects negative/zero durations (SKIPPED placeholder timestamps)', () => {

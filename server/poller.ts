@@ -21,6 +21,9 @@ export interface CheckView {
   name: string; status: string; conclusion: string | null; isRequired: boolean;
   workflowName: string | null;
   elapsedSeconds: number | null; expectedSeconds: number | null; url: string | null;
+  /** Lower/upper expected-duration bounds (p10/p90 over the same last-20 SUCCESS
+   *  window as expectedSeconds); null whenever expectedSeconds is null. */
+  expectedLowSeconds: number | null; expectedHighSeconds: number | null;
   waitKind: 'runner' | 'blocked' | 'unknown' | null; blockedOn: string | null;
   waitingSeconds: number | null; expectedRunnerWaitSeconds: number | null;
 }
@@ -1122,6 +1125,7 @@ export class Poller extends EventEmitter {
       const wait = classifyWait(c, checks,
         inRollupWorkflow ? this.needsFor(repo, c.name) : null, now,
         (p, e) => this.needActiveFor(repo, p, e), graphKeys, rollupWf);
+      const exp = this.deps.history.expected(repo, c.name, c.event);
       return {
         name: c.rawName, status: c.status, conclusion: c.conclusion,
         // same predicate as classification: mid-run prefix-matched checks sort under
@@ -1133,7 +1137,9 @@ export class Poller extends EventEmitter {
         elapsedSeconds: c.startedAt
           ? Math.round(((c.completedAt ? Date.parse(c.completedAt) : now.getTime()) - Date.parse(c.startedAt)) / 1000)
           : null,
-        expectedSeconds: this.deps.history.expected(repo, c.name, c.event)?.p50 ?? null,
+        expectedSeconds: exp?.p50 ?? null,
+        expectedLowSeconds: exp?.p10 ?? null,
+        expectedHighSeconds: exp?.p90 ?? null,
         url: c.url,
         waitKind: wait?.kind ?? null,
         blockedOn: wait?.kind === 'blocked' ? wait.blockedOn : null,

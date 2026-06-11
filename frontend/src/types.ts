@@ -9,6 +9,9 @@ export interface CheckView {
   /** Workflow display name (e.g. `CI`, `Auto-merge PRs`); null when unknown. */
   workflowName: string | null;
   elapsedSeconds: number | null; expectedSeconds: number | null; url: string | null;
+  /** Lower/upper expected-duration bounds (p10/p90 over the same last-20 SUCCESS
+   *  window as expectedSeconds); null whenever expectedSeconds is null. */
+  expectedLowSeconds: number | null; expectedHighSeconds: number | null;
   /** Queued-check runner classification (null for non-queued checks):
    *  'runner' = needs satisfied, waiting for a runner; 'blocked' = waiting on
    *  blockedOn; 'unknown' = needs graph unknown or root job. */
