@@ -184,6 +184,31 @@ describe('deploy gaps + meta', () => {
     h.setMeta('lastSweep', '2026-06-10T12:00:00Z');
     expect(h.getMeta('lastSweep')).toBe('2026-06-10T12:00:00Z');
   });
+
+  it('meta delete removes the key (idempotent)', () => {
+    h.setMeta('repoConfig:acme/widgets', '{"batchSize":12}');
+    h.deleteMeta('repoConfig:acme/widgets');
+    expect(h.getMeta('repoConfig:acme/widgets')).toBeNull();
+    h.deleteMeta('repoConfig:acme/widgets'); // already gone — no throw
+  });
+
+  it('listMeta returns only prefix-matched rows, sorted by key', () => {
+    h.setMeta('repoConfig:acme/widgets', 'a');
+    h.setMeta('repoConfig:octo/tools', 'b');
+    h.setMeta('ciGraph:acme/widgets', 'c');
+    h.setMeta('lastSweep', 'd');
+    expect(h.listMeta('repoConfig:')).toEqual([
+      { key: 'repoConfig:acme/widgets', value: 'a' },
+      { key: 'repoConfig:octo/tools', value: 'b' },
+    ]);
+    expect(h.listMeta('ciGraph:')).toEqual([{ key: 'ciGraph:acme/widgets', value: 'c' }]);
+  });
+
+  it('listMeta escapes LIKE wildcards in the prefix', () => {
+    h.setMeta('p_x:one', 'a');   // `_` must not act as a single-char wildcard
+    h.setMeta('pax:two', 'b');
+    expect(h.listMeta('p_x:')).toEqual([{ key: 'p_x:one', value: 'a' }]);
+  });
 });
 
 describe('eta accuracy (Task F)', () => {

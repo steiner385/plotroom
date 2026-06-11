@@ -34,6 +34,8 @@ export class HistoryStore {
   private readonly stmtSelectEtaAccuracy: Database.Statement;
   private readonly stmtGetMeta: Database.Statement;
   private readonly stmtSetMeta: Database.Statement;
+  private readonly stmtDeleteMeta: Database.Statement;
+  private readonly stmtListMeta: Database.Statement;
 
   constructor(path: string) {
     this.db = new Database(path);
@@ -141,6 +143,10 @@ export class HistoryStore {
     this.stmtGetMeta = this.db.prepare('SELECT value FROM meta WHERE key=?');
     this.stmtSetMeta = this.db.prepare(
       'INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+    );
+    this.stmtDeleteMeta = this.db.prepare('DELETE FROM meta WHERE key=?');
+    this.stmtListMeta = this.db.prepare(
+      "SELECT key, value FROM meta WHERE key LIKE ? ESCAPE '\\' ORDER BY key"
     );
   }
 
@@ -285,6 +291,17 @@ export class HistoryStore {
 
   setMeta(key: string, value: string): void {
     this.stmtSetMeta.run(key, value);
+  }
+
+  deleteMeta(key: string): void {
+    this.stmtDeleteMeta.run(key);
+  }
+
+  /** All meta rows whose key starts with `prefix` (LIKE wildcards in the prefix
+   *  are escaped — `repoConfig:a_b/c` only matches itself). */
+  listMeta(prefix: string): { key: string; value: string }[] {
+    const escaped = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+    return this.stmtListMeta.all(`${escaped}%`) as { key: string; value: string }[];
   }
 
   close(): void {

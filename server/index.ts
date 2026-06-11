@@ -5,7 +5,7 @@ import { createTokenSource, type TokenProvider } from './auth';
 import { GithubClient } from './github';
 import { HistoryStore } from './history';
 import { DeployWatcher } from './deploy-watcher';
-import { Poller } from './poller';
+import { Poller, describeError } from './poller';
 import { deriveCiGraph } from './required-checks';
 import { backfillRepo } from './backfill';
 import { createApp } from './api';
@@ -79,12 +79,12 @@ async function main() {
       const ciYaml = await deploy.readFileAtHead(repo, settings.workflowPath, dc.defaultBranch);
       const graph = ciYaml != null ? deriveCiGraph(ciYaml, settings.rollupJobId) : null;
       if (graph) {
-        poller.setDerivedPrefixes(repo, graph.prefixes);
-        poller.setDerivedGraph(repo, graph.nodes);
-        poller.setRollupWorkflowName(repo, graph.workflowName);
+        poller.adoptDerivedGraph(repo, graph); // cache + persist last-known-good + arm 24h
       } else console.warn(`[index] ${repo}: ${settings.workflowPath} ${ciYaml == null ? 'not readable' : 'unparseable'} — using configured prefixes only`);
     } catch (e) {
-      console.warn(`[index] prefix derivation failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`);
+      // No throttle armed: the first deploy cycle retries with backoff, and any
+      // persisted last-known-good graph (restored at construction) keeps working.
+      console.warn(`[index] prefix derivation failed for ${repo}: ${describeError(e)}`);
     }
   }
 

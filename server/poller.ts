@@ -6,7 +6,7 @@ import type { DeployWatcher } from './deploy-watcher';
 import { effectiveRepoSettings, effectiveDeployMap, type AppConfig, type DeployConfig, type RepoSettings } from './config';
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoFileConfig } from './repo-config';
 import type { WebhookRoute } from './webhooks';
-import { deriveCiGraph, activeForEvent, type CiGraphNode } from './required-checks';
+import { deriveCiGraph, activeForEvent, ciGraphToJson, ciGraphFromJson, type CiGraph, type CiGraphNode } from './required-checks';
 import type { PrSnapshot, StageResult, QueueEntry, CheckRun } from './types';
 import { buildSweepQuery, buildMergedPageQuery, buildDetailQuery, buildQueueQuery, buildOidRollupQuery, buildBlobQuery } from './queries';
 import { mapPrNode, mapQueueEntries, mapRollupContexts } from './map';
@@ -123,6 +123,64 @@ interface StageTrack { stageId: string; enteredAt: number; firstEta: number | nu
 
 type DelayKind = 'hot' | 'sweep' | 'deploy';
 
+/** First retry after a failure (doubles per consecutive failure). */
+const RETRY_BASE_MS = 60_000;
+/** Backoff ceiling between failed attempts. */
+const RETRY_CAP_MS = 10 * 60_000;
+
+/**
+ * Failure-aware refresh throttle (incident 2026-06-11: a connectivity blip at
+ * startup failed the repo-config fetch and ci.yml derivation, and the old
+ * attempt-armed 24h throttle locked the failure in for a day).
+ *
+ * The long `successIntervalMs` is armed ONLY by `success()`; `failure()` arms a
+ * capped exponential backoff (1m, 2m, 4m, 8m, 10m, 10m, …) so the next eligible
+ * cycle retries until a success re-arms the long interval.
+ */
+export class RetryThrottle {
+  private nextAt = new Map<string, number>();
+  private failures = new Map<string, number>();
+
+  constructor(private successIntervalMs: number) {}
+
+  due(key: string, nowMs: number): boolean {
+    return nowMs >= (this.nextAt.get(key) ?? 0);
+  }
+
+  success(key: string, nowMs: number): void {
+    this.failures.delete(key);
+    this.nextAt.set(key, nowMs + this.successIntervalMs);
+  }
+
+  failure(key: string, nowMs: number): void {
+    const n = this.failures.get(key) ?? 0;
+    this.failures.set(key, n + 1);
+    this.nextAt.set(key, nowMs + Math.min(RETRY_BASE_MS * 2 ** n, RETRY_CAP_MS));
+  }
+}
+
+/**
+ * One-line error description including the `cause` chain when present —
+ * Node's fetch wraps the actionable bit (ENOTFOUND/ETIMEDOUT/…) in `e.cause`,
+ * so a bare `e.message` is just "fetch failed". No stacks.
+ */
+export function describeError(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const causes: string[] = [];
+  let cur: unknown = e.cause;
+  for (let depth = 0; cur != null && depth < 5; depth++) {
+    if (cur instanceof Error) {
+      const code = (cur as NodeJS.ErrnoException).code;
+      causes.push(code && !cur.message.includes(code) ? `${code} ${cur.message}` : (cur.message || String(code ?? cur)));
+      cur = cur.cause;
+    } else {
+      causes.push(String(cur));
+      break;
+    }
+  }
+  return causes.length ? `${e.message} (cause: ${causes.join(' ← ')})` : e.message;
+}
+
 export class Poller extends EventEmitter {
   private prs = new Map<string, PrSnapshot>();            // key repo#number
   private stages = new Map<string, StageResult>();        // previous stage per PR (UNKNOWN-hold)
@@ -132,12 +190,12 @@ export class Poller extends EventEmitter {
   private queueEnqueuedAt = new Map<string, string>();    // PR key → enqueuedAt while queued
   private stageTracker = new Map<string, StageTrack>();   // PR key → current stage + first ETA
   private repoFileConfigs = new Map<string, RepoFileConfig>(); // repo → parsed .pr-dashboard.yml
-  private repoConfigFetchedAt = new Map<string, number>();     // repo → last fetch attempt (ms)
+  private repoConfigThrottle = new RetryThrottle(PREFIX_DERIVE_INTERVAL_MS); // 24h on success, backoff on failure
   private repoConfigSig = new Map<string, string>();           // repo → loaded-config signature (log-on-change)
   private derivedPrefixes = new Map<string, string[]>();  // repo → ci.yml-derived prefixes
   private derivedGraph = new Map<string, Map<string, CiGraphNode>>(); // repo → node prefix → { needs, activity }
   private derivedWorkflowName = new Map<string, string | null>();     // repo → rollup workflow display name
-  private prefixDerivedAt = new Map<string, number>();    // repo → last derivation attempt (ms)
+  private deriveThrottle = new RetryThrottle(PREFIX_DERIVE_INTERVAL_MS); // 24h on success, backoff on failure
   private envShas = new Map<string, string | null>();     // repo/env → deployed sha
   private propagating = new Set<string>();                // merged PR keys whose sha is 'missing'
   private seenNotLive = new Set<string>();                // "repo#number/env" observed not-live here
@@ -156,6 +214,39 @@ export class Poller extends EventEmitter {
   constructor(private deps: PollerDeps) {
     super();
     this.now = deps.now ?? (() => new Date());
+    this.restorePersisted();
+  }
+
+  /**
+   * Load last-known-good in-repo configs and derived ci.yml graphs from the
+   * history `meta` table (`repoConfig:<repo>` / `ciGraph:<repo>`) so a process
+   * restart during a GitHub outage starts from the last successful fetch
+   * instead of nothing. Live fetches overwrite these on success; restoring
+   * never arms the refresh throttles, so the first cycle still fetches fresh.
+   */
+  private restorePersisted(): void {
+    const { history } = this.deps;
+    for (const { key, value } of history.listMeta('repoConfig:')) {
+      const repo = key.slice('repoConfig:'.length);
+      try {
+        const fields = JSON.parse(value) as Omit<RepoFileConfig, 'warnings'> | null;
+        if (!fields || typeof fields !== 'object' || Array.isArray(fields)) continue;
+        this.repoFileConfigs.set(repo, { ...fields, warnings: [] });
+        this.repoConfigSig.set(repo, JSON.stringify(fields));
+        console.log(`[poller] restored persisted ${REPO_CONFIG_PATH} for ${repo} (source of: ${Object.keys(fields).join(', ') || 'nothing'})`);
+      } catch { /* corrupt row — ignore, live fetch will rewrite it */ }
+    }
+    for (const { key, value } of history.listMeta('ciGraph:')) {
+      const repo = key.slice('ciGraph:'.length);
+      try {
+        const graph = ciGraphFromJson(JSON.parse(value));
+        if (!graph) continue;
+        this.derivedPrefixes.set(repo, graph.prefixes);
+        this.derivedGraph.set(repo, graph.nodes);
+        this.derivedWorkflowName.set(repo, graph.workflowName);
+        console.log(`[poller] restored persisted ci-graph for ${repo} (prefixes: ${graph.prefixes.join(', ')})`);
+      } catch { /* corrupt row — ignore, live derivation will rewrite it */ }
+    }
   }
 
   // ---- fetch cycles -------------------------------------------------------
@@ -418,6 +509,9 @@ export class Poller extends EventEmitter {
     for (const pr of this.prs.values()) repos.add(pr.repo);
     for (const repo of Object.keys(this.deps.config.deploy)) repos.add(repo);
     for (const repo of Object.keys(this.deps.config.repos ?? {})) repos.add(repo);
+    // repos known only via a (possibly restored) in-repo file stay watched, so a
+    // restart during an outage keeps refreshing them even with no open PRs yet
+    for (const repo of this.repoFileConfigs.keys()) repos.add(repo);
     return repos;
   }
 
@@ -482,27 +576,31 @@ export class Poller extends EventEmitter {
   /**
    * Fetch + parse `.pr-dashboard.yml` for every watched repo via a GraphQL blob
    * read (no clone needed), at most once per repo per 24h (same cadence as ci.yml
-   * derivation; attempts are throttled, not just successes). Best-effort like
-   * derivation: a failed fetch keeps the prior parsed config; an unparseable file
-   * keeps it too; an absent file clears it.
+   * derivation). The 24h interval is armed ONLY on a successful fetch — a failed
+   * fetch arms a capped exponential backoff (1m..10m) so subsequent deploy cycles
+   * retry until a success re-arms the long throttle. Best-effort like derivation:
+   * a failed fetch keeps the prior parsed config; an unparseable file keeps it
+   * too; an absent file clears it (including the persisted last-known-good copy).
    */
   async refreshRepoConfigs(): Promise<void> {
-    const { client, config } = this.deps;
+    const { client, history, config } = this.deps;
     for (const repo of this.watchedRepos()) {
       if (config.exclude.includes(repo)) continue;
-      const last = this.repoConfigFetchedAt.get(repo) ?? 0;
-      if (this.now().getTime() - last < PREFIX_DERIVE_INTERVAL_MS) continue;
-      this.repoConfigFetchedAt.set(repo, this.now().getTime());
+      if (!this.repoConfigThrottle.due(repo, this.now().getTime())) continue;
       const [owner, name] = repo.split('/');
       let data: { repository?: { object?: { text?: unknown } | null } | null } | null = null;
       try {
         data = await client.graphql(buildBlobQuery(owner ?? '', name ?? '', `HEAD:${REPO_CONFIG_PATH}`));
       } catch (e) {
+        this.repoConfigThrottle.failure(repo, this.now().getTime());
         if (e instanceof RateLimitError) this.notePause(e.retryAfterSeconds);
+        console.warn(`[repo-config] ${repo}: ${REPO_CONFIG_PATH} fetch failed — will retry with backoff: ${describeError(e)}`);
         continue; // best-effort: prior layers keep working
       }
+      this.repoConfigThrottle.success(repo, this.now().getTime());
       const text = data?.repository?.object?.text;
       if (typeof text !== 'string') {
+        history.deleteMeta(`repoConfig:${repo}`);
         if (this.repoFileConfigs.delete(repo)) {
           this.repoConfigSig.delete(repo);
           console.log(`[repo-config] ${repo}: ${REPO_CONFIG_PATH} removed — instance/derived settings apply`);
@@ -517,6 +615,7 @@ export class Poller extends EventEmitter {
       for (const w of parsed.warnings) console.warn(`[repo-config] ${repo}: ${w}`);
       const { warnings: _warnings, ...fields } = parsed;
       this.repoFileConfigs.set(repo, parsed);
+      history.setMeta(`repoConfig:${repo}`, JSON.stringify(fields)); // last-known-good for restarts
       const sig = JSON.stringify(fields);
       if (sig !== this.repoConfigSig.get(repo)) {
         this.repoConfigSig.set(repo, sig);
@@ -530,8 +629,19 @@ export class Poller extends EventEmitter {
   /** Cache ci.yml-derived required-check prefixes for a repo (see required-checks.ts). */
   setDerivedPrefixes(repo: string, prefixes: string[]): void {
     this.derivedPrefixes.set(repo, prefixes);
-    this.prefixDerivedAt.set(repo, this.now().getTime());
     console.log(`[poller] derived required-check prefixes for ${repo}: ${prefixes.join(', ')}`);
+  }
+
+  /** Adopt a successfully derived ci.yml graph: cache all three derived layers,
+   *  persist the last-known-good copy (`ciGraph:<repo>` in history meta), and
+   *  arm the 24h re-derivation throttle. Used by the startup derivation in
+   *  index.ts and by the deploy-cycle re-derivation. */
+  adoptDerivedGraph(repo: string, graph: CiGraph): void {
+    this.setDerivedPrefixes(repo, graph.prefixes);
+    this.setDerivedGraph(repo, graph.nodes);
+    this.setRollupWorkflowName(repo, graph.workflowName);
+    this.deriveThrottle.success(repo, this.now().getTime());
+    this.deps.history.setMeta(`ciGraph:${repo}`, JSON.stringify(ciGraphToJson(graph)));
   }
 
   /** Cache the ci.yml-derived graph (display-name-level adjacency + event activity). */
@@ -593,23 +703,25 @@ export class Poller extends EventEmitter {
     return this.derivedPrefixes.get(repo);
   }
 
-  /** Deploy-cycle re-derivation: refresh the clone and re-read ci.yml at most once per 24h. */
+  /** Deploy-cycle re-derivation: refresh the clone and re-read ci.yml at most
+   *  once per 24h — armed ONLY when the read succeeds. A failed fetch/read arms
+   *  a capped exponential backoff (1m..10m) so later deploy cycles retry. */
   private async maybeRederivePrefixes(repo: string, branch: string): Promise<void> {
-    const last = this.prefixDerivedAt.get(repo) ?? 0;
-    if (this.now().getTime() - last < PREFIX_DERIVE_INTERVAL_MS) return;
-    this.prefixDerivedAt.set(repo, this.now().getTime()); // throttle attempts, not just successes
+    if (!this.deriveThrottle.due(repo, this.now().getTime())) return;
     try {
       const settings = this.settingsFor(repo);
       await this.deps.deploy.fetchClone(repo);
       const text = await this.deps.deploy.readFileAtHead(repo, settings.workflowPath, branch);
+      this.deriveThrottle.success(repo, this.now().getTime());
       const graph = text != null ? deriveCiGraph(text, settings.rollupJobId) : null;
-      if (graph) { // null = unparseable: keep prior prefixes/graph
-        this.setDerivedPrefixes(repo, graph.prefixes);
-        this.setDerivedGraph(repo, graph.nodes);
-        this.setRollupWorkflowName(repo, graph.workflowName);
-      }
-    } catch {
+      // null = unreadable/unparseable: keep prior prefixes/graph (and the persisted
+      // copy) — but never silently: this path arms the 24h throttle.
+      if (graph) this.adoptDerivedGraph(repo, graph);
+      else console.warn(`[poller] ${repo}: ${settings.workflowPath} ${text == null ? `not readable at ${branch}` : 'unparseable'} — keeping prior derived graph (next attempt in 24h)`);
+    } catch (e) {
       // best-effort: config/derived-so-far prefixes keep working
+      this.deriveThrottle.failure(repo, this.now().getTime());
+      console.warn(`[poller] ${repo}: ci.yml derivation failed — will retry with backoff: ${describeError(e)}`);
     }
   }
 
@@ -1077,8 +1189,7 @@ export class Poller extends EventEmitter {
       this.staleSince = null;
       return result;
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.error('[poller] fetch failed:', message);
+      console.error('[poller] fetch failed:', describeError(e));
       if (e instanceof RateLimitError) {
         this.notePause(e.retryAfterSeconds);
         this.emit('ratelimited', e.retryAfterSeconds);
@@ -1093,8 +1204,7 @@ export class Poller extends EventEmitter {
     try {
       await fn();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.error(`[poller] ${name} cycle failed:`, message);
+      console.error(`[poller] ${name} cycle failed:`, describeError(e));
       if (e instanceof RateLimitError) this.notePause(e.retryAfterSeconds);
       if (!this.staleSince) this.staleSince = this.now().toISOString();
     }

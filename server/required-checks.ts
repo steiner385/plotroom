@@ -39,6 +39,50 @@ export interface CiGraph {
   workflowName: string | null;
 }
 
+/** JSON-serializable CiGraph (the `nodes` Map flattened to a plain record) —
+ *  the persisted last-known-good shape stored in the history `meta` table. */
+export interface CiGraphJson {
+  prefixes: string[];
+  nodes: Record<string, CiGraphNode>;
+  workflowName: string | null;
+}
+
+export function ciGraphToJson(g: CiGraph): CiGraphJson {
+  return {
+    prefixes: [...g.prefixes],
+    nodes: Object.fromEntries(g.nodes),
+    workflowName: g.workflowName,
+  };
+}
+
+const isStringArray = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((s) => typeof s === 'string');
+
+function isActivity(v: unknown): v is EventActivity {
+  if (!v || typeof v !== 'object') return false;
+  const a = v as { mode?: unknown; events?: unknown };
+  if (a.mode === 'all') return true;
+  return (a.mode === 'only' || a.mode === 'except') && isStringArray(a.events);
+}
+
+/** Decode a persisted CiGraphJson back into a CiGraph. Null when the value is
+ *  not a structurally valid graph (corrupt/legacy row) — callers treat that as
+ *  "nothing persisted" rather than restoring garbage. */
+export function ciGraphFromJson(raw: unknown): CiGraph | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const g = raw as { prefixes?: unknown; nodes?: unknown; workflowName?: unknown };
+  if (!isStringArray(g.prefixes)) return null;
+  if (g.workflowName !== null && typeof g.workflowName !== 'string') return null;
+  if (!g.nodes || typeof g.nodes !== 'object' || Array.isArray(g.nodes)) return null;
+  const nodes = new Map<string, CiGraphNode>();
+  for (const [prefix, node] of Object.entries(g.nodes)) {
+    const n = node as { needs?: unknown; activity?: unknown } | null;
+    if (!n || typeof n !== 'object' || !isStringArray(n.needs) || !isActivity(n.activity)) return null;
+    nodes.set(prefix, { needs: n.needs, activity: n.activity });
+  }
+  return { prefixes: g.prefixes, nodes, workflowName: g.workflowName ?? null };
+}
+
 /** True unless `activity` PROVES the job never runs for `event`. */
 export function activeForEvent(activity: EventActivity, event: string): boolean {
   if (activity.mode === 'only') return activity.events.includes(event);

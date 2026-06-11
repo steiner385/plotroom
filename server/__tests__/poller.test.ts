@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Poller, type DashboardState } from '../poller';
+import { Poller, RetryThrottle, describeError, type DashboardState } from '../poller';
 import { HistoryStore } from '../history';
 import { RateLimitError } from '../github';
 import { DEFAULTS, type AppConfig } from '../config';
@@ -2481,5 +2481,273 @@ describe('Poller.effectiveHotMs webhook relax', () => {
     const p = new Poller({ client: c as never, history, deploy: noDeploy(),
       config: { ...CONFIG, webhooks: WEBHOOKS_ON, hotMsExplicit: false }, now: () => NOW });
     expect(p.effectiveHotMs()).toBe(60_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Incident 2026-06-11: failure-aware retry + persisted last-known-good.
+// A connectivity blip during startup failed the repo-config fetch and ci.yml
+// derivation, and the old attempt-armed 24h throttle locked the failure in.
+// ---------------------------------------------------------------------------
+
+const enotfound = () => Object.assign(
+  new Error('fetch failed'),
+  { cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), { code: 'ENOTFOUND' }) },
+);
+
+describe('RetryThrottle (failure-aware backoff)', () => {
+  it('success arms the long interval; failure arms 1m/2m/4m/8m capped at 10m', () => {
+    const th = new RetryThrottle(24 * 3600_000);
+    expect(th.due('k', 0)).toBe(true);            // never attempted → due
+    th.success('k', 0);
+    expect(th.due('k', 24 * 3600_000 - 1)).toBe(false);
+    expect(th.due('k', 24 * 3600_000)).toBe(true);
+    // consecutive failures: 60s, 120s, 240s, 480s, then capped at 600s
+    let t = 24 * 3600_000;
+    for (const gap of [60_000, 120_000, 240_000, 480_000, 600_000, 600_000]) {
+      th.failure('k', t);
+      expect(th.due('k', t + gap - 1)).toBe(false);
+      expect(th.due('k', t + gap)).toBe(true);
+      t += gap;
+    }
+    th.success('k', t);                           // success resets the backoff ladder
+    t += 24 * 3600_000;
+    th.failure('k', t);
+    expect(th.due('k', t + 60_000)).toBe(true);   // back to the 1m rung
+  });
+
+  it('keys are independent', () => {
+    const th = new RetryThrottle(24 * 3600_000);
+    th.failure('a', 0);
+    expect(th.due('a', 30_000)).toBe(false);
+    expect(th.due('b', 0)).toBe(true);
+  });
+});
+
+describe('describeError (cause-chain logging)', () => {
+  it('includes the cause code/message; bare errors stay as-is; chains nest', () => {
+    expect(describeError(enotfound())).toBe(
+      'fetch failed (cause: getaddrinfo ENOTFOUND api.github.com)');
+    expect(describeError(new Error('plain boom'))).toBe('plain boom');
+    expect(describeError('string throw')).toBe('string throw');
+    const timeout = Object.assign(new Error('outer'), {
+      cause: Object.assign(new Error('connect timed out'), {
+        code: 'ETIMEDOUT', cause: 'tcp handshake' }),
+    });
+    expect(describeError(timeout)).toBe('outer (cause: ETIMEDOUT connect timed out ← tcp handshake)');
+  });
+});
+
+describe('Poller failure-aware refresh throttles (incident 2026-06-11)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const FILE_YAML = 'rollupJobId: rollup\nbatchSize: 12\n';
+  const NO_DEPLOY_CONFIG: AppConfig = { ...DEFAULTS, owners: ['acme', 'octo'] };
+
+  function repoCfgClient(textBox: { current: string | null; fail?: boolean }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('.pr-dashboard.yml')) {
+          if (textBox.fail) throw enotfound();
+          return { repository: { defaultBranchRef: { name: 'main' },
+            object: textBox.current == null ? null : { text: textBox.current } } };
+        }
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+  const blobCalls = (client: { graphql: ReturnType<typeof vi.fn> }) =>
+    client.graphql.mock.calls.filter(([q]) => (q as string).includes('.pr-dashboard.yml')).length;
+
+  it('a failed repo-config fetch is retried with backoff; success arms the 24h throttle', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let t = NOW.getTime();
+    const textBox = { current: FILE_YAML, fail: true };
+    const client = repoCfgClient(textBox);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();                  // attempt 1: fails
+    expect(blobCalls(client)).toBe(1);
+    // failure log carries the cause chain, one line
+    expect(String(warn.mock.calls.at(-1))).toMatch(/repo-config.*acme\/widgets.*ENOTFOUND/);
+    t += 30_000;
+    await p.refreshRepoConfigs();                  // 30s < 1m backoff — throttled
+    expect(blobCalls(client)).toBe(1);
+    t += 30_000;
+    await p.refreshRepoConfigs();                  // 1m after failure — retried (fails again)
+    expect(blobCalls(client)).toBe(2);
+    t += 60_000;
+    await p.refreshRepoConfigs();                  // 1m < 2m second-failure backoff — throttled
+    expect(blobCalls(client)).toBe(2);
+    t += 60_000;
+    textBox.fail = false;
+    await p.refreshRepoConfigs();                  // 2m after failure — retried, succeeds
+    expect(blobCalls(client)).toBe(3);
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(12);
+    t += 23 * 3600_000;
+    await p.refreshRepoConfigs();                  // success armed 24h — no refetch within it
+    expect(blobCalls(client)).toBe(3);
+    t += 3600_000;
+    await p.refreshRepoConfigs();                  // ≥24h after success — routine refresh
+    expect(blobCalls(client)).toBe(4);
+  });
+
+  it('a failed ci.yml derivation is retried with backoff; success arms 24h', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let t = NOW.getTime();
+    const box = { fail: true };
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => { if (box.fail) throw enotfound(); }),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => 'jobs:\n  lint: {}\n  ci:\n    needs: [lint]\n'),
+    } as unknown as DeployWatcher;
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => new Date(t) });
+    await p.deployOnce();                          // attempt 1: clone fetch fails
+    expect(vi.mocked(deploy.readFileAtHead)).not.toHaveBeenCalled();
+    expect(String(warn.mock.calls.find((c) => String(c).includes('derivation'))))
+      .toMatch(/acme\/widgets.*derivation failed.*ENOTFOUND/);
+    t += 30_000;
+    await p.deployOnce();                          // 30s < 1m backoff — throttled
+    expect(vi.mocked(deploy.fetchClone)).toHaveBeenCalledTimes(1);
+    t += 30_000;
+    box.fail = false;
+    await p.deployOnce();                          // 1m after failure — retried, succeeds
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(1);
+    expect(p.needsFor('acme/widgets', 'ci')).toEqual(['lint']);
+    t += 23 * 3600_000;
+    await p.deployOnce();                          // within the success-armed 24h
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(1);
+    t += 3600_000;
+    await p.deployOnce();                          // ≥24h after success — re-derives
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(2);
+  });
+
+  it('guard() logs the cause chain on a failed sweep (one line, no stack)', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = { remaining: 4000, resetAt: null, graphql: vi.fn(async () => { throw enotfound(); }) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(error).toHaveBeenCalledWith('[poller] fetch failed:',
+      'fetch failed (cause: getaddrinfo ENOTFOUND api.github.com)');
+    expect(p.buildState().staleSince).toBe(NOW.toISOString());
+  });
+});
+
+describe('Poller persisted last-known-good (restart during an outage)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // In-repo file that BOTH configures deploy and feeds settings — the KinDash shape.
+  const FILE_YAML =
+    'batchSize: 12\ndeploy:\n  environments:\n    - name: qa\n      healthUrl: https://qa.file.dev/health\n';
+  const CI_YAML = 'name: CI\njobs:\n  lint: {}\n  build:\n    needs: [lint]\n  ci:\n    needs: [build]\n';
+  const NO_DEPLOY_CONFIG: AppConfig = { ...DEFAULTS, owners: ['acme', 'octo'] };
+
+  const healthyClient = (fileText: string) => ({
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async (q: string) => {
+      if (q.includes('open0: search')) return SWEEP_RESPONSE;
+      if (q.includes('.pr-dashboard.yml')) return {
+        repository: { defaultBranchRef: { name: 'main' }, object: { text: fileText } } };
+      if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+      throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+    }),
+  });
+  const outageClient = () => ({
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async () => { throw enotfound(); }),
+  });
+  const healthyDeploy = () => ({
+    health: vi.fn(async () => null),
+    ensureClone: vi.fn(async () => {}),
+    fetchClone: vi.fn(async () => {}),
+    isAncestor: vi.fn(async () => 'missing' as const),
+    readFileAtHead: vi.fn(async () => CI_YAML),
+  }) as unknown as DeployWatcher;
+  const outageDeploy = () => ({
+    health: vi.fn(async () => null),
+    ensureClone: vi.fn(async () => { throw enotfound(); }),
+    fetchClone: vi.fn(async () => { throw enotfound(); }),
+    isAncestor: vi.fn(async () => 'missing' as const),
+    readFileAtHead: vi.fn(async () => { throw enotfound(); }),
+  }) as unknown as DeployWatcher;
+
+  it('persists repo-config + ci-graph on success; a new Poller with a failing client restores them', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Phase 1 — healthy instance: fetches the in-repo file and derives ci.yml.
+    const p1 = new Poller({ client: healthyClient(FILE_YAML) as never, history,
+      deploy: healthyDeploy(), config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p1.sweepOnce();
+    await p1.deployOnce();
+    expect(JSON.parse(history.getMeta('repoConfig:acme/widgets')!)).toMatchObject({ batchSize: 12 });
+    expect(JSON.parse(history.getMeta('ciGraph:acme/widgets')!)).toMatchObject(
+      { prefixes: ['ci', 'build', 'lint'], workflowName: 'CI' });
+
+    // Phase 2 — process restart during a GitHub outage: every fetch fails.
+    const p2 = new Poller({ client: outageClient() as never, history,
+      deploy: outageDeploy(), config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p2.sweepOnce();   // fails — guard contains it
+    await p2.deployOnce();  // repo-config fetch + derivation both fail
+    // last-known-good in-repo config: settings AND deploy survive
+    expect(p2.settingsFor('acme/widgets').batchSize).toBe(12);
+    expect(p2.effectiveDeploy()['acme/widgets']!.environments[0]!.healthUrl)
+      .toBe('https://qa.file.dev/health');
+    // merged PR 8951 lives in shared history → the repo renders with hasDeploy
+    const repo = p2.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.hasDeploy).toBe(true);
+    // last-known-good derived graph: prefixes, needs nodes, rollup workflow name
+    expect(p2.needsFor('acme/widgets', 'ci')).toEqual(['build']);
+    expect(p2.needsFor('acme/widgets', 'build')).toEqual(['lint']);
+    expect(p2.rollupWorkflowFor('acme/widgets')).toBe('CI');
+    expect(p2.reposReport()['acme/widgets']!.requiredCheckPrefixes)
+      .toEqual({ value: ['ci', 'build', 'lint'], source: 'derived' });
+  });
+
+  it('a fresh successful fetch overwrites the persisted copies', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    history.setMeta('repoConfig:acme/widgets', JSON.stringify({ batchSize: 99 }));
+    history.setMeta('ciGraph:acme/widgets', JSON.stringify(
+      { prefixes: ['stale'], nodes: { stale: { needs: [], activity: { mode: 'all' } } }, workflowName: null }));
+    const p = new Poller({ client: healthyClient(FILE_YAML) as never, history,
+      deploy: healthyDeploy(), config: NO_DEPLOY_CONFIG, now: () => NOW });
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(99);   // restored stale value
+    await p.sweepOnce();
+    await p.deployOnce();                                        // live fetch + derivation
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(12);
+    expect(JSON.parse(history.getMeta('repoConfig:acme/widgets')!)).toMatchObject({ batchSize: 12 });
+    expect(JSON.parse(history.getMeta('ciGraph:acme/widgets')!).prefixes).toEqual(['ci', 'build', 'lint']);
+  });
+
+  it('an absent in-repo file clears the persisted copy; corrupt rows are ignored', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    history.setMeta('repoConfig:acme/widgets', JSON.stringify({ batchSize: 99 }));
+    history.setMeta('ciGraph:acme/widgets', 'not json{{');      // corrupt — must not throw
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('.pr-dashboard.yml')) return {
+          repository: { defaultBranchRef: { name: 'main' }, object: null } };
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => NOW });
+    expect(p.needsFor('acme/widgets', 'ci')).toBeNull();        // corrupt graph row ignored
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();                                // file absent upstream
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(DEFAULTS.batchSize);
+    expect(history.getMeta('repoConfig:acme/widgets')).toBeNull();
   });
 });

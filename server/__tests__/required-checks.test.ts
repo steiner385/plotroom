@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { derivePrefixes, deriveCiGraph, activeForEvent, type CiGraph } from '../required-checks';
+import { derivePrefixes, deriveCiGraph, activeForEvent, ciGraphToJson, ciGraphFromJson, type CiGraph } from '../required-checks';
 
 const needsOf = (g: CiGraph, prefix: string) => g.nodes.get(prefix)?.needs;
 const activeFor = (g: CiGraph, prefix: string, event: string) =>
@@ -295,5 +295,69 @@ jobs:
     expect(activeFor(merged, 'shared', 'pull_request')).toBe(true);
     expect(activeFor(merged, 'shared', 'merge_group')).toBe(true);
     expect(activeFor(merged, 'shared', 'push')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CiGraph JSON encode/decode (persisted last-known-good in the history meta table)
+// ---------------------------------------------------------------------------
+
+describe('ciGraphToJson / ciGraphFromJson', () => {
+  const graph = (): CiGraph => deriveCiGraph(`
+name: CI
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+  build:
+    name: Build /
+    uses: ./.github/workflows/build.yml
+  advisory:
+    if: github.event_name != 'merge_group'
+  ci:
+    needs: [lint, build, advisory]
+`)!;
+
+  it('round-trips a derived graph through JSON.stringify/parse', () => {
+    const g = graph();
+    const back = ciGraphFromJson(JSON.parse(JSON.stringify(ciGraphToJson(g))));
+    expect(back).not.toBeNull();
+    expect(back!.prefixes).toEqual(g.prefixes);
+    expect(back!.workflowName).toBe('CI');
+    expect([...back!.nodes.keys()]).toEqual([...g.nodes.keys()]);
+    for (const [prefix, node] of g.nodes) {
+      expect(back!.nodes.get(prefix)).toEqual(node); // needs + activity preserved
+    }
+    // restored activity still drives event classification
+    expect(activeForEvent(back!.nodes.get('lint')!.activity, 'merge_group')).toBe(false);
+    expect(activeForEvent(back!.nodes.get('advisory')!.activity, 'merge_group')).toBe(false);
+    expect(activeForEvent(back!.nodes.get('advisory')!.activity, 'pull_request')).toBe(true);
+  });
+
+  it('round-trips a null workflowName', () => {
+    const g = deriveCiGraph('jobs:\n  ci: {}\n')!;
+    expect(g.workflowName).toBeNull();
+    expect(ciGraphFromJson(ciGraphToJson(g))!.workflowName).toBeNull();
+  });
+
+  it('rejects structurally invalid values (corrupt/legacy rows)', () => {
+    expect(ciGraphFromJson(null)).toBeNull();
+    expect(ciGraphFromJson('ci')).toBeNull();
+    expect(ciGraphFromJson([])).toBeNull();
+    expect(ciGraphFromJson({})).toBeNull();                                 // no prefixes
+    expect(ciGraphFromJson({ prefixes: 'ci', nodes: {}, workflowName: null })).toBeNull();
+    expect(ciGraphFromJson({ prefixes: ['ci'], nodes: [], workflowName: null })).toBeNull();
+    expect(ciGraphFromJson({ prefixes: ['ci'], nodes: {}, workflowName: 7 })).toBeNull();
+    expect(ciGraphFromJson({ prefixes: ['ci'],                              // bad node needs
+      nodes: { ci: { needs: 'lint', activity: { mode: 'all' } } }, workflowName: null })).toBeNull();
+    expect(ciGraphFromJson({ prefixes: ['ci'],                              // bad activity mode
+      nodes: { ci: { needs: [], activity: { mode: 'sometimes' } } }, workflowName: null })).toBeNull();
+    expect(ciGraphFromJson({ prefixes: ['ci'],                              // only/except need events
+      nodes: { ci: { needs: [], activity: { mode: 'only' } } }, workflowName: null })).toBeNull();
+  });
+
+  it('accepts a minimal valid value', () => {
+    const g = ciGraphFromJson({ prefixes: ['ci'],
+      nodes: { ci: { needs: [], activity: { mode: 'all' } } }, workflowName: null });
+    expect(g!.nodes.get('ci')).toEqual({ needs: [], activity: { mode: 'all' } });
   });
 });
