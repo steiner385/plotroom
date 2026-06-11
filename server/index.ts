@@ -1,0 +1,143 @@
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadConfig, resolveOwners, writeConfigPatch, configFileSources, type AppConfig } from './config';
+import { createTokenSource, type TokenProvider } from './auth';
+import { GithubClient } from './github';
+import { HistoryStore } from './history';
+import { DeployWatcher } from './deploy-watcher';
+import { Poller } from './poller';
+import { deriveCiGraph } from './required-checks';
+import { backfillRepo } from './backfill';
+import { createApp } from './api';
+import { loadWebhookSecret } from './webhooks';
+import { dataDir, staticDir, configPath } from './paths';
+
+async function main() {
+  let config: AppConfig;
+  try {
+    config = loadConfig();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+
+  // Webhooks enabled → the secret must be readable at startup (fail fast, clearly).
+  let webhookSecret: string | null = null;
+  if (config.webhooks.enabled) {
+    try {
+      webhookSecret = loadWebhookSecret(config.webhooks.secretPath!);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(1);
+    }
+  }
+
+  let tokens: TokenProvider;
+  try {
+    tokens = createTokenSource(config); // 'app' validates the key file here
+    await tokens.get();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    console.error(config.tokenSource === 'env'
+      ? 'Set GITHUB_TOKEN — config tokenSource is "env".'
+      : config.tokenSource === 'app'
+        ? 'Check app.appId / app.privateKeyPath (and that the App is installed) — config tokenSource is "app".'
+        : 'Run `gh auth login` first — the dashboard uses your gh keyring token.');
+    process.exit(1);
+  }
+
+  const clonesDir = join(dataDir(), 'clones');
+  mkdirSync(clonesDir, { recursive: true });
+  const history = new HistoryStore(join(dataDir(), 'history.db'));
+  const client = new GithubClient(tokens, fetch, {
+    onPartialErrors: (msgs) => console.warn('[github] partial response errors:', msgs.join('; ')),
+    apiUrl: config.apiUrl,
+  });
+  // No owners configured → watch the token owner's PRs (one viewer query).
+  try {
+    await resolveOwners(config, client);
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    console.error('Configure "owners" in config.json or fix the token, then restart.');
+    process.exit(1);
+  }
+
+  const deploy = new DeployWatcher(clonesDir);
+  const poller = new Poller({ client, history, deploy, config });
+
+  // In-repo `.pr-dashboard.yml` for every configured repo (GraphQL blob read) —
+  // must land before derivation so in-repo workflowPath/rollupJobId apply.
+  await poller.refreshRepoConfigs();
+
+  // Derive required-check prefixes from each deploy repo's workflow needs-graph.
+  // Best-effort: on failure the poller falls back to configured prefixes (if any),
+  // and the deploy cycle re-derives every 24h.
+  for (const [repo, dc] of Object.entries(poller.effectiveDeploy())) {
+    try {
+      const settings = poller.settingsFor(repo);
+      await deploy.ensureClone(repo, dc.cloneUrl);
+      const ciYaml = await deploy.readFileAtHead(repo, settings.workflowPath, dc.defaultBranch);
+      const graph = ciYaml != null ? deriveCiGraph(ciYaml, settings.rollupJobId) : null;
+      if (graph) {
+        poller.setDerivedPrefixes(repo, graph.prefixes);
+        poller.setDerivedGraph(repo, graph.nodes);
+        poller.setRollupWorkflowName(repo, graph.workflowName);
+      } else console.warn(`[index] ${repo}: ${settings.workflowPath} ${ciYaml == null ? 'not readable' : 'unparseable'} — using configured prefixes only`);
+    } catch (e) {
+      console.warn(`[index] prefix derivation failed for ${repo}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (!history.getMeta('backfilled')) {
+    // On a fresh DB, set lastSweep 7 days back so the startup merged-window covers 7 days.
+    history.setMeta('lastSweep', new Date(Date.now() - 7 * 86400_000).toISOString());
+    console.log('First launch: backfilling check-run history…');
+    await poller.sweepOnce(true);                   // deep sweep: paginate the 7-day merged window
+    const repos = new Set<string>(Object.keys(poller.effectiveDeploy()));
+    // backfill every repo that has an open PR too
+    for (const { repo } of poller.getState().repos.flatMap((r) => r.prs)) repos.add(repo);
+    for (const repo of repos) {
+      await backfillRepo(client, history, repo, 5, (n) => poller.needsFor(repo, n),
+        (p, e) => poller.needActiveFor(repo, p, e), poller.graphKeysFor(repo),
+        poller.rollupWorkflowFor(repo))
+        .catch((e) => console.warn(`backfill ${repo}: ${e}`));
+    }
+    history.setMeta('backfilled', new Date().toISOString());
+  }
+
+  poller.start();
+  const cfgPath = configPath();
+  const app = createApp({
+    getState: () => poller.getState(),
+    bus: poller,
+    staticDir: process.env.NODE_ENV === 'production' ? staticDir() : undefined,
+    config: {
+      get: () => config,
+      writableTo: cfgPath,
+      fileSources: () => configFileSources(cfgPath),
+      repos: () => poller.reposReport(),
+      apply: (patch) => {
+        const next = writeConfigPatch(cfgPath, patch);
+        // owners may have been token-derived at startup; a file without an
+        // owners key must not regress the running set to []
+        if (next.owners.length === 0) next.owners = config.owners;
+        config = next;
+        poller.reconfigure(next);
+      },
+    },
+    webhooks: webhookSecret != null ? {
+      path: config.webhooks.path,
+      secret: webhookSecret,
+      nudge: (route) => poller.nudge(route),
+    } : undefined,
+    restart: {},
+  });
+  app.listen(config.port, '127.0.0.1', () => {
+    console.log(`pr-dashboard on http://127.0.0.1:${config.port}`);
+    if (webhookSecret != null) {
+      console.log(`[webhooks] receiver enabled at POST ${config.webhooks.path} (loopback — use a tunnel for ingress)`);
+    }
+  });
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

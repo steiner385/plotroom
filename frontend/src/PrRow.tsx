@@ -1,0 +1,94 @@
+import { useState } from 'react';
+import type { PrView, StageAccuracy } from './types';
+import { formatDur, formatEta, stageLabel } from './format';
+import { MetroTrack } from './MetroTrack';
+import { CheckGantt } from './CheckGantt';
+
+/** Muted one-line status under the track: percent + active-check for ci,
+ *  substate reason for parked, group/position info for queue. */
+function subLine(pr: PrView): string | null {
+  const s = pr.stage;
+  if (s.stage === 'parked') return stageLabel(s.stage, s.substate);
+  if (s.stage === 'queue') {
+    const parts: string[] = [];
+    if (s.substate === 'group-failed') parts.push('Queue group failed');
+    // queue percent always tracks the merge-group build, never head-commit checks —
+    // label it so the sub line can't be misread against the PR-checks panel
+    if (s.percent != null) parts.push(`group ${s.percent}%`);
+    if (pr.queueAheadCount != null && pr.queueAheadCount > 0) parts.push(`behind ${pr.queueAheadCount}`);
+    return parts.length ? parts.join(' · ') : null;
+  }
+  if (s.stage === 'ci') {
+    const parts: string[] = [];
+    if (s.substate === 'retrying') parts.push('CI retrying');
+    if (s.percent != null) parts.push(`${s.percent}%`);
+    const running = pr.checks
+      .filter((c) => c.isRequired && c.status !== 'COMPLETED' && c.elapsedSeconds != null)
+      .sort((a, b) => (b.elapsedSeconds ?? 0) - (a.elapsedSeconds ?? 0))[0];
+    if (running) {
+      const expected = running.expectedSeconds != null ? ` of ~${formatDur(running.expectedSeconds)}` : '';
+      parts.push(`${running.name} running ${formatDur(running.elapsedSeconds!)}${expected}`);
+    } else {
+      // No required check is IN_PROGRESS — check if any are waiting for a runner
+      const runnerWaits = pr.checks.filter(
+        (c) => c.isRequired && c.waitKind === 'runner',
+      );
+      if (runnerWaits.length > 0) {
+        // Drop percent from parts (runner-wait replaces the normal ci sub line)
+        parts.length = 0;
+        const maxExpected = runnerWaits.reduce<number | null>(
+          (acc, c) => c.expectedRunnerWaitSeconds != null
+            ? Math.max(acc ?? 0, c.expectedRunnerWaitSeconds)
+            : acc,
+          null,
+        );
+        const typical = maxExpected != null ? ` · typical ~${formatDur(maxExpected)}` : '';
+        return `waiting for runners (${runnerWaits.length} jobs)${typical}`;
+      }
+    }
+    return parts.length ? parts.join(' · ') : null;
+  }
+  return stageLabel(s.stage, s.substate);
+}
+
+export function PrRow({ pr, hasDeploy, accuracy }: {
+  pr: PrView; hasDeploy: boolean; accuracy?: Record<string, StageAccuracy>;
+}) {
+  const [open, setOpen] = useState(false);
+  const s = pr.stage;
+  const parked = s.stage === 'parked';
+  const eta = formatEta(s.etaSeconds, s.etaRangeSeconds, s.overdue);
+  const sub = subLine(pr);
+  return (
+    <div id={`pr-${pr.number}`} className={`pr-row ${parked ? `parked ${s.substate ?? ''}` : ''}`}>
+      <div className="pr-main" onClick={() => setOpen(!open)}>
+        <div className="pr-head">
+          <span className="pr-num">#{pr.number}</span>
+          <a className="pr-title" href={pr.url} target="_blank" rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}>{pr.title}</a>
+          {eta && <span className={`eta ${s.overdue ? 'overdue' : ''}`}>{eta}</span>}
+        </div>
+        <MetroTrack stage={s} hasDeploy={hasDeploy} />
+        {sub && <div className="sub">{sub}</div>}
+      </div>
+      {open && pr.groupChecks && pr.groupChecks.length > 0 ? (
+        /* Queued PR: the merge-group build (the run driving the stage ETA) gets
+           its own labeled section, head-commit PR checks render below it. The
+           ETA-accuracy footer appears once, on the bottom section. */
+        <div className="check-sections">
+          <div className="panel-label">merge group build</div>
+          <CheckGantt checks={pr.groupChecks} stage={s.stage}
+            accuracy={pr.checks.length === 0 ? accuracy?.[s.stage] : undefined} />
+          {pr.checks.length > 0 && (
+            <>
+              <div className="panel-label">PR checks (head commit)</div>
+              <CheckGantt checks={pr.checks} stage={s.stage} accuracy={accuracy?.[s.stage]} />
+            </>
+          )}
+        </div>
+      ) : (open && pr.checks.length > 0 && (
+        <CheckGantt checks={pr.checks} stage={s.stage} accuracy={accuracy?.[s.stage]} />
+      ))}
+    </div>
+  );
+}

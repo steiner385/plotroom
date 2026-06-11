@@ -1,0 +1,1144 @@
+import { EventEmitter } from 'node:events';
+import type { GithubClient } from './github';
+import { RateLimitError } from './github';
+import type { HistoryStore, MergedPrRecord } from './history';
+import type { DeployWatcher } from './deploy-watcher';
+import { effectiveRepoSettings, effectiveDeployMap, type AppConfig, type DeployConfig, type RepoSettings } from './config';
+import { parseRepoConfig, REPO_CONFIG_PATH, type RepoFileConfig } from './repo-config';
+import type { WebhookRoute } from './webhooks';
+import { deriveCiGraph, activeForEvent, type CiGraphNode } from './required-checks';
+import type { PrSnapshot, StageResult, QueueEntry, CheckRun } from './types';
+import { buildSweepQuery, buildMergedPageQuery, buildDetailQuery, buildQueueQuery, buildOidRollupQuery, buildBlobQuery } from './queries';
+import { mapPrNode, mapQueueEntries, mapRollupContexts } from './map';
+import { computeProgress } from './estimator/progress';
+import { classify, requiredChecks, matchesRequiredPrefix, matchingPrefix, workflowScopeAllows, type DeployInfo } from './estimator/classify';
+import { queueStage, type GroupProgress, type QueueStageResult } from './estimator/queue';
+import { classifyWait, extractRunnerWaits, type NeedActivePredicate } from './estimator/waits';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+export interface CheckView {
+  name: string; status: string; conclusion: string | null; isRequired: boolean;
+  workflowName: string | null;
+  elapsedSeconds: number | null; expectedSeconds: number | null; url: string | null;
+  waitKind: 'runner' | 'blocked' | 'unknown' | null; blockedOn: string | null;
+  waitingSeconds: number | null; expectedRunnerWaitSeconds: number | null;
+}
+
+export interface PrView {
+  repo: string; number: number; title: string; url: string;
+  stage: StageResult;
+  queueAheadCount: number | null;
+  checks: CheckView[];
+  /** Queued PRs only: the merge-group build's checks (the run driving the queue
+   *  stage ETA), so the UI can label it separately from head-commit PR checks.
+   *  Null when not queued or the group rollup hasn't been fetched yet. */
+  groupChecks: CheckView[] | null;
+}
+
+/**
+ * Shared check-set ingestion (detail fetch, group-rollup fetch, backfill):
+ * records completed-check durations AND runner-pickup wait samples derived from
+ * the needs graph (wait = startedAt − max(needed completedAt), no extra API calls).
+ */
+export function ingestCheckSet(history: HistoryStore, repo: string, checks: CheckRun[],
+  needsFor: (canonicalName: string) => string[] | null,
+  activeFor: NeedActivePredicate = () => true,
+  graphKeys: readonly string[] | null = null,
+  rollupWorkflowName: string | null = null): void {
+  for (const c of checks) {
+    if (c.status === 'COMPLETED') {
+      history.recordCheckDuration(repo, c.name, c.event, c.startedAt, c.completedAt, c.conclusion ?? 'UNKNOWN');
+    }
+  }
+  for (const s of extractRunnerWaits(checks, needsFor, activeFor, graphKeys, rollupWorkflowName)) {
+    history.recordRunnerWait(repo, s.name, s.event, s.waitSecs, s.startedAt);
+  }
+}
+export interface StageAccuracy { medianAbsErrSecs: number; n: number; }
+
+/** Which config layer a per-repo setting value came from (GET /api/config). */
+export type SettingSource = 'override' | 'in-repo' | 'derived' | 'default';
+export interface RepoSettingsReport {
+  rollupJobId: { value: string; source: SettingSource };
+  workflowPath: { value: string; source: SettingSource };
+  batchSize: { value: number; source: SettingSource };
+  requiredCheckPrefixes: { value: string[] | null; source: SettingSource };
+  deploy: { value: DeployConfig | null; source: SettingSource };
+}
+export interface QueueGroupView {
+  oid: string;
+  prNumbers: number[];
+  percent: number | null;
+  etaSeconds: number | null;
+  failed: boolean;
+}
+export interface RepoQueueView {
+  groups: QueueGroupView[];
+  waiting: { prNumber: number; position: number }[];
+  batchSize: number;
+}
+export interface DashboardState {
+  generatedAt: string;
+  staleSince: string | null;
+  repos: { repo: string; hasDeploy: boolean; accuracy: Record<string, StageAccuracy>; prs: PrView[]; queue: RepoQueueView | null }[];
+}
+
+interface PollerDeps {
+  client: GithubClient;
+  history: HistoryStore;
+  deploy: DeployWatcher;
+  config: AppConfig;
+  now?: () => Date;
+}
+
+const STAGE_ORDER: Record<string, number> = {
+  'awaiting-prod': 6, 'qa-deploy': 5, merged: 4, queue: 3, ci: 2, ready: 1, parked: 0,
+};
+
+/** After every live check has been COMPLETED this long, absent expected names are
+ *  considered path-gated for this PR (they aren't coming) and drop out of the set. */
+const EXPECTED_SET_STALE_MS = 10 * 60_000;
+
+/** Delay floor for the sweep cycle when the rate-limit budget runs low. */
+const SWEEP_LOW_BUDGET_MS = 300_000;
+
+/** Re-check ancestry for the same (sha, deployedSha) pair at most once per minute. */
+const ANCESTRY_THROTTLE_MS = 60_000;
+
+/** Page cap per owner for the startup (7-day window) deep merged sweep. */
+const MAX_MERGED_PAGES = 12;
+
+/** Re-derive required-check prefixes from a deploy repo's ci.yml at most this often. */
+const PREFIX_DERIVE_INTERVAL_MS = 24 * 3600_000;
+
+/** Stages whose first ETA prediction is scored against the actual stage duration. */
+const ETA_TRACKED_STAGES = new Set(['ci', 'queue', 'qa-deploy']);
+
+/** Force an SSE emission (bypassing the unchanged-signature skip) when this long
+ *  has passed since the last actual emission — keeps clients' generatedAt fresh. */
+const EMIT_KEEPALIVE_MS = 60_000;
+
+interface StageTrack { stageId: string; enteredAt: number; firstEta: number | null; }
+
+type DelayKind = 'hot' | 'sweep' | 'deploy';
+
+export class Poller extends EventEmitter {
+  private prs = new Map<string, PrSnapshot>();            // key repo#number
+  private stages = new Map<string, StageResult>();        // previous stage per PR (UNKNOWN-hold)
+  private queueEntries = new Map<string, QueueEntry[]>(); // per repo
+  private groupChecks = new Map<string, CheckRun[]>();    // group head oid → checks
+  private recordedGroups = new Set<string>();             // oids whose completed run was recorded
+  private queueEnqueuedAt = new Map<string, string>();    // PR key → enqueuedAt while queued
+  private stageTracker = new Map<string, StageTrack>();   // PR key → current stage + first ETA
+  private repoFileConfigs = new Map<string, RepoFileConfig>(); // repo → parsed .pr-dashboard.yml
+  private repoConfigFetchedAt = new Map<string, number>();     // repo → last fetch attempt (ms)
+  private repoConfigSig = new Map<string, string>();           // repo → loaded-config signature (log-on-change)
+  private derivedPrefixes = new Map<string, string[]>();  // repo → ci.yml-derived prefixes
+  private derivedGraph = new Map<string, Map<string, CiGraphNode>>(); // repo → node prefix → { needs, activity }
+  private derivedWorkflowName = new Map<string, string | null>();     // repo → rollup workflow display name
+  private prefixDerivedAt = new Map<string, number>();    // repo → last derivation attempt (ms)
+  private envShas = new Map<string, string | null>();     // repo/env → deployed sha
+  private propagating = new Set<string>();                // merged PR keys whose sha is 'missing'
+  private seenNotLive = new Set<string>();                // "repo#number/env" observed not-live here
+  private ancestryCheckedAt = new Map<string, number>();  // "sha:deployedSha" → last check (ms)
+  private staleSince: string | null = null;
+  private pauseUntil = 0;                                 // rate-limit pause (epoch ms)
+  private inFlight = new Set<string>();                   // re-entrancy latches per cycle
+  private timers = new Set<NodeJS.Timeout>();
+  private running = false;
+  private generation = 0;        // bumped by stop()+start(); arm closures bail on mismatch
+  private lastState: DashboardState | null = null;
+  private lastEmittedSig: string | null = null;   // serialization with generatedAt blanked
+  private lastEmittedAt = 0;                      // epoch ms of the last actual emission
+  private now: () => Date;
+
+  constructor(private deps: PollerDeps) {
+    super();
+    this.now = deps.now ?? (() => new Date());
+  }
+
+  // ---- fetch cycles -------------------------------------------------------
+
+  /**
+   * @param deepMergedSweep startup-only (fresh DB): the merged window spans 7 days and
+   * can exceed one search page — follow pagination up to MAX_MERGED_PAGES per owner.
+   * Routine incremental sweeps (90s..minutes window) stay single-page.
+   */
+  async sweepOnce(deepMergedSweep = false): Promise<void> {
+    return this.withLatch('sweep', () => this.sweepImpl(deepMergedSweep));
+  }
+
+  private async sweepImpl(deepMergedSweep: boolean): Promise<void> {
+    const { client, history, config } = this.deps;
+    const sweepStartedAt = this.now(); // captured BEFORE the fetch: next window must overlap it
+    const since = history.getMeta('lastSweep') ?? new Date(sweepStartedAt.getTime() - 90_000).toISOString();
+    const data = await this.guard(() => client.graphql<Record<string, any>>(buildSweepQuery(config.owners, since)));
+    if (!data) return;
+    const seenOpen = new Set<string>();
+    let warnedTruncation = false;
+    for (const [alias, payload] of Object.entries(data)) {
+      if (!alias.startsWith('open') && !alias.startsWith('merged')) continue;
+      const nodes: any[] = (payload as any)?.nodes ?? [];
+      const issueCount: number = (payload as any)?.issueCount ?? 0;
+      const pageInfo = (payload as any)?.pageInfo as { hasNextPage?: boolean; endCursor?: string | null } | undefined;
+      const owner = config.owners[Number(alias.replace(/^\D+/, ''))] ?? '?';
+      const willPaginate = deepMergedSweep && alias.startsWith('merged')
+        && !!pageInfo?.hasNextPage && !!pageInfo.endCursor;
+      if (!warnedTruncation && issueCount > nodes.length && !willPaginate) {
+        console.warn(`[poller] sweep truncated: ${alias} (owner ${owner}) returned ${nodes.length} of ${issueCount} PRs`);
+        warnedTruncation = true;
+      }
+      for (const node of nodes) this.ingestSweepNode(node, seenOpen);
+      if (willPaginate) await this.fetchMergedPages(owner, since, pageInfo!.endCursor!, seenOpen);
+    }
+    // drop open PRs that vanished (closed without merge)
+    for (const key of this.prs.keys()) if (!seenOpen.has(key)) this.prs.delete(key);
+    this.pruneCaches(seenOpen);
+    history.setMeta('lastSweep', sweepStartedAt.toISOString());
+    this.emitUpdate();
+  }
+
+  private ingestSweepNode(node: any, seenOpen: Set<string>): void {
+    const { history, config } = this.deps;
+    const repo = node.repository.nameWithOwner as string;
+    if (config.exclude.includes(repo)) return;
+    const key = `${repo}#${node.number}`;
+    if (node.mergedAt) {
+      this.recordQueueWaitOnMerge(key, repo, node.mergedAt);
+      this.recordEtaAccuracyOnMerge(key, repo, node.mergedAt);
+      history.upsertMergedPr({ repo, number: node.number, title: node.title, url: node.url,
+        mergedAt: node.mergedAt, mergeCommitSha: node.mergeCommit?.oid ?? null });
+      this.prs.delete(key); // no longer an open PR snapshot
+    } else {
+      seenOpen.add(key);
+      if (!this.prs.has(key)) {
+        // placeholder until detail fetch fills it in
+        this.prs.set(key, { repo, number: node.number, title: node.title, url: node.url,
+          headSha: '', isDraft: !!node.isDraft, mergeStateStatus: null, mergedAt: null,
+          mergeCommitSha: null, autoMergeArmed: false, queue: null, checks: [] });
+      }
+    }
+  }
+
+  /** Startup deep sweep: follow merged-search pagination (pages 2..MAX) for one owner. */
+  private async fetchMergedPages(owner: string, since: string, cursor: string, seenOpen: Set<string>): Promise<void> {
+    const { client } = this.deps;
+    for (let page = 2; page <= MAX_MERGED_PAGES; page++) {
+      const data = await this.guard(() => client.graphql<Record<string, any>>(
+        buildMergedPageQuery(owner, since, cursor)));
+      if (!data) return;
+      const payload = (data as any).merged;
+      for (const node of payload?.nodes ?? []) this.ingestSweepNode(node, seenOpen);
+      const pageInfo = payload?.pageInfo as { hasNextPage?: boolean; endCursor?: string | null } | undefined;
+      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) return;
+      cursor = pageInfo.endCursor;
+    }
+    console.warn(`[poller] deep merged sweep for ${owner} stopped at the ${MAX_MERGED_PAGES}-page cap`);
+  }
+
+  /** Drop cache entries whose subject is gone — these Maps are otherwise unbounded. */
+  private pruneCaches(openKeys: Set<string>): void {
+    const { history, config } = this.deps;
+    const tracked = new Set(history.listTrackedMerged(config.retentionDays, this.now())
+      .map((r) => `${r.repo}#${r.number}`));
+    for (const key of this.stages.keys()) {
+      if (!openKeys.has(key) && !tracked.has(key)) this.stages.delete(key);
+    }
+    for (const key of this.stageTracker.keys()) {
+      if (!openKeys.has(key) && !tracked.has(key)) this.stageTracker.delete(key);
+    }
+    for (const key of this.propagating) {
+      if (!tracked.has(key)) this.propagating.delete(key);
+    }
+    for (const envKey of this.seenNotLive) {
+      const prKey = envKey.slice(0, envKey.lastIndexOf('/'));
+      if (!tracked.has(prKey)) this.seenNotLive.delete(envKey);
+    }
+    const queuedRepos = new Set([...this.prs.values()].filter((p) => p.queue).map((p) => p.repo));
+    for (const repo of this.queueEntries.keys()) {
+      if (!queuedRepos.has(repo)) this.queueEntries.delete(repo);
+    }
+    const liveOids = new Set([...this.queueEntries.values()].flat()
+      .map((e) => e.headCommitOid).filter((o): o is string => !!o));
+    for (const oid of this.groupChecks.keys()) {
+      if (!liveOids.has(oid)) this.groupChecks.delete(oid);
+    }
+    for (const oid of this.recordedGroups) {
+      if (!liveOids.has(oid)) this.recordedGroups.delete(oid);
+    }
+    for (const key of this.queueEnqueuedAt.keys()) {
+      if (!openKeys.has(key)) this.queueEnqueuedAt.delete(key);
+    }
+  }
+
+  /** @param onlyKey webhook nudges: restrict the fetch to one tracked PR (`repo#number`). */
+  async detailOnce(onlyHot = false, onlyKey?: string): Promise<void> {
+    return this.withLatch('detail', () => this.detailImpl(onlyHot, onlyKey));
+  }
+
+  private async detailImpl(onlyHot: boolean, onlyKey?: string): Promise<void> {
+    const { client, history } = this.deps;
+    const targets = [...this.prs.values()].filter((pr) => onlyKey
+      ? `${pr.repo}#${pr.number}` === onlyKey
+      : (!onlyHot || this.isHot(pr)));
+    if (!targets.length) return;
+    const data = await this.guard(() => client.graphql<Record<string, any>>(buildDetailQuery(
+      targets.map((p) => {
+        const [owner, name] = p.repo.split('/');
+        return { owner, name, number: p.number };
+      }),
+    )));
+    if (!data) return;
+    for (const repoPayload of Object.values(data)) {
+      if (!repoPayload || typeof repoPayload !== 'object' || !(repoPayload as any).nameWithOwner) continue;
+      const repo = (repoPayload as any).nameWithOwner as string;
+      for (const [alias, node] of Object.entries(repoPayload as Record<string, any>)) {
+        if (!alias.startsWith('pr')) continue;
+        const snap = mapPrNode(repo, node);
+        if (!snap) continue; // null alias: PR inaccessible/deleted — keep last snapshot
+        const key = `${repo}#${snap.number}`;
+        this.prs.set(key, snap);
+        if (snap.mergedAt) {
+          this.recordQueueWaitOnMerge(key, repo, snap.mergedAt);
+          this.recordEtaAccuracyOnMerge(key, repo, snap.mergedAt);
+          history.upsertMergedPr({ repo, number: snap.number, title: snap.title, url: snap.url,
+            mergedAt: snap.mergedAt, mergeCommitSha: snap.mergeCommitSha });
+          this.prs.delete(key);
+        } else if (snap.queue) {
+          // remember enqueuedAt while the PR sits in the queue — the merged detail
+          // fetch deletes the snapshot, so this must be captured beforehand
+          if (snap.queue.enqueuedAt) this.queueEnqueuedAt.set(key, snap.queue.enqueuedAt);
+        } else {
+          this.queueEnqueuedAt.delete(key); // dequeued without merging — no wait sample
+        }
+        ingestCheckSet(history, repo, snap.checks, (n) => this.needsFor(repo, n),
+          (p, e) => this.needActiveFor(repo, p, e), this.graphKeysFor(repo),
+          this.rollupWorkflowFor(repo));
+      }
+    }
+    this.emitUpdate();
+  }
+
+  async queueOnce(): Promise<void> {
+    return this.withLatch('queue', () => this.queueImpl());
+  }
+
+  private async queueImpl(): Promise<void> {
+    const { client, config } = this.deps;
+    const queuedRepos = new Set([...this.prs.values()].filter((p) => p.queue).map((p) => p.repo));
+    for (const repo of queuedRepos) {
+      const [owner, name] = repo.split('/');
+      const branch = this.effectiveDeploy()[repo]?.defaultBranch ?? 'main';
+      const data = await this.guard(() => client.graphql<any>(buildQueueQuery(owner, name, branch)));
+      if (!data) continue;
+      const entries = mapQueueEntries(data.repository?.mergeQueue);
+      this.queueEntries.set(repo, entries);
+      const oids = entries.map((e) => e.headCommitOid).filter((o): o is string => !!o)
+        .filter((o) => !this.groupCompleted(o));
+      if (oids.length) {
+        const rollups = await this.guard(() => client.graphql<any>(buildOidRollupQuery(owner, name, oids)));
+        if (rollups) {
+          for (const node of Object.values(rollups.repository ?? {})) {
+            const commit = node as any;
+            if (!commit?.oid) continue;
+            const checks = mapRollupContexts(commit.statusCheckRollup?.contexts?.nodes ?? [], true);
+            this.groupChecks.set(commit.oid, checks);
+            ingestCheckSet(this.deps.history, repo, checks, (n) => this.needsFor(repo, n),
+              (p, e) => this.needActiveFor(repo, p, e), this.graphKeysFor(repo),
+              this.rollupWorkflowFor(repo));
+            this.maybeRecordGroupRun(repo, commit.oid, checks);
+          }
+        }
+      }
+    }
+    this.emitUpdate();
+  }
+
+  async deployOnce(): Promise<void> {
+    return this.withLatch('deploy', () => this.deployImpl());
+  }
+
+  private async deployImpl(): Promise<void> {
+    const { deploy, history, config } = this.deps;
+    // In-repo config refresh shares this cycle (24h per-repo throttle inside) —
+    // a repo that BECOMES a deploy repo via its file activates in the same pass.
+    await this.refreshRepoConfigs();
+    const now = this.now();
+    // expire old throttle entries so the map stays bounded
+    for (const [k, at] of this.ancestryCheckedAt) {
+      if (now.getTime() - at > 10 * ANCESTRY_THROTTLE_MS) this.ancestryCheckedAt.delete(k);
+    }
+    for (const [repo, dc] of Object.entries(this.effectiveDeploy())) {
+      await deploy.ensureClone(repo, dc.cloneUrl).catch(() => {});
+      await this.maybeRederivePrefixes(repo, dc.defaultBranch);
+      for (const env of dc.environments) {
+        const sha = await deploy.health(env.healthUrl, env.shaKey);
+        this.envShas.set(`${repo}/${env.name}`, sha);
+        if (!sha) continue;
+        for (const rec of history.listTrackedMerged(config.retentionDays, now)) {
+          if (rec.repo !== repo || !rec.mergeCommitSha) continue;
+          const liveAt = env.name === 'qa' ? rec.qaLiveAt : rec.prodLiveAt;
+          if (liveAt) continue;
+          // throttle per (sha, deployedSha): 'missing' answers trigger a git fetch
+          // inside isAncestor — re-asking every cycle would be a fetch storm
+          const throttleKey = `${rec.mergeCommitSha}:${sha}`;
+          const lastChecked = this.ancestryCheckedAt.get(throttleKey);
+          if (lastChecked != null && now.getTime() - lastChecked < ANCESTRY_THROTTLE_MS) continue;
+          this.ancestryCheckedAt.set(throttleKey, now.getTime());
+          const anc = await deploy.isAncestor(repo, rec.mergeCommitSha, sha);
+          const key = `${repo}#${rec.number}`;
+          const envKey = `${key}/${env.name}`;
+          if (anc === 'missing') this.propagating.add(key);
+          else this.propagating.delete(key);
+          if (anc === 'no') this.seenNotLive.add(envKey);
+          if (anc === 'yes') {
+            history.markEnvLive(repo, rec.number, env.name, now.toISOString());
+            // Record a deploy-gap sample only when THIS instance previously observed the
+            // PR not-live on this env. A PR found already live at first observation has
+            // an unknowable merged→live wall-clock gap (e.g. process started hours after
+            // the deploy) — recording now-mergedAt would poison the median (~31h vs ~10m).
+            if (env.name === 'qa' && this.seenNotLive.has(envKey)) {
+              history.recordDeployGap(repo, 'qa', (now.getTime() - Date.parse(rec.mergedAt)) / 1000);
+            }
+            this.seenNotLive.delete(envKey);
+          }
+        }
+      }
+    }
+    this.emitUpdate();
+  }
+
+  // ---- in-repo .pr-dashboard.yml --------------------------------------------
+
+  /** Repos whose in-repo config is worth fetching: every repo with a live PR
+   *  snapshot plus everything the instance config mentions. */
+  private watchedRepos(): Set<string> {
+    const repos = new Set<string>();
+    for (const pr of this.prs.values()) repos.add(pr.repo);
+    for (const repo of Object.keys(this.deps.config.deploy)) repos.add(repo);
+    for (const repo of Object.keys(this.deps.config.repos ?? {})) repos.add(repo);
+    return repos;
+  }
+
+  /** Per-repo settings with every layer applied except derivation:
+   *  instance override > in-repo `.pr-dashboard.yml` > defaults. */
+  settingsFor(repo: string): RepoSettings {
+    return effectiveRepoSettings(repo, this.deps.config, this.repoFileConfigs.get(repo));
+  }
+
+  /** Effective deploy map (instance `deploy.*` override > in-repo file). */
+  effectiveDeploy(): Record<string, DeployConfig> {
+    return effectiveDeployMap(this.deps.config, this.repoFileConfigs);
+  }
+
+  /** Parsed in-repo config for a repo (Z2 source attribution); undefined when absent. */
+  repoFileConfigFor(repo: string): RepoFileConfig | undefined {
+    return this.repoFileConfigs.get(repo);
+  }
+
+  /**
+   * Hot-apply a new instance config: swap it in and re-arm the timer chain so the
+   * new intervals take effect immediately (stop+start also fires an immediate
+   * sweep, which prunes by the new exclude/retention). No fetch state is lost —
+   * caches, history, and in-repo configs all survive the swap.
+   */
+  reconfigure(cfg: AppConfig): void {
+    this.deps.config = cfg;
+    console.log('[poller] reconfigured (hot-apply)');
+    if (!this.running) return;
+    this.stop();
+    this.start();
+  }
+
+  /** Effective per-repo settings with per-field source attribution (GET /api/config). */
+  reposReport(): Record<string, RepoSettingsReport> {
+    const out: Record<string, RepoSettingsReport> = {};
+    const deployMap = this.effectiveDeploy();
+    const src = (override: boolean, inRepo: boolean, derived = false): SettingSource =>
+      override ? 'override' : inRepo ? 'in-repo' : derived ? 'derived' : 'default';
+    for (const repo of [...this.watchedRepos()].sort()) {
+      if (this.deps.config.exclude.includes(repo)) continue;
+      const rc = this.deps.config.repos?.[repo] ?? {};
+      const fc = this.repoFileConfigs.get(repo);
+      const s = this.settingsFor(repo);
+      out[repo] = {
+        rollupJobId: { value: s.rollupJobId,
+          source: src(rc.rollupJobId != null, fc?.rollupJobId != null) },
+        workflowPath: { value: s.workflowPath,
+          source: src(rc.workflowPath != null, fc?.workflowPath != null) },
+        batchSize: { value: s.batchSize,
+          source: src(rc.batchSize != null, fc?.batchSize != null) },
+        requiredCheckPrefixes: { value: this.effectivePrefixes(repo) ?? null,
+          source: src(rc.requiredCheckPrefixes != null, fc?.requiredCheckPrefixes != null,
+            this.derivedPrefixes.has(repo)) },
+        deploy: { value: deployMap[repo] ?? null,
+          source: src(repo in this.deps.config.deploy, fc?.deploy != null) },
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Fetch + parse `.pr-dashboard.yml` for every watched repo via a GraphQL blob
+   * read (no clone needed), at most once per repo per 24h (same cadence as ci.yml
+   * derivation; attempts are throttled, not just successes). Best-effort like
+   * derivation: a failed fetch keeps the prior parsed config; an unparseable file
+   * keeps it too; an absent file clears it.
+   */
+  async refreshRepoConfigs(): Promise<void> {
+    const { client, config } = this.deps;
+    for (const repo of this.watchedRepos()) {
+      if (config.exclude.includes(repo)) continue;
+      const last = this.repoConfigFetchedAt.get(repo) ?? 0;
+      if (this.now().getTime() - last < PREFIX_DERIVE_INTERVAL_MS) continue;
+      this.repoConfigFetchedAt.set(repo, this.now().getTime());
+      const [owner, name] = repo.split('/');
+      let data: { repository?: { object?: { text?: unknown } | null } | null } | null = null;
+      try {
+        data = await client.graphql(buildBlobQuery(owner ?? '', name ?? '', `HEAD:${REPO_CONFIG_PATH}`));
+      } catch (e) {
+        if (e instanceof RateLimitError) this.notePause(e.retryAfterSeconds);
+        continue; // best-effort: prior layers keep working
+      }
+      const text = data?.repository?.object?.text;
+      if (typeof text !== 'string') {
+        if (this.repoFileConfigs.delete(repo)) {
+          this.repoConfigSig.delete(repo);
+          console.log(`[repo-config] ${repo}: ${REPO_CONFIG_PATH} removed — instance/derived settings apply`);
+        }
+        continue;
+      }
+      const parsed = parseRepoConfig(repo, text);
+      if (!parsed) {
+        console.warn(`[repo-config] ${repo}: ${REPO_CONFIG_PATH} is not a valid YAML mapping — ignored`);
+        continue;
+      }
+      for (const w of parsed.warnings) console.warn(`[repo-config] ${repo}: ${w}`);
+      const { warnings: _warnings, ...fields } = parsed;
+      this.repoFileConfigs.set(repo, parsed);
+      const sig = JSON.stringify(fields);
+      if (sig !== this.repoConfigSig.get(repo)) {
+        this.repoConfigSig.set(repo, sig);
+        console.log(`[repo-config] ${repo}: loaded ${REPO_CONFIG_PATH} (source of: ${Object.keys(fields).join(', ') || 'nothing'})`);
+      }
+    }
+  }
+
+  // ---- required-check prefix derivation ------------------------------------
+
+  /** Cache ci.yml-derived required-check prefixes for a repo (see required-checks.ts). */
+  setDerivedPrefixes(repo: string, prefixes: string[]): void {
+    this.derivedPrefixes.set(repo, prefixes);
+    this.prefixDerivedAt.set(repo, this.now().getTime());
+    console.log(`[poller] derived required-check prefixes for ${repo}: ${prefixes.join(', ')}`);
+  }
+
+  /** Cache the ci.yml-derived graph (display-name-level adjacency + event activity). */
+  setDerivedGraph(repo: string, nodes: Map<string, CiGraphNode>): void {
+    this.derivedGraph.set(repo, nodes);
+  }
+
+  /** Cache the ci.yml-derived rollup workflow display name (YAML top-level `name:`). */
+  setRollupWorkflowName(repo: string, name: string | null): void {
+    this.derivedWorkflowName.set(repo, name);
+  }
+
+  /** Rollup workflow display name for a repo; null when unknown (no scoping). */
+  rollupWorkflowFor(repo: string): string | null {
+    return this.derivedWorkflowName.get(repo) ?? null;
+  }
+
+  /**
+   * Needed node prefixes for a canonical check name, matched against the derived
+   * graph with the shared startsWith semantics (a check `static-checks / TypeScript`
+   * matches graph node `static-checks /`). Null when the repo has no derived graph
+   * or the name matches no node.
+   */
+  needsFor(repo: string, canonicalCheckName: string): string[] | null {
+    const graph = this.derivedGraph.get(repo);
+    if (!graph) return null;
+    const node = matchingPrefix(canonicalCheckName, graph.keys());
+    return node !== null ? graph.get(node)!.needs : null;
+  }
+
+  /** All derived-graph node prefixes for a repo — lets the wait matcher assign a
+   *  candidate check to its own node (longest match) instead of bare startsWith,
+   *  so `build-test` never satisfies a need on `build`. Null without a graph. */
+  graphKeysFor(repo: string): string[] | null {
+    const graph = this.derivedGraph.get(repo);
+    return graph ? [...graph.keys()] : null;
+  }
+
+  /**
+   * Whether the graph node `neededPrefix` can run for `event` — true unless its
+   * `if:` provably gates it off that event (e.g. a merge_group-only job seen
+   * from a pull_request check). True when the repo/node is unknown: the graph
+   * is event-agnostic storage; activity is evaluated here at classification time.
+   */
+  needActiveFor(repo: string, neededPrefix: string, event: string): boolean {
+    const node = this.derivedGraph.get(repo)?.get(neededPrefix);
+    return node ? activeForEvent(node.activity, event) : true;
+  }
+
+  /**
+   * Effective required-check prefixes for a repo:
+   * explicit config (an empty array disables prefixes entirely) → ci.yml-derived
+   * → undefined (no prefixes).
+   */
+  private effectivePrefixes(repo: string): string[] | undefined {
+    // instance override > in-repo file (both via settingsFor) > derived
+    const configured = this.settingsFor(repo).requiredCheckPrefixes;
+    if (configured) return configured;
+    return this.derivedPrefixes.get(repo);
+  }
+
+  /** Deploy-cycle re-derivation: refresh the clone and re-read ci.yml at most once per 24h. */
+  private async maybeRederivePrefixes(repo: string, branch: string): Promise<void> {
+    const last = this.prefixDerivedAt.get(repo) ?? 0;
+    if (this.now().getTime() - last < PREFIX_DERIVE_INTERVAL_MS) return;
+    this.prefixDerivedAt.set(repo, this.now().getTime()); // throttle attempts, not just successes
+    try {
+      const settings = this.settingsFor(repo);
+      await this.deps.deploy.fetchClone(repo);
+      const text = await this.deps.deploy.readFileAtHead(repo, settings.workflowPath, branch);
+      const graph = text != null ? deriveCiGraph(text, settings.rollupJobId) : null;
+      if (graph) { // null = unparseable: keep prior prefixes/graph
+        this.setDerivedPrefixes(repo, graph.prefixes);
+        this.setDerivedGraph(repo, graph.nodes);
+        this.setRollupWorkflowName(repo, graph.workflowName);
+      }
+    } catch {
+      // best-effort: config/derived-so-far prefixes keep working
+    }
+  }
+
+  // ---- state assembly -----------------------------------------------------
+
+  buildState(): DashboardState {
+    const { history, config } = this.deps;
+    const now = this.now();
+    const byRepo = new Map<string, PrView[]>();
+    const push = (repo: string, view: PrView) => byRepo.set(repo, [...(byRepo.get(repo) ?? []), view]);
+
+    // Pre-compute per-repo group progress once (not once per PR) so all callers share the
+    // same results. This map is keyed by repo and holds the GroupProgress[] for that repo.
+    // Iterate unique OIDs only: batch entries sharing an OID would otherwise trigger
+    // identical computeProgress calls N times with the same inputs.
+    const repoGroupProgress = new Map<string, GroupProgress[]>();
+    for (const [repo, entries] of this.queueEntries) {
+      if (!entries.length) continue;
+      const lookupMg = (n: string) => history.expected(repo, n, 'merge_group');
+      const seenOids = new Set<string>();
+      const groups: GroupProgress[] = [];
+      for (const e of entries) {
+        if (!e.headCommitOid || !this.groupChecks.has(e.headCommitOid)) continue;
+        if (seenOids.has(e.headCommitOid)) continue;
+        seenOids.add(e.headCommitOid);
+        const checks = this.groupChecks.get(e.headCommitOid)!;
+        const p = computeProgress({ checks,
+          expectedSet: history.expectedSet(repo, 'merge_group', now), lookup: lookupMg, now,
+          samples: (n) => history.samples(repo, n, 'merge_group'),
+          queueDelay: (n) => this.expectedRunnerWaitFor(repo, n, 'merge_group') });
+        groups.push({ oid: e.headCommitOid, percent: p.percent, etaSeconds: p.etaSeconds,
+          overdue: p.overdue, failed: p.failed });
+      }
+      repoGroupProgress.set(repo, groups);
+    }
+
+    for (const pr of this.prs.values()) {
+      const view = this.viewForOpenPr(pr, now, repoGroupProgress.get(pr.repo) ?? []);
+      if (view) push(pr.repo, view);
+    }
+    for (const rec of history.listTrackedMerged(config.retentionDays, now)) {
+      if (config.exclude.includes(rec.repo)) continue; // exclude applies on reconfigure too
+      const view = this.viewForMergedPr(rec, now);
+      if (view) push(rec.repo, view);
+    }
+
+    const deployMap = this.effectiveDeploy();
+    const repos = [...byRepo.entries()]
+      .map(([repo, prs]) => {
+        const accuracy: Record<string, StageAccuracy> = {};
+        for (const stage of ETA_TRACKED_STAGES) {
+          const a = history.etaAccuracy(repo, stage);
+          if (a) accuracy[stage] = a;
+        }
+        const queue = this.buildQueueView(repo, repoGroupProgress.get(repo) ?? []);
+        return {
+          repo,
+          hasDeploy: repo in deployMap,
+          accuracy,
+          prs: prs.sort((a, b) =>
+            (STAGE_ORDER[b.stage.stage] ?? 0) - (STAGE_ORDER[a.stage.stage] ?? 0) ||
+            (b.stage.percent ?? -1) - (a.stage.percent ?? -1)),
+          queue,
+        };
+      })
+      .sort((a, b) => a.repo.localeCompare(b.repo));
+    return { generatedAt: now.toISOString(), staleSince: this.staleSince, repos };
+  }
+
+  /** Build a RepoQueueView from the pre-computed group progress for a repo.
+   *
+   *  Groups are identified by unique headCommitOid among AWAITING_CHECKS entries.
+   *  A group's "position" is the maximum position of all entries sharing its OID.
+   *  Batch semantics: a group at position N covers all entries in the range
+   *  (prevGroupPos, N] — so group.prNumbers includes all entries between it and
+   *  the previous group.
+   *
+   *  Waiting = entries whose position is beyond the last group's coverage
+   *  (i.e. they have no CI group yet), returned ascending by position.
+   *
+   *  Returns null when there are no queue entries for this repo.
+   */
+  private buildQueueView(repo: string, groups: GroupProgress[]): RepoQueueView | null {
+    const entries = this.queueEntries.get(repo);
+    if (!entries?.length) return null;
+
+    const byOid = new Map(groups.map((g) => [g.oid, g]));
+
+    // Sort all entries by position for batch-range calculation.
+    const sorted = [...entries].sort((a, b) => a.position - b.position);
+
+    // Collect unique building groups (AWAITING_CHECKS with headCommitOid).
+    // A group is identified by its OID; its representative position is the max
+    // position among all entries sharing that OID.
+    const groupPositions = new Map<string, number>(); // oid → max position
+    for (const e of sorted) {
+      if (e.state === 'AWAITING_CHECKS' && e.headCommitOid) {
+        const prev = groupPositions.get(e.headCommitOid) ?? 0;
+        if (e.position > prev) groupPositions.set(e.headCommitOid, e.position);
+      }
+    }
+
+    // Sort groups by their max position so we can apply batch-range semantics.
+    const orderedGroups = [...groupPositions.entries()]
+      .sort(([, pa], [, pb]) => pa - pb); // ascending by max position
+
+    const maxBuildingPos = orderedGroups.length > 0
+      ? orderedGroups[orderedGroups.length - 1]![1]
+      : 0;
+
+    // Build QueueGroupView[] — one per unique OID, covering (prevGroupPos, thisGroupPos].
+    const queueGroups: QueueGroupView[] = [];
+    let prevGroupPos = 0;
+    for (const [oid, groupMaxPos] of orderedGroups) {
+      // All entries in (prevGroupPos, groupMaxPos]
+      const covered = sorted.filter(
+        (e) => e.position > prevGroupPos && e.position <= groupMaxPos);
+      const prNumbers = covered.map((e) => e.prNumber);
+      const gp = byOid.get(oid);
+      queueGroups.push({
+        oid,
+        prNumbers,
+        percent: gp?.percent ?? null,
+        etaSeconds: gp?.etaSeconds ?? null,
+        failed: gp?.failed ?? false,
+      });
+      prevGroupPos = groupMaxPos;
+    }
+
+    // Waiting = entries whose position is beyond all building groups' coverage.
+    const waiting = sorted
+      .filter((e) => e.position > maxBuildingPos)
+      .map((e) => ({ prNumber: e.prNumber, position: e.position }));
+
+    return { groups: queueGroups, waiting, batchSize: this.settingsFor(repo).batchSize };
+  }
+
+  /** Memoized view of the last emitted state; never rebuilds per API consumer. */
+  getState(): DashboardState {
+    return this.lastState ?? this.buildState();
+  }
+
+  private emitUpdate(): void {
+    const state = this.buildState();
+    // Compute a signature with generatedAt blanked so pure timestamp churn
+    // (every tick changes generatedAt) doesn't trigger a spurious SSE frame.
+    const sig = JSON.stringify({ ...state, generatedAt: '' });
+    this.lastState = state;
+    const nowMs = this.now().getTime();
+    // identical snapshot — skip emission, unless the keepalive window elapsed
+    // (clients drive their "live · updated" stamp off generatedAt)
+    if (sig === this.lastEmittedSig && nowMs - this.lastEmittedAt < EMIT_KEEPALIVE_MS) return;
+    this.lastEmittedSig = sig;
+    this.lastEmittedAt = nowMs;
+    this.emit('update');
+  }
+
+  private viewForOpenPr(pr: PrSnapshot, now: Date, groups: GroupProgress[]): PrView | null {
+    const { history, config } = this.deps;
+    const key = `${pr.repo}#${pr.number}`;
+    const lookupPr = (n: string) => history.expected(pr.repo, n, 'pull_request');
+
+    // Expected-set rule: when the repo marks required checks (or configures required
+    // prefixes), progress runs over the history expectedSet intersected with required
+    // names. Without required marking, use the full expectedSet — except when every
+    // live check finished long ago, in which case absent expected names are
+    // path-gated and aren't coming.
+    const prefixes = this.effectivePrefixes(pr.repo);
+    const rollupWf = this.rollupWorkflowFor(pr.repo);
+    const req = requiredChecks(pr.checks, prefixes, rollupWf);
+    const requiredNames = new Set(req.map((c) => c.name));
+    const hasRequiredMarking = pr.checks.some((c) => c.isRequired);
+    let expectedSet = history.expectedSet(pr.repo, 'pull_request', now);
+    if (prefixes?.length) {
+      // prefix predicate over history names: keeps the full required denominator even
+      // mid-run when GitHub hasn't marked anything isRequired yet (stops the bar
+      // collapsing to {ci} and jumping backwards). History names carry no workflow
+      // identity, so workflow scoping happens via the LIVE checks: a name whose live
+      // check provably belongs to a foreign workflow (e.g. `ci-gate` from
+      // `Auto-merge PRs` prefix-matching `ci`) is excluded from the denominator.
+      const foreignNames = new Set(pr.checks
+        .filter((c) => !workflowScopeAllows(c.workflowName, rollupWf))
+        .map((c) => c.name));
+      expectedSet = expectedSet.filter((n) =>
+        (matchesRequiredPrefix(n, prefixes) && !foreignNames.has(n)) || requiredNames.has(n));
+    } else if (hasRequiredMarking) {
+      expectedSet = expectedSet.filter((n) => requiredNames.has(n));
+    } else {
+      const allDone = pr.checks.length > 0 && pr.checks.every((c) => c.status === 'COMPLETED');
+      const newest = Math.max(0, ...pr.checks.map((c) => (c.completedAt ? Date.parse(c.completedAt) : 0)));
+      if (allDone && now.getTime() - newest > EXPECTED_SET_STALE_MS) {
+        const liveNames = new Set(pr.checks.map((c) => c.name));
+        expectedSet = expectedSet.filter((n) => liveNames.has(n));
+      }
+    }
+    const ciProgress = computeProgress({ checks: req, expectedSet, lookup: lookupPr, now,
+      samples: (n) => history.samples(pr.repo, n, 'pull_request'),
+      queueDelay: (n) => this.expectedRunnerWaitFor(pr.repo, n, 'pull_request') });
+
+    let queueProgress: QueueStageResult | null = null;
+    if (pr.queue) {
+      const entries = this.queueEntries.get(pr.repo) ?? [];
+      // groups pre-computed once per repo per buildState call (not per PR)
+      queueProgress = queueStage({ entries, prNumber: pr.number, groups,
+        medianGroupSecs: this.medianGroupSecs(pr.repo),
+        batchSize: this.settingsFor(pr.repo).batchSize });
+    }
+    const stage = classify({
+      pr, prev: this.stages.get(key) ?? null, ciProgress, queueProgress,
+      deploy: { hasDeploy: pr.repo in this.effectiveDeploy(), qaLive: null, prodLive: null, propagating: false, deployProgress: null },
+      retentionDays: config.retentionDays, now, requiredCheckPrefixes: prefixes,
+      rollupWorkflowName: rollupWf,
+    });
+    if (!stage) return null;
+    this.stages.set(key, stage);
+    this.trackStageEta(key, pr.repo, stage, now);
+    const queueAheadCount = stage.stage === 'queue' && queueProgress != null
+      ? queueProgress.aheadCount
+      : null;
+    // Queued PRs: expose the merge-group build's checks as their own labeled
+    // payload (already fetched into groupChecks by queueOnce; isRequired true via
+    // mapRollupContexts; merge_group-event history supplies expected durations).
+    const storedGroup = pr.queue?.groupHeadOid
+      ? this.groupChecks.get(pr.queue.groupHeadOid) : undefined;
+    const groupChecks = storedGroup?.length
+      ? this.toCheckViews(pr.repo, storedGroup, now, prefixes) : null;
+    return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
+      queueAheadCount,
+      checks: this.checkViews(pr, now, prefixes),
+      groupChecks };
+  }
+
+  private viewForMergedPr(rec: MergedPrRecord, now: Date): PrView | null {
+    const { history, config } = this.deps;
+    const dc = this.effectiveDeploy()[rec.repo];
+    const qaSha = this.envShas.get(`${rec.repo}/qa`);
+    const prodSha = this.envShas.get(`${rec.repo}/prod`);
+    const deploy: DeployInfo = {
+      hasDeploy: !!dc,
+      qaLive: rec.qaLiveAt ? true : (qaSha == null ? null : false),
+      prodLive: rec.prodLiveAt ? true : (prodSha == null ? null : false),
+      // no squash sha yet, or sha not visible in the clone even after fetch
+      propagating: !rec.mergeCommitSha || this.propagating.has(`${rec.repo}#${rec.number}`),
+      deployProgress: null,
+    };
+    if (dc && !rec.qaLiveAt && deploy.qaLive === false) {
+      const gap = history.medianDeployGap(rec.repo, 'qa') ?? 600;
+      const elapsed = (now.getTime() - Date.parse(rec.mergedAt)) / 1000;
+      deploy.deployProgress = {
+        percent: Math.min(Math.round((elapsed / gap) * 100), 97),
+        etaSeconds: elapsed > 1.5 * gap ? null : Math.max(Math.round(gap - elapsed), 0),
+        overdue: elapsed > 1.5 * gap,
+      };
+    }
+    const stage = classify({
+      pr: { repo: rec.repo, number: rec.number, title: rec.title, url: rec.url, headSha: '',
+        isDraft: false, mergeStateStatus: null, mergedAt: rec.mergedAt,
+        mergeCommitSha: rec.mergeCommitSha, autoMergeArmed: false, queue: null, checks: [] },
+      prev: null, ciProgress: null, queueProgress: null, deploy,
+      retentionDays: config.retentionDays, now,
+    });
+    if (!stage) return null;
+    // merged PRs share the key space — captures qa-deploy ETA accuracy too
+    this.trackStageEta(`${rec.repo}#${rec.number}`, rec.repo, stage, now);
+    return { repo: rec.repo, number: rec.number, title: rec.title, url: rec.url, stage,
+      queueAheadCount: null, checks: [], groupChecks: null };
+  }
+
+  private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {
+    return this.toCheckViews(pr.repo, pr.checks, now, prefixes);
+  }
+
+  /** Map a CheckRun set (head-commit PR checks or a merge-group build's checks)
+   *  to CheckViews — shared by `checks` and `groupChecks` in PrView. */
+  private toCheckViews(repo: string, checks: CheckRun[], now: Date, prefixes?: string[]): CheckView[] {
+    const graphKeys = this.graphKeysFor(repo); // computed once per set, not per check
+    const rollupWf = this.rollupWorkflowFor(repo);
+    return checks.map((c) => {
+      const inRollupWorkflow = workflowScopeAllows(c.workflowName, rollupWf);
+      // waitKind applies to live queued checks only; everything else carries nulls.
+      // The derived needs graph describes the rollup workflow's jobs — a check
+      // from a foreign workflow must not be assigned a node (needs: null → unknown).
+      const wait = classifyWait(c, checks,
+        inRollupWorkflow ? this.needsFor(repo, c.name) : null, now,
+        (p, e) => this.needActiveFor(repo, p, e), graphKeys, rollupWf);
+      return {
+        name: c.rawName, status: c.status, conclusion: c.conclusion,
+        // same predicate as classification: mid-run prefix-matched checks sort under
+        // "required" in the UI even before GitHub marks them isRequired — scoped to
+        // the rollup workflow so foreign jobs (`ci-gate`) never read as required
+        isRequired: c.isRequired
+          || (matchesRequiredPrefix(c.name, prefixes) && inRollupWorkflow),
+        workflowName: c.workflowName,
+        elapsedSeconds: c.startedAt
+          ? Math.round(((c.completedAt ? Date.parse(c.completedAt) : now.getTime()) - Date.parse(c.startedAt)) / 1000)
+          : null,
+        expectedSeconds: this.deps.history.expected(repo, c.name, c.event)?.p50 ?? null,
+        url: c.url,
+        waitKind: wait?.kind ?? null,
+        blockedOn: wait?.kind === 'blocked' ? wait.blockedOn : null,
+        waitingSeconds: wait?.kind === 'runner' ? wait.waitingSeconds : null,
+        // a pickup estimate only makes sense for runner-waiting checks — blocked/unknown
+        // checks aren't eligible to run yet, so skip the history lookups entirely
+        expectedRunnerWaitSeconds: wait?.kind === 'runner'
+          ? this.expectedRunnerWaitFor(repo, c.name, c.event) : null,
+      };
+    });
+  }
+
+  /** Learned pickup-wait estimate: name-level median, falling back to the event pool. */
+  private expectedRunnerWaitFor(repo: string, name: string, event: string): number | null {
+    const { history } = this.deps;
+    return history.expectedRunnerWait(repo, name, event)
+      ?? history.expectedRunnerWaitForEvent(repo, event);
+  }
+
+  // ---- helpers ------------------------------------------------------------
+
+  private isHot(pr: PrSnapshot): boolean {
+    const stage = this.stages.get(`${pr.repo}#${pr.number}`)?.stage;
+    return stage === 'ci' || stage === 'queue' || !stage;
+  }
+
+  private groupCompleted(oid: string): boolean {
+    const checks = this.groupChecks.get(oid);
+    return !!checks?.length && checks.every((c) => c.status === 'COMPLETED');
+  }
+
+  /** Record the whole-group wall-clock duration the first time a group's checks
+   *  are observed all-COMPLETED (queueOnce stops refetching completed groups, and
+   *  recordedGroups guards against duplicate fetches racing the filter).
+   *
+   *  Only records when every check's conclusion is one of {SUCCESS, SKIPPED, NEUTRAL} —
+   *  a CANCELLED or FAILURE group is an ejected/fail-fast run whose artificially short
+   *  wall-clock would skew queue-duration medians. */
+  private maybeRecordGroupRun(repo: string, oid: string, checks: CheckRun[]): void {
+    if (this.recordedGroups.has(oid)) return;
+    if (!checks.length || !checks.every((c) => c.status === 'COMPLETED')) return;
+    this.recordedGroups.add(oid); // bad timestamps won't improve on a refetch — mark regardless
+    const CLEAN_CONCLUSIONS = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL']);
+    if (!checks.every((c) => CLEAN_CONCLUSIONS.has(c.conclusion ?? ''))) return;
+    const starts = checks.map((c) => c.startedAt).filter((t): t is string => !!t).map(Date.parse);
+    const ends = checks.map((c) => c.completedAt).filter((t): t is string => !!t);
+    if (!starts.length || !ends.length) return;
+    const lastEnd = ends.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+    const durationSecs = (Date.parse(lastEnd) - Math.min(...starts)) / 1000;
+    if (!Number.isFinite(durationSecs)) return;
+    this.deps.history.recordGroupRun(repo, durationSecs, lastEnd);
+  }
+
+  /**
+   * Per-PR stage tracker for ETA accuracy. Called on every classify result
+   * (buildState runs on each emitUpdate — transitions are detected there):
+   * - same stage: capture the first non-null etaSeconds seen in this stage
+   * - stage change: if the OLD stage is ETA-tracked and had a first ETA, score
+   *   predicted (firstEta) against actual (time spent in the stage)
+   */
+  private trackStageEta(key: string, repo: string, stage: StageResult, now: Date): void {
+    const prev = this.stageTracker.get(key);
+    if (prev && prev.stageId === stage.stage) {
+      if (prev.firstEta == null && stage.etaSeconds != null) prev.firstEta = stage.etaSeconds;
+      return;
+    }
+    if (prev && prev.firstEta != null && ETA_TRACKED_STAGES.has(prev.stageId)) {
+      this.deps.history.recordEtaAccuracy(repo, prev.stageId, prev.firstEta,
+        (now.getTime() - prev.enteredAt) / 1000, now.toISOString());
+    }
+    this.stageTracker.set(key, { stageId: stage.stage, enteredAt: now.getTime(), firstEta: stage.etaSeconds });
+  }
+
+  /**
+   * A merging PR leaves the open-PR board without a final classify pass — score
+   * its last pre-merge ETA-tracked stage (ci/queue) here. Post-merge stages
+   * (qa-deploy/awaiting-prod) are left alone: merged search results re-ingest the
+   * same PR across overlapping sweeps, and resetting the entry would skew their
+   * enteredAt.
+   */
+  private recordEtaAccuracyOnMerge(key: string, repo: string, mergedAt: string): void {
+    const prev = this.stageTracker.get(key);
+    if (!prev) return;
+    if (prev.stageId === 'qa-deploy' || prev.stageId === 'awaiting-prod' || prev.stageId === 'merged') return;
+    this.stageTracker.delete(key);
+    if (prev.firstEta == null || !ETA_TRACKED_STAGES.has(prev.stageId)) return;
+    this.deps.history.recordEtaAccuracy(repo, prev.stageId, prev.firstEta,
+      (Date.parse(mergedAt) - prev.enteredAt) / 1000, mergedAt);
+  }
+
+  /** Record enqueue→merge wall-clock wait if this PR was last seen in the queue. */
+  private recordQueueWaitOnMerge(key: string, repo: string, mergedAt: string): void {
+    const enqueuedAt = this.queueEnqueuedAt.get(key);
+    if (!enqueuedAt) return;
+    this.queueEnqueuedAt.delete(key);
+    const waitSecs = (Date.parse(mergedAt) - Date.parse(enqueuedAt)) / 1000;
+    if (!Number.isFinite(waitSecs)) return;
+    this.deps.history.recordQueueWait(repo, waitSecs, mergedAt);
+  }
+
+  private medianGroupSecs(repo: string): number | null {
+    const observed = this.deps.history.medianGroupRun(repo);
+    if (observed != null) return observed;
+    // fallback proxy: expected duration of the longest merge_group check
+    const names = this.deps.history.expectedSet(repo, 'merge_group', this.now());
+    const p50s = names.map((n) => this.deps.history.expected(repo, n, 'merge_group')?.p50 ?? 0);
+    return p50s.length ? Math.max(...p50s) : null;
+  }
+
+  /**
+   * Webhook-driven out-of-band cycle trigger (round 8 Task A3). Routes through
+   * the SAME entry points as the timer chains — runCycle containment plus the
+   * per-cycle withLatch latches — so a nudge can never double-run a cycle that
+   * is already in flight, and a rejected fetch never escapes to the process.
+   * Generation-guard compatible by construction: nudges run once and never re-arm.
+   */
+  async nudge(route: WebhookRoute): Promise<void> {
+    if (route.kind === 'queue') return this.runCycle('queue', () => this.queueOnce());
+    if (route.kind === 'pr-detail') {
+      const key = `${route.repo}#${route.prNumber}`;
+      // tracked → targeted detail refresh; unknown PR → full sweep discovers it
+      if (this.prs.has(key)) {
+        return this.runCycle('detail', () => this.detailOnce(false, key));
+      }
+    }
+    return this.runCycle('sweep', () => this.sweepAndRefresh());
+  }
+
+  effectiveHotMs(): number {
+    const remaining = this.deps.client.remaining;
+    if (remaining != null && remaining < this.deps.config.rateLimitFloor) return 60_000;
+    const { hotMs } = this.deps.config.intervals;
+    // Webhooks deliver hot-PR signals out-of-band — relax the hot polling tick ×4,
+    // unless the operator explicitly pinned intervals.hotMs in the config file.
+    return this.deps.config.webhooks.enabled && !this.deps.config.hotMsExplicit
+      ? hotMs * 4 : hotMs;
+  }
+
+  /** Delay before the next run of a cycle kind; honors any rate-limit pause. */
+  nextDelayMs(kind: DelayKind): number {
+    const { intervals, rateLimitFloor } = this.deps.config;
+    const { remaining } = this.deps.client;
+    const base = kind === 'hot' ? this.effectiveHotMs()
+      : kind === 'sweep'
+        ? (remaining != null && remaining < rateLimitFloor ? SWEEP_LOW_BUDGET_MS : intervals.sweepMs)
+        : intervals.deployMs;
+    return Math.max(base, this.pauseUntil - this.now().getTime());
+  }
+
+  private notePause(retryAfterSeconds: number): void {
+    this.pauseUntil = Math.max(this.pauseUntil, this.now().getTime() + retryAfterSeconds * 1000);
+  }
+
+  /** Skip a cycle entirely if the same cycle is still in flight (slow fetch + tick overlap). */
+  private async withLatch(name: string, fn: () => Promise<void>): Promise<void> {
+    if (this.inFlight.has(name)) return;
+    this.inFlight.add(name);
+    try {
+      await fn();
+    } finally {
+      this.inFlight.delete(name);
+    }
+  }
+
+  private async guard<T>(fn: () => Promise<T>): Promise<T | null> {
+    try {
+      const result = await fn();
+      this.staleSince = null;
+      return result;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error('[poller] fetch failed:', message);
+      if (e instanceof RateLimitError) {
+        this.notePause(e.retryAfterSeconds);
+        this.emit('ratelimited', e.retryAfterSeconds);
+      }
+      if (!this.staleSince) this.staleSince = this.now().toISOString();
+      return null;
+    }
+  }
+
+  /** Containment wrapper: no cycle rejection may ever escape to the process. */
+  private async runCycle(name: string, fn: () => Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[poller] ${name} cycle failed:`, message);
+      if (e instanceof RateLimitError) this.notePause(e.retryAfterSeconds);
+      if (!this.staleSince) this.staleSince = this.now().toISOString();
+    }
+  }
+
+  /** Sweep + full detail refresh: keeps cold PRs (ready/parked/draft) warm every sweep tick. */
+  private async sweepAndRefresh(): Promise<void> {
+    await this.sweepOnce();
+    await this.detailOnce(false);
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    const gen = ++this.generation;
+    // Self-re-arming setTimeout chains (not setInterval): the next delay is computed
+    // AFTER each run, so rate-limit pauses and low-budget floors take effect immediately.
+    // Each arm closure captures `gen` and bails when the generation has advanced —
+    // this prevents an in-flight sweep that resolves after reconfigure() from re-arming
+    // the old chain and creating duplicate self-perpetuating timer chains.
+    const chain = (kind: DelayKind, name: string, fn: () => Promise<void>) => {
+      const arm = () => {
+        if (!this.running || this.generation !== gen) return;
+        const t = setTimeout(() => {
+          this.timers.delete(t);
+          if (this.generation !== gen) return; // stale chain — bail before running
+          void this.runCycle(name, fn).finally(arm);
+        }, this.nextDelayMs(kind));
+        t.unref();
+        this.timers.add(t);
+      };
+      arm();
+    };
+    void this.runCycle('sweep', () => this.sweepAndRefresh()); // initial kick, contained
+    chain('sweep', 'sweep', () => this.sweepAndRefresh());
+    chain('hot', 'detail', () => this.detailOnce(true));
+    chain('hot', 'queue', () => this.queueOnce());
+    chain('deploy', 'deploy', () => this.deployOnce());
+  }
+
+  stop(): void {
+    this.running = false;
+    this.generation++;             // invalidate any in-flight arm closures from the old chain
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.clear();
+  }
+}

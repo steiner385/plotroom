@@ -1,0 +1,236 @@
+import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { PrRow } from '../PrRow';
+import type { PrView } from '../types';
+
+const pr = (over: Partial<PrView>): PrView => ({
+  repo: 'acme/widgets', number: 8962, title: 'fix: calendar overlap', url: 'https://x/8962',
+  stage: { stage: 'ci', substate: null, percent: 72, etaSeconds: 240, etaRangeSeconds: null, overdue: false },
+  queueAheadCount: null,
+  checks: [
+    { name: 'fast-checks / ESLint', status: 'COMPLETED', conclusion: 'SUCCESS', isRequired: true, workflowName: null,
+      elapsedSeconds: 180, expectedSeconds: 200, url: 'https://x/run1',
+        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+    { name: 'lighthouse', status: 'IN_PROGRESS', conclusion: null, isRequired: false, workflowName: null,
+      elapsedSeconds: 60, expectedSeconds: 300, url: null,
+        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+  ],
+  groupChecks: null,
+  ...over,
+});
+
+describe('PrRow', () => {
+  it('shows number, title link, right-aligned ETA, and the metro track for a running CI stage', () => {
+    const { container } = render(<PrRow pr={pr({})} hasDeploy />);
+    expect(screen.getByText('#8962')).toBeInTheDocument();
+    expect(screen.getByText(/calendar overlap/)).toBeInTheDocument();
+    expect(screen.getByText('~4m left')).toBeInTheDocument();
+    // active node on the track with bold label + ETA beneath
+    const active = container.querySelector('.node.active')!;
+    expect(active.querySelector('.node-label')!.textContent).toBe('CI');
+    expect(active.querySelector('.node-eta')!.textContent).toBe('~4m');
+  });
+
+  it('has id="pr-{number}" on the row root (anchor target for the queue train)', () => {
+    const { container } = render(<PrRow pr={pr({})} hasDeploy />);
+    expect(container.querySelector('#pr-8962')).not.toBeNull();
+  });
+
+  it('shows the stage percent in the muted sub line for a running CI stage', () => {
+    render(<PrRow pr={pr({})} hasDeploy />);
+    // only advisory checks are in progress in the fixture → percent only
+    expect(screen.getByText('72%')).toBeInTheDocument();
+  });
+
+  it('appends the longest-running in-progress required check to the ci sub line', () => {
+    render(<PrRow pr={pr({ checks: [
+      { name: 'static-checks / TypeScript', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
+        elapsedSeconds: 120, expectedSeconds: 240, url: null,
+        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+      { name: 'pr-affected-tests', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
+        elapsedSeconds: 240, expectedSeconds: 540, url: null,
+        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+      { name: 'lighthouse', status: 'IN_PROGRESS', conclusion: null, isRequired: false, workflowName: null,
+        elapsedSeconds: 600, expectedSeconds: 700, url: null,
+        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+    ] })} hasDeploy />);
+    expect(screen.getByText('72% · pr-affected-tests running 4m of ~9m')).toBeInTheDocument();
+  });
+
+  it('renders parked ci-failed as a red ✗ CI node with the substate reason in the sub line, no percent', () => {
+    const { container } = render(<PrRow pr={pr({
+      stage: { stage: 'parked', substate: 'ci-failed', percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+    })} hasDeploy />);
+    expect(screen.getByText('CI failed')).toBeInTheDocument();
+    expect(container.querySelector('.node.fail')).not.toBeNull();
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+  });
+
+  it('renders parked draft as an amber parked node labeled with the substate', () => {
+    const { container } = render(<PrRow pr={pr({
+      stage: { stage: 'parked', substate: 'draft', percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+    })} hasDeploy />);
+    const parked = container.querySelector('.node.parked')!;
+    expect(parked.querySelector('.c')!.textContent).toBe('!');
+    expect(parked.querySelector('.node-label')!.textContent).toBe('draft');
+    expect(screen.getByText('Draft')).toBeInTheDocument(); // sub line reason
+  });
+
+  it('expands on row click to show check detail with advisory divider, collapses on second click', () => {
+    render(<PrRow pr={pr({})} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
+    expect(screen.getByText('advisory')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.queryByText('fast-checks / ESLint')).not.toBeInTheDocument();
+  });
+
+  it('shows "behind 9" in the sub line when stage=queue and queueAheadCount=9', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: null, percent: null, etaSeconds: 600, etaRangeSeconds: null, overdue: false },
+      queueAheadCount: 9,
+    })} hasDeploy />);
+    expect(screen.getByText(/behind 9/)).toBeInTheDocument();
+  });
+
+  it('does not show "behind" when aheadCount=0 or null', () => {
+    const queueStage = { stage: 'queue' as const, substate: null, percent: null, etaSeconds: 600, etaRangeSeconds: null, overdue: false };
+    const { unmount } = render(<PrRow pr={pr({ stage: queueStage, queueAheadCount: 0 })} hasDeploy />);
+    expect(screen.queryByText(/behind/)).not.toBeInTheDocument();
+    unmount();
+    render(<PrRow pr={pr({ stage: queueStage, queueAheadCount: null })} hasDeploy />);
+    expect(screen.queryByText(/behind/)).not.toBeInTheDocument();
+  });
+
+  it('shows group failure + last percent + position in the sub line for queue/group-failed', () => {
+    const { container } = render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: 'group-failed', percent: 89, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+      queueAheadCount: 2,
+    })} hasDeploy />);
+    // the percent is the merge-group build's, never head-commit checks — labeled 'group'
+    expect(screen.getByText('Queue group failed · group 89% · behind 2')).toBeInTheDocument();
+    expect(container.querySelector('.node.fail .node-label')!.textContent).toBe('Queue');
+  });
+
+  it('labels the queue sub-line percent as the group build', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: null, percent: 30, etaSeconds: 600, etaRangeSeconds: null, overdue: false },
+    })} hasDeploy />);
+    expect(screen.getByText('group 30%')).toBeInTheDocument();
+  });
+
+  it('shows a muted ETA-accuracy line for the current stage in the expanded panel', () => {
+    render(<PrRow pr={pr({})} hasDeploy
+      accuracy={{ ci: { medianAbsErrSecs: 120, n: 14 } }} />);
+    fireEvent.click(screen.getByText('#8962'));
+    const line = screen.getByText('ETA accuracy (ci): typically ±2m (n=14)');
+    expect(line.className).toContain('eta-accuracy');
+  });
+
+  it('renders sub-minute accuracy errors in seconds (±45s, never ±0m)', () => {
+    render(<PrRow pr={pr({})} hasDeploy
+      accuracy={{ ci: { medianAbsErrSecs: 45, n: 6 } }} />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('ETA accuracy (ci): typically ±45s (n=6)')).toBeInTheDocument();
+  });
+
+  it('omits the accuracy line when there is no data for the current stage', () => {
+    render(<PrRow pr={pr({})} hasDeploy
+      accuracy={{ queue: { medianAbsErrSecs: 120, n: 3 } }} />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.queryByText(/ETA accuracy/)).not.toBeInTheDocument();
+  });
+
+  it('omits the accuracy line when no accuracy prop is provided', () => {
+    render(<PrRow pr={pr({})} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.queryByText(/ETA accuracy/)).not.toBeInTheDocument();
+  });
+
+  it('queued PR with groupChecks shows the merge-group section first, then PR checks (Y2)', () => {
+    const groupCheck = { name: 'ci', status: 'IN_PROGRESS', conclusion: null, isRequired: true,
+      workflowName: 'CI', elapsedSeconds: 300, expectedSeconds: 600, url: 'https://x/group',
+      waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null };
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: null, percent: 50, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
+      groupChecks: [groupCheck],
+    })} hasDeploy accuracy={{ queue: { medianAbsErrSecs: 60, n: 5 } }} />);
+    fireEvent.click(screen.getByText('#8962'));
+    const labels = screen.getAllByText(/merge group build|PR checks \(head commit\)/);
+    expect(labels.map((l) => l.textContent)).toEqual(['merge group build', 'PR checks (head commit)']);
+    // group section comes first in the document
+    const groupLabel = screen.getByText('merge group build');
+    const prLabel = screen.getByText('PR checks (head commit)');
+    expect(groupLabel.compareDocumentPosition(prLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // group check rendered alongside the existing head-commit checks
+    expect(screen.getByText('ci')).toBeInTheDocument();
+    expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
+    // accuracy footer rendered exactly once, in the bottom (PR checks) section
+    expect(screen.getAllByText(/ETA accuracy/)).toHaveLength(1);
+    expect(prLabel.compareDocumentPosition(screen.getByText(/ETA accuracy/))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('non-queued PRs render the single un-labeled panel (unchanged)', () => {
+    render(<PrRow pr={pr({})} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
+    expect(screen.queryByText('merge group build')).not.toBeInTheDocument();
+    expect(screen.queryByText(/PR checks/)).not.toBeInTheDocument();
+  });
+
+  it('queued PR without groupChecks (rollup not fetched) keeps the plain panel', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: null, percent: null, etaSeconds: 600, etaRangeSeconds: null, overdue: false },
+      groupChecks: null,
+    })} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
+    expect(screen.queryByText('merge group build')).not.toBeInTheDocument();
+  });
+
+  it('sub-line shows runner-wait summary when ≥1 required check has waitKind=runner and none are IN_PROGRESS', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'ci', substate: null, percent: 20, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
+      checks: [
+        { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
+          elapsedSeconds: null, expectedSeconds: null, url: null,
+          waitKind: 'runner', blockedOn: null, waitingSeconds: 60, expectedRunnerWaitSeconds: 90 },
+        { name: 'integration-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
+          elapsedSeconds: null, expectedSeconds: null, url: null,
+          waitKind: 'runner', blockedOn: null, waitingSeconds: 30, expectedRunnerWaitSeconds: 120 },
+      ],
+    })} hasDeploy />);
+    // 2 runner-wait jobs; max expected = 120s = 2m; shows "typical ~2m"
+    expect(screen.getByText('waiting for runners (2 jobs) · typical ~2m')).toBeInTheDocument();
+  });
+
+  it('sub-line omits typical clause when no expected runner wait available', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'ci', substate: null, percent: 10, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
+      checks: [
+        { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
+          elapsedSeconds: null, expectedSeconds: null, url: null,
+          waitKind: 'runner', blockedOn: null, waitingSeconds: 45, expectedRunnerWaitSeconds: null },
+      ],
+    })} hasDeploy />);
+    expect(screen.getByText('waiting for runners (1 jobs)')).toBeInTheDocument();
+  });
+
+  it('sub-line shows current-running text (not runner-wait) when a required check is IN_PROGRESS even if others are runner-wait', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'ci', substate: null, percent: 55, etaSeconds: 120, etaRangeSeconds: null, overdue: false },
+      checks: [
+        { name: 'static-checks / TypeScript', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
+          elapsedSeconds: 120, expectedSeconds: 240, url: null,
+          waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
+        { name: 'unit-tests', status: 'QUEUED', conclusion: null, isRequired: true, workflowName: null,
+          elapsedSeconds: null, expectedSeconds: null, url: null,
+          waitKind: 'runner', blockedOn: null, waitingSeconds: 30, expectedRunnerWaitSeconds: 60 },
+      ],
+    })} hasDeploy />);
+    // IN_PROGRESS check is present → use existing running-check line, not runner-wait summary
+    expect(screen.getByText(/static-checks \/ TypeScript running/)).toBeInTheDocument();
+    expect(screen.queryByText(/waiting for runners/)).not.toBeInTheDocument();
+  });
+});

@@ -1,0 +1,14 @@
+[Unit]
+Description=PR Dashboard — real-time GitHub PR pipeline monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=__APP_ROOT__
+ExecStart=/usr/bin/env pnpm start
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

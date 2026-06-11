@@ -1,0 +1,2485 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Poller, type DashboardState } from '../poller';
+import { HistoryStore } from '../history';
+import { RateLimitError } from '../github';
+import { DEFAULTS, type AppConfig } from '../config';
+import type { DeployWatcher } from '../deploy-watcher';
+
+const NOW = new Date('2026-06-10T12:00:00Z');
+
+// DEFAULTS are de-personalized (no owners, no deploy) — tests run against a
+// neutral two-owner config with one deploy-watched repo.
+const CONFIG: AppConfig = {
+  ...DEFAULTS,
+  owners: ['acme', 'octo'],
+  deploy: {
+    'acme/widgets': {
+      cloneUrl: 'https://github.com/acme/widgets.git',
+      defaultBranch: 'main',
+      environments: [
+        { name: 'qa', healthUrl: 'https://qa.widgets.example.com/health', auto: true, shaKey: 'commitSha' },
+        { name: 'prod', healthUrl: 'https://widgets.example.com/health', auto: false, shaKey: 'commitSha' },
+      ],
+    },
+  },
+};
+
+// Explicit required-check prefixes for the watched repo — stands in for what
+// ci.yml derivation would produce at runtime (the hand-maintained fallback list
+// is gone; the chain is config > derived > none).
+const PREFIX_CONFIG: AppConfig = {
+  ...CONFIG,
+  repos: { 'acme/widgets': { requiredCheckPrefixes:
+    ['ci', 'fast-checks /', 'pr-affected-tests /'] } },
+};
+
+const CHECK_DONE = {
+  __typename: 'CheckRun', name: 'fast-checks / ESLint', status: 'COMPLETED', conclusion: 'SUCCESS',
+  startedAt: '2026-06-10T11:50:00Z', completedAt: '2026-06-10T11:53:00Z', detailsUrl: 'u',
+  isRequired: true, checkSuite: { workflowRun: { event: 'pull_request' } },
+};
+const CHECK_RUNNING = {
+  ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests',
+  status: 'IN_PROGRESS', conclusion: null, startedAt: '2026-06-10T11:55:00Z', completedAt: null,
+};
+
+const SWEEP_RESPONSE = {
+  open0: { issueCount: 1, nodes: [{ number: 8962, title: 'fix: overlap', url: 'u8962', isDraft: false,
+    mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null }] },
+  open1: { issueCount: 0, nodes: [] },
+  merged0: { issueCount: 1, nodes: [{ number: 8951, title: 'feat: allowance', url: 'u8951', isDraft: false,
+    mergedAt: '2026-06-10T11:40:00Z', repository: { nameWithOwner: 'acme/widgets' },
+    mergeCommit: { oid: 'squash8951' } }] },
+  merged1: { issueCount: 0, nodes: [] },
+};
+const DETAIL_RESPONSE = {
+  r0: { nameWithOwner: 'acme/widgets', pr8962: {
+    number: 8962, title: 'fix: overlap', url: 'u8962', isDraft: false, mergeStateStatus: 'BLOCKED',
+    mergedAt: null, headRefOid: 'head8962', autoMergeRequest: null, mergeCommit: null, mergeQueueEntry: null,
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+      contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE, CHECK_RUNNING] } } } }] },
+  } },
+};
+
+function fakeClient(
+  sweep: Record<string, unknown> = SWEEP_RESPONSE,
+  detail: Record<string, unknown> = DETAIL_RESPONSE,
+  detailMarker = 'pr8962: pullRequest',
+) {
+  return {
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async (q: string) => {
+      if (q.includes('open0: search')) return sweep;
+      if (q.includes(detailMarker)) return detail;
+      throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+    }),
+  };
+}
+
+/**
+ * Per-env deploy fake: health() dispatches on the health URL, isAncestor()
+ * dispatches on the deployed sha — so qa and prod can answer differently
+ * (e.g. qa live, prod not yet → merged PR lands 'awaiting-prod').
+ */
+function fakeDeploy(
+  shaByUrl: Record<string, string | null>,
+  ancestryByDeployedSha: Record<string, 'yes' | 'no' | 'missing'>,
+) {
+  return {
+    health: vi.fn(async (url: string) => shaByUrl[url] ?? null),
+    ensureClone: vi.fn(async () => {}),
+    isAncestor: vi.fn(async (_repo: string, _sha: string, deployedSha: string) =>
+      ancestryByDeployedSha[deployedSha] ?? 'missing'),
+  } as unknown as DeployWatcher;
+}
+const noDeploy = () => fakeDeploy({}, {});
+
+let history: HistoryStore;
+beforeEach(() => {
+  history = new HistoryStore(':memory:');
+  // seed expectations so the estimator has history
+  for (let i = 0; i < 5; i++) {
+    history.recordCheckDuration('acme/widgets', 'fast-checks / ESLint', 'pull_request',
+      `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:03:00Z`, 'SUCCESS');
+    history.recordCheckDuration('acme/widgets', 'pr-affected-tests / Affected Unit + Server Tests', 'pull_request',
+      `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:10:00Z`, 'SUCCESS');
+  }
+});
+
+describe('Poller', () => {
+  it('sweep discovers PRs, detail fetch classifies + computes progress, durations are ingested', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const state = p.buildState();
+    const widgets = state.repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(widgets.hasDeploy).toBe(true); // deploy-configured repo flagged for the frontend
+    const pr = widgets.prs.find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('ci');
+    expect(pr.stage.percent).toBeGreaterThan(0);
+    expect(pr.stage.etaSeconds).not.toBeNull();
+    // completed check duration ingested (completed_at unique per run → n grows to 6)
+    expect(history.expected('acme/widgets', 'fast-checks / ESLint', 'pull_request')!.n).toBe(6);
+    // lastSweep meta advanced
+    expect(history.getMeta('lastSweep')).toBe(NOW.toISOString());
+  });
+
+  it('merged PR is persisted and classified through deploy stages (qa live, prod not → awaiting-prod)', async () => {
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'deployedSha-qa', 'https://widgets.example.com/health': 'oldSha-prod' },
+      { 'deployedSha-qa': 'yes', 'oldSha-prod': 'no' },
+    );
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const state = p.buildState();
+    const pr = state.repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8951)!;
+    expect(pr.stage.stage).toBe('awaiting-prod');
+    const rec = history.listTrackedMerged(7, NOW).find((r) => r.number === 8951)!;
+    expect(rec.qaLiveAt).toBe(NOW.toISOString());
+    expect(rec.prodLiveAt).toBeNull();
+  });
+
+  it('first observation already-live records NO deploy gap (backfill poisoning guard)', async () => {
+    // PR is found already deployed on qa at first observation — the merged→live
+    // wall-clock gap is unknowable here (this instance never saw it not-live)
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'deployedSha-qa' },
+      { 'deployedSha-qa': 'yes' },
+    );
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    // env is marked live, but no gap sample is recorded
+    expect(history.listTrackedMerged(7, NOW).find((r) => r.number === 8951)!.qaLiveAt)
+      .toBe(NOW.toISOString());
+    expect(history.medianDeployGap('acme/widgets', 'qa')).toBeNull();
+  });
+
+  it('observed not-live then live records the deploy gap', async () => {
+    let t = NOW.getTime();
+    const shaBox: Record<string, string | null> = { 'https://qa.widgets.example.com/health': 'oldSha-qa' };
+    const deploy = fakeDeploy(shaBox, { 'oldSha-qa': 'no', 'newSha-qa': 'yes' });
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.deployOnce();   // observed NOT live on qa
+    expect(history.medianDeployGap('acme/widgets', 'qa')).toBeNull();
+    shaBox['https://qa.widgets.example.com/health'] = 'newSha-qa';
+    t += 5 * 60_000;        // deploy lands 5 min later
+    await p.deployOnce();
+    // merged 11:40 → live 12:05 = 1500s gap, recorded because not-live was observed first
+    expect(history.medianDeployGap('acme/widgets', 'qa')).toBe(1500);
+    expect(history.listTrackedMerged(7, new Date(t)).find((r) => r.number === 8951)!.qaLiveAt)
+      .toBe(new Date(t).toISOString());
+  });
+
+  it('rate-limit floor degrades hot interval', () => {
+    const c = fakeClient(); c.remaining = 500;
+    const p = new Poller({ client: c as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(60_000);
+  });
+
+  it('rateLimitFloor is configurable: a lower floor keeps normal intervals', () => {
+    const c = fakeClient(); c.remaining = 500;
+    const p = new Poller({ client: c as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, rateLimitFloor: 400 }, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(CONFIG.intervals.hotMs); // 500 ≥ 400 — not degraded
+    expect(p.nextDelayMs('sweep')).toBe(CONFIG.intervals.sweepMs);
+  });
+});
+
+const staleDetail = (completedA: string, completedB: string) => ({
+  r0: { nameWithOwner: 'acme/widgets', pr8970: {
+    number: 8970, title: 'docs: tweak', url: 'u8970', isDraft: false, mergeStateStatus: 'CLEAN',
+    mergedAt: null, headRefOid: 'head8970', autoMergeRequest: null, mergeCommit: null, mergeQueueEntry: null,
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+      contexts: { pageInfo: { hasNextPage: false }, nodes: [
+        { ...CHECK_DONE, isRequired: false,
+          startedAt: '2026-06-10T11:35:00Z', completedAt: completedA },
+        { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests', isRequired: false,
+          startedAt: '2026-06-10T11:30:00Z', completedAt: completedB },
+      ] } } } }] },
+  } },
+});
+const staleSweep = {
+  open0: { issueCount: 1, nodes: [{ number: 8970, title: 'docs: tweak', url: 'u8970', isDraft: false,
+    mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null }] },
+  open1: { issueCount: 0, nodes: [] },
+  merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+};
+
+// Explicit [] disables prefixes entirely (even if derivation later succeeds) —
+// these tests exercise the no-required-signal fallback paths that prefixes
+// would otherwise bypass.
+const NO_PREFIX_CONFIG: AppConfig = {
+  ...CONFIG,
+  repos: { 'acme/widgets': { requiredCheckPrefixes: [] } },
+};
+
+describe('Poller expectedSet staleness guard (no required marking)', () => {
+  beforeEach(() => {
+    // fat history: a path-gated check that won't run on this PR
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'heavy-suite / Integration', 'pull_request',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:20:00Z`, 'SUCCESS');
+    }
+  });
+
+  it('old completed checks + fat history expectedSet → ready, not stuck in ci', async () => {
+    // newest completion 11:42, NOW 12:00 → 18 min > 10 min staleness threshold
+    const client = fakeClient(staleSweep, staleDetail('2026-06-10T11:40:00Z', '2026-06-10T11:42:00Z'), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_PREFIX_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8970)!;
+    expect(pr.stage.stage).toBe('ready');
+    expect(pr.stage.substate).toBe('idle');
+  });
+
+  it('recent completions keep the full expectedSet → still ci (needs: chain may unlock more)', async () => {
+    // newest completion 11:58 → only 2 min old: absent expected checks may still appear
+    const client = fakeClient(staleSweep, staleDetail('2026-06-10T11:56:00Z', '2026-06-10T11:58:00Z'), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_PREFIX_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8970)!;
+    expect(pr.stage.stage).toBe('ci');
+    expect(pr.stage.percent).toBeLessThan(100);
+  });
+});
+
+describe('Poller requiredCheckPrefixes (late-materializing required checks)', () => {
+  // Mid-run snapshot: nothing is marked isRequired yet; one prefix-matched check is
+  // running and one advisory (lighthouse) is also present.
+  const midRunDetail = (advisory: Record<string, unknown>) => ({
+    r0: { nameWithOwner: 'acme/widgets', pr8970: {
+      number: 8970, title: 'docs: tweak', url: 'u8970', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8970', autoMergeRequest: null, mergeCommit: null, mergeQueueEntry: null,
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          { ...CHECK_DONE, isRequired: false },
+          { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests', isRequired: false,
+            status: 'IN_PROGRESS', conclusion: null, startedAt: '2026-06-10T11:55:00Z', completedAt: null },
+          { ...CHECK_DONE, name: 'lighthouse', isRequired: false, ...advisory },
+        ] } } } }] },
+    } },
+  });
+
+  async function classifyMidRun(advisory: Record<string, unknown>) {
+    const client = fakeClient(staleSweep, midRunDetail(advisory), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: PREFIX_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    return p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8970)!;
+  }
+
+  it('advisory (non-matching) FAILURE does NOT park — stage stays ci', async () => {
+    const pr = await classifyMidRun({ conclusion: 'FAILURE' });
+    expect(pr.stage.stage).toBe('ci');
+    expect(pr.stage.substate).toBeNull();
+  });
+
+  it('prefix-matched FAILURE parks the PR', async () => {
+    const client = fakeClient(staleSweep, midRunDetail({
+      name: 'fast-checks / Type Check', conclusion: 'FAILURE' }), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: PREFIX_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8970)!;
+    expect(pr.stage.stage).toBe('parked');
+    expect(pr.stage.substate).toBe('ci-failed');
+  });
+
+  it('expectedSet keeps prefix-matched history names (denominator does not collapse)', async () => {
+    // history also knows an advisory check — it must NOT count toward progress,
+    // while both prefix-matched names must stay in the denominator
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'lighthouse', 'pull_request',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:08:00Z`, 'SUCCESS');
+    }
+    const pr = await classifyMidRun({ status: 'IN_PROGRESS', conclusion: null, completedAt: null });
+    expect(pr.stage.stage).toBe('ci');
+    // 1 of 2 prefix-matched expected checks done → strictly between 0 and 100, and
+    // unaffected by lighthouse (which would push the denominator to 3)
+    expect(pr.stage.percent).toBeGreaterThan(0);
+    expect(pr.stage.percent).toBeLessThan(100);
+  });
+
+  it('checkViews isRequired reflects the prefix predicate (advisory stays false)', async () => {
+    const pr = await classifyMidRun({ status: 'IN_PROGRESS', conclusion: null, completedAt: null });
+    const byName = Object.fromEntries(pr.checks.map((c) => [c.name, c.isRequired]));
+    expect(byName['fast-checks / ESLint']).toBe(true);
+    expect(byName['pr-affected-tests / Affected Unit + Server Tests']).toBe(true);
+    expect(byName['lighthouse']).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Poller hardening (tasks 10-11 review fixes)
+// ---------------------------------------------------------------------------
+
+const EMPTY_SWEEP = {
+  open0: { issueCount: 0, nodes: [] }, open1: { issueCount: 0, nodes: [] },
+  merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+};
+
+describe('Poller scheduling (warm tier + self-re-arming timers)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('sweep tick chains a full detail refresh so cold PRs stay warm', async () => {
+    vi.useFakeTimers();
+    // PR 8970 classifies 'ready' (cold) after its first detail fetch — the hot
+    // tick alone would never refresh it again.
+    const client = fakeClient(staleSweep,
+      staleDetail('2026-06-10T11:40:00Z', '2026-06-10T11:42:00Z'), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.start();
+    await vi.advanceTimersByTimeAsync(0); // flush initial kick (sweep + full detail)
+    const detailCalls = () =>
+      client.graphql.mock.calls.filter(([q]) => (q as string).includes('pr8970: pullRequest')).length;
+    expect(detailCalls()).toBe(1);
+    expect(p.getState().repos[0]!.prs[0]!.stage.stage).toBe('ready');
+    // hot ticks fire at 15/30/45/60s but skip the cold PR; the sweep tick at 60s warms it
+    await vi.advanceTimersByTimeAsync(CONFIG.intervals.sweepMs);
+    expect(detailCalls()).toBe(2);
+    p.stop();
+  });
+
+  it('stop() clears pending timeouts', async () => {
+    vi.useFakeTimers();
+    const client = fakeClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const calls = client.graphql.mock.calls.length;
+    p.stop();
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(client.graphql.mock.calls.length).toBe(calls);
+  });
+
+  it('normal delays follow configured intervals', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.nextDelayMs('hot')).toBe(CONFIG.intervals.hotMs);
+    expect(p.nextDelayMs('sweep')).toBe(CONFIG.intervals.sweepMs);
+    expect(p.nextDelayMs('deploy')).toBe(CONFIG.intervals.deployMs);
+  });
+
+  it('sweep delay degrades to 5 min when remaining < 1000', () => {
+    const c = fakeClient(); c.remaining = 500;
+    const p = new Poller({ client: c as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.nextDelayMs('sweep')).toBe(300_000);
+    expect(p.nextDelayMs('hot')).toBe(60_000); // effectiveHotMs floor
+  });
+
+  it('RateLimitError pauses every cycle for at least retryAfterSeconds', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = { remaining: 4000, resetAt: null,
+      graphql: vi.fn(async () => { throw new RateLimitError(120); }) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(p.nextDelayMs('hot')).toBeGreaterThanOrEqual(120_000);
+    expect(p.nextDelayMs('sweep')).toBeGreaterThanOrEqual(120_000);
+    expect(p.nextDelayMs('deploy')).toBeGreaterThanOrEqual(120_000);
+  });
+});
+
+describe('Poller cycle containment + re-entrancy', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('a TypeError from client.graphql never escapes; staleSince is set and logged', async () => {
+    vi.useFakeTimers();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = { remaining: 4000, resetAt: null,
+      graphql: vi.fn(async () => { throw new TypeError('cannot read properties of undefined'); }) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(CONFIG.intervals.sweepMs);
+    expect(p.buildState().staleSince).toBe(NOW.toISOString());
+    expect(err).toHaveBeenCalled();
+    expect(String(err.mock.calls[0]).includes('cannot read properties')).toBe(true);
+    p.stop();
+  });
+
+  it('a tick that fires while the same cycle is in flight is skipped', async () => {
+    const client = { remaining: 4000, resetAt: null,
+      graphql: vi.fn(() => new Promise(() => { /* never resolves */ })) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    void p.sweepOnce();        // hangs on the never-resolving fetch
+    await p.sweepOnce();       // latched — resolves immediately, no second fetch
+    expect(client.graphql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Poller propagating ancestry state', () => {
+  it("isAncestor 'missing' renders merged PR as qa-deploy/propagating, not a percent bar", async () => {
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'deployedSha-qa' },
+      { 'deployedSha-qa': 'missing' },
+    );
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8951)!;
+    expect(pr.stage.stage).toBe('qa-deploy');
+    expect(pr.stage.substate).toBe('propagating');
+    expect(pr.stage.percent).toBeNull();
+  });
+
+  it('ancestry checks for the same (sha, deployedSha) pair are throttled to once per 60s', async () => {
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'deployedSha-qa' },
+      { 'deployedSha-qa': 'missing' },
+    );
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    await p.deployOnce(); // same clock → within 60s of the first check
+    expect(vi.mocked(deploy.isAncestor)).toHaveBeenCalledTimes(1);
+  });
+
+  it("a later 'yes' clears propagating and marks the env live", async () => {
+    let t = NOW.getTime();
+    const ancestry: Record<string, 'yes' | 'no' | 'missing'> = { 'deployedSha-qa': 'missing' };
+    const deploy = fakeDeploy({ 'https://qa.widgets.example.com/health': 'deployedSha-qa' }, ancestry);
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.deployOnce();
+    expect(p.buildState().repos[0]!.prs.find((x) => x.number === 8951)!.stage.substate)
+      .toBe('propagating');
+    ancestry['deployedSha-qa'] = 'yes';
+    t += 61_000; // step past the ancestry throttle window
+    await p.deployOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8951)!;
+    expect(pr.stage.stage).toBe('awaiting-prod');
+    expect(history.listTrackedMerged(7, new Date(t)).find((r) => r.number === 8951)!.qaLiveAt)
+      .not.toBeNull();
+  });
+
+  it('prod health unreachable → prodLive unknown; merged PR still classifies (awaiting-prod)', async () => {
+    // qa is live, prod /health is down (no sha) — must not crash or show a bogus prod state
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'deployedSha-qa' },
+      { 'deployedSha-qa': 'yes' },
+    );
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8951)!;
+    expect(pr.stage.stage).toBe('awaiting-prod');
+  });
+});
+
+describe('Poller cache pruning + sweep bookkeeping', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('prunes stage/queue/group entries for vanished PRs after sweep', async () => {
+    const sweepBox = { current: SWEEP_RESPONSE as Record<string, unknown> };
+    const client = { remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweepBox.current;
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const internals = p as unknown as {
+      stages: Map<string, unknown>;
+      queueEntries: Map<string, unknown[]>;
+      groupChecks: Map<string, unknown[]>;
+    };
+    expect(internals.stages.has('acme/widgets#8962')).toBe(true);
+    // simulate leftovers from a since-emptied merge queue
+    internals.queueEntries.set('acme/widgets', []);
+    internals.groupChecks.set('deadOid', []);
+    sweepBox.current = EMPTY_SWEEP;
+    await p.sweepOnce();
+    expect(internals.stages.has('acme/widgets#8962')).toBe(false);
+    expect(internals.queueEntries.size).toBe(0);
+    expect(internals.groupChecks.size).toBe(0);
+  });
+
+  it('warns once per sweep when a search payload is truncated', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sweep = {
+      ...SWEEP_RESPONSE,
+      open0: { issueCount: 60, nodes: SWEEP_RESPONSE.open0.nodes },
+      merged0: { issueCount: 99, nodes: SWEEP_RESPONSE.merged0.nodes },
+    };
+    const p = new Poller({ client: fakeClient(sweep) as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0])).toMatch(/acme/);
+  });
+
+  it('lastSweep meta records sweep start, not end', async () => {
+    let t = NOW.getTime();
+    const client = { remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        t += 5_000; // the fetch itself takes 5s
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        throw new Error('unexpected');
+      }) };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    expect(history.getMeta('lastSweep')).toBe(NOW.toISOString());
+  });
+});
+
+describe('Poller deep merged sweep pagination', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // 120 merged PRs for owner acme split over 3 pages (50/50/20)
+  const mergedNode = (n: number) => ({ number: n, title: `pr ${n}`, url: `u${n}`, isDraft: false,
+    mergedAt: '2026-06-09T10:00:00Z', repository: { nameWithOwner: 'acme/widgets' },
+    mergeCommit: { oid: `sha${n}` } });
+  const page = (start: number, count: number, next: string | null) => ({
+    issueCount: 120,
+    pageInfo: { hasNextPage: next != null, endCursor: next },
+    nodes: Array.from({ length: count }, (_, i) => mergedNode(start + i)),
+  });
+  const pagedClient = () => ({
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async (q: string) => {
+      if (q.includes('open0: search')) return {
+        open0: { issueCount: 0, nodes: [] }, open1: { issueCount: 0, nodes: [] },
+        merged0: page(1, 50, 'C1'), merged1: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+      };
+      if (q.includes('after: "C1"')) return { merged: page(51, 50, 'C2') };
+      if (q.includes('after: "C2"')) return { merged: page(101, 20, null) };
+      throw new Error(`unexpected query: ${q.slice(0, 100)}`);
+    }),
+  });
+
+  it('deep flag set → follows pagination and ingests all 120 merged PRs', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const p = new Poller({ client: pagedClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce(true);
+    expect(history.listTrackedMerged(7, NOW)).toHaveLength(120);
+    expect(warn).not.toHaveBeenCalled(); // paginated aliases don't warn truncation
+  });
+
+  it('routine sweep (no deep flag) stays single-page and keeps the truncation warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = pagedClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(client.graphql).toHaveBeenCalledTimes(1);
+    expect(history.listTrackedMerged(7, NOW)).toHaveLength(50);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0])).toMatch(/truncated/);
+  });
+});
+
+describe('Poller state memoization', () => {
+  it('cycles memoize state via emitUpdate; getState() returns the memoized object', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const seen: DashboardState[] = [];
+    p.on('update', () => seen.push(p.getState()));
+    await p.sweepOnce();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.repos.length).toBeGreaterThan(0);
+    expect(p.getState()).toBe(seen[0]); // identity: memoized, not rebuilt per consumer
+  });
+
+  it('getState() before any cycle falls back to a fresh build', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.getState().repos).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task A: queueAheadCount threading
+// ---------------------------------------------------------------------------
+
+describe('Poller queueAheadCount in PrView', () => {
+  // Build a PR detail response that puts PR 8962 in the merge queue (QUEUED state),
+  // and wire up a queue response with a second entry ahead of it.
+  const queuedDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      number: 8962, title: 'fix: overlap', url: 'u8962', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8962', autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeCommit: null,
+      mergeQueueEntry: { position: 2, state: 'QUEUED', enqueuedAt: null, headCommit: null },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          { ...CHECK_DONE },
+        ] } } } }] },
+    } },
+  };
+
+  const QUEUE_RESPONSE = {
+    repository: {
+      mergeQueue: {
+        entries: {
+          nodes: [
+            // Entry ahead: position 1, non-MERGEABLE
+            { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: null,
+              headCommit: null, pullRequest: { number: 9001 } },
+            // Our PR: position 2
+            { position: 2, state: 'QUEUED', enqueuedAt: null,
+              headCommit: null, pullRequest: { number: 8962 } },
+          ],
+        },
+      },
+    },
+  };
+
+  function queueClient() {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return queuedDetail;
+        if (q.includes('mergeQueue')) return QUEUE_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('queueAheadCount is non-null and equals entries ahead when stage is queue', async () => {
+    const p = new Poller({ client: queueClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const state = p.buildState();
+    const pr = state.repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.queueAheadCount).toBe(1);
+  });
+
+  it('queueAheadCount is null for a non-queue stage (ci)', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const state = p.buildState();
+    const pr = state.repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('ci');
+    expect(pr.queueAheadCount).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task D: observed queue throughput
+// ---------------------------------------------------------------------------
+
+describe('Poller observed group runs + queue waits', () => {
+  const GROUP_OID = 'groupOid1';
+
+  // PR 8962 sits in the merge queue with a CI group running on GROUP_OID.
+  const queuedDetail = (over: Record<string, unknown> = {}) => ({
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      number: 8962, title: 'fix: overlap', url: 'u8962', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8962', autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeCommit: null,
+      mergeQueueEntry: { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+        headCommit: { oid: GROUP_OID } },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [{ ...CHECK_DONE }] } } } }] },
+      ...over,
+    } },
+  });
+
+  const queueResponse = {
+    repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+        headCommit: { oid: GROUP_OID }, pullRequest: { number: 8962 } },
+    ] } } },
+  };
+
+  const mgCheck = (over: Record<string, unknown>) => ({
+    __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+    startedAt: '2026-06-10T11:30:00Z', completedAt: null, detailsUrl: 'u',
+    checkSuite: { workflowRun: { event: 'merge_group' } }, ...over,
+  });
+  const rollupRunning = { repository: { o0: { oid: GROUP_OID, statusCheckRollup: { contexts: { nodes: [
+    mgCheck({}),
+    mgCheck({ name: 'unit', startedAt: '2026-06-10T11:31:00Z' }),
+  ] } } } } };
+  const rollupDone = { repository: { o0: { oid: GROUP_OID, statusCheckRollup: { contexts: { nodes: [
+    mgCheck({ status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-06-10T11:45:00Z' }),
+    mgCheck({ name: 'unit', startedAt: '2026-06-10T11:31:00Z',
+      status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-06-10T11:40:00Z' }),
+  ] } } } } };
+
+  function boxedClient(detailBox: { current: Record<string, unknown> },
+    rollupBox: { current: Record<string, unknown> }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return detailBox.current;
+        if (q.includes('object(oid:')) return rollupBox.current;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('all-COMPLETED group with a FAILURE conclusion does not record a group_runs row', async () => {
+    const rollupFailed = { repository: { o0: { oid: GROUP_OID, statusCheckRollup: { contexts: { nodes: [
+      mgCheck({ status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-06-10T11:42:00Z' }),
+      mgCheck({ name: 'unit', startedAt: '2026-06-10T11:31:00Z',
+        status: 'COMPLETED', conclusion: 'FAILURE', completedAt: '2026-06-10T11:38:00Z' }),
+    ] } } } } };
+    const detailBox = { current: queuedDetail() };
+    const rollupBox = { current: rollupFailed as Record<string, unknown> };
+    const recordSpy = vi.spyOn(history, 'recordGroupRun');
+    const client = boxedClient(detailBox, rollupBox);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();  // all-COMPLETED but contains FAILURE — must NOT record
+    expect(recordSpy).not.toHaveBeenCalled();
+    expect(history.medianGroupRun('acme/widgets')).toBeNull();
+  });
+
+  it('records a group run exactly once when its checks first become all-COMPLETED', async () => {
+    const detailBox = { current: queuedDetail() };
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const recordSpy = vi.spyOn(history, 'recordGroupRun');
+    const client = boxedClient(detailBox, rollupBox);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();                 // group still running — nothing recorded
+    expect(recordSpy).not.toHaveBeenCalled();
+    rollupBox.current = rollupDone;
+    await p.queueOnce();                 // transition to all-COMPLETED — record once
+    await p.queueOnce();                 // completed group is no longer refetched
+    expect(recordSpy).toHaveBeenCalledTimes(1);
+    // duration = max(completedAt 11:45) − min(startedAt 11:30) = 900s
+    expect(recordSpy).toHaveBeenCalledWith('acme/widgets', 900, '2026-06-10T11:45:00Z');
+    expect(history.medianGroupRun('acme/widgets')).toBe(900);
+  });
+
+  it('medianGroupSecs prefers the observed median over the longest-check proxy', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const internals = p as unknown as { medianGroupSecs(repo: string): number | null };
+    // proxy only: longest merge_group check p50
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:08:00Z`, 'SUCCESS');
+    }
+    expect(internals.medianGroupSecs('acme/widgets')).toBe(480);
+    // observed group runs win once present
+    history.recordGroupRun('acme/widgets', 1234, '2026-06-10T11:00:00Z');
+    expect(internals.medianGroupSecs('acme/widgets')).toBe(1234);
+  });
+
+  it('records the queue wait when a queued PR transitions to merged', async () => {
+    const detailBox = { current: queuedDetail() };
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const p = new Poller({ client: boxedClient(detailBox, rollupBox) as never, history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();               // captures enqueuedAt 11:30
+    expect(history.medianQueueWait('acme/widgets')).toBeNull();
+    detailBox.current = queuedDetail({ mergedAt: '2026-06-10T11:50:00Z',
+      mergeQueueEntry: null, mergeCommit: { oid: 'squash8962' } });
+    await p.detailOnce();               // merged: wait = 11:50 − 11:30 = 1200s
+    expect(history.medianQueueWait('acme/widgets')).toBe(1200);
+    const internals = p as unknown as { queueEnqueuedAt: Map<string, string> };
+    expect(internals.queueEnqueuedAt.has('acme/widgets#8962')).toBe(false);
+  });
+
+  it('a PR dequeued without merging records no queue wait and drops its enqueuedAt', async () => {
+    const detailBox = { current: queuedDetail() };
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const p = new Poller({ client: boxedClient(detailBox, rollupBox) as never, history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    detailBox.current = queuedDetail({ mergeQueueEntry: null }); // kicked out of the queue
+    await p.detailOnce();
+    expect(history.medianQueueWait('acme/widgets')).toBeNull();
+    const internals = p as unknown as { queueEnqueuedAt: Map<string, string> };
+    expect(internals.queueEnqueuedAt.has('acme/widgets#8962')).toBe(false);
+  });
+
+  it('pruneCaches drops recordedGroups + queueEnqueuedAt entries for vanished subjects', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const internals = p as unknown as {
+      recordedGroups: Set<string>;
+      queueEnqueuedAt: Map<string, string>;
+    };
+    internals.recordedGroups.add('deadOid');
+    internals.queueEnqueuedAt.set('acme/widgets#9999', '2026-06-10T11:00:00Z');
+    await p.sweepOnce(); // sweep does not contain PR 9999 nor any queue groups
+    expect(internals.recordedGroups.has('deadOid')).toBe(false);
+    expect(internals.queueEnqueuedAt.has('acme/widgets#9999')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task G: conditional-remaining estimator wired into both populations
+// ---------------------------------------------------------------------------
+
+describe('Poller wires history samples into computeProgress (conditional estimator)', () => {
+  const AFFECTED = 'pr-affected-tests / Affected Unit + Server Tests';
+
+  it('pull_request population: bimodal history re-anchors a running check ETA', async () => {
+    // beforeEach seeded 5×600s for AFFECTED; complete the bimodal set: +1×600, +6×120
+    history.recordCheckDuration('acme/widgets', AFFECTED, 'pull_request',
+      '2026-06-06T10:00:00Z', '2026-06-06T10:10:00Z', 'SUCCESS');
+    for (let i = 0; i < 6; i++) {
+      history.recordCheckDuration('acme/widgets', AFFECTED, 'pull_request',
+        `2026-06-07T1${i}:00:00Z`, `2026-06-07T1${i}:02:00Z`, 'SUCCESS');
+    }
+    // running check elapsed = 150s (11:57:30 → 12:00) — past the fast mode (120s)
+    const detail = {
+      r0: { nameWithOwner: 'acme/widgets', pr8962: {
+        ...DETAIL_RESPONSE.r0.pr8962,
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+          contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE,
+            { ...CHECK_RUNNING, startedAt: '2026-06-10T11:57:30Z' }] } } } }] },
+      } },
+    };
+    const p = new Poller({ client: fakeClient(SWEEP_RESPONSE, detail) as never, history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('ci');
+    // p50 of the bimodal set is 120 → old logic would say max(120−150, 0) = 0;
+    // conditional median of qualifying samples (6×600) re-anchors to 600−150 = 450
+    expect(pr.stage.etaSeconds).toBe(450);
+    expect(pr.stage.overdue).toBe(false);
+  });
+
+  it('merge_group population: bimodal history re-anchors a running group ETA', async () => {
+    // bimodal merge_group history for check 'ci': 6×120, 6×600
+    for (let i = 0; i < 6; i++) {
+      history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
+        `2026-06-07T1${i}:00:00Z`, `2026-06-07T1${i}:02:00Z`, 'SUCCESS');
+      history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
+        `2026-06-08T1${i}:00:00Z`, `2026-06-08T1${i}:10:00Z`, 'SUCCESS');
+    }
+    const detail = {
+      r0: { nameWithOwner: 'acme/widgets', pr8962: {
+        ...DETAIL_RESPONSE.r0.pr8962,
+        mergeStateStatus: 'CLEAN', autoMergeRequest: { mergeMethod: 'SQUASH' },
+        mergeQueueEntry: { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:50:00Z',
+          headCommit: { oid: 'gOid' } },
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+          contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE] } } } }] },
+      } },
+    };
+    const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:50:00Z',
+        headCommit: { oid: 'gOid' }, pullRequest: { number: 8962 } },
+    ] } } } };
+    const rollup = { repository: { o0: { oid: 'gOid', statusCheckRollup: { contexts: { nodes: [
+      { __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+        startedAt: '2026-06-10T11:57:30Z', completedAt: null, detailsUrl: 'u',
+        checkSuite: { workflowRun: { event: 'merge_group' } } },
+    ] } } } } };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return detail;
+        if (q.includes('object(oid:')) return rollup;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.stage.etaSeconds).toBe(450); // conditional re-anchor on the group check
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task E: derived required-check prefixes
+// ---------------------------------------------------------------------------
+
+describe('Poller derived required-check prefixes', () => {
+  // Mid-run snapshot with nothing marked isRequired: one done check, one running,
+  // one 'lighthouse'. Which of these count as required depends purely on the
+  // effective prefixes — making prefix-source precedence observable.
+  const midRunDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr8970: {
+      number: 8970, title: 'docs: tweak', url: 'u8970', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8970', autoMergeRequest: null, mergeCommit: null, mergeQueueEntry: null,
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          { ...CHECK_DONE, isRequired: false },
+          { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests', isRequired: false,
+            status: 'IN_PROGRESS', conclusion: null, startedAt: '2026-06-10T11:55:00Z', completedAt: null },
+          { ...CHECK_DONE, name: 'lighthouse', isRequired: false,
+            status: 'IN_PROGRESS', conclusion: null, completedAt: null },
+        ] } } } }] },
+    } },
+  };
+
+  async function requiredByName(p: Poller) {
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8970)!;
+    return Object.fromEntries(pr.checks.map((c) => [c.name, c.isRequired]));
+  }
+  const client = () => fakeClient(staleSweep, midRunDetail, 'pr8970: pullRequest');
+
+  it('derived prefixes flow into checkViews/required classification', async () => {
+    const p = new Poller({ client: client() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.setDerivedPrefixes('acme/widgets', ['lighthouse']);
+    const byName = await requiredByName(p);
+    expect(byName['lighthouse']).toBe(true);             // derived prefix matched
+    expect(byName['fast-checks / ESLint']).toBe(false);  // not in the derived set
+  });
+
+  it('config requiredCheckPrefixes wins over derived prefixes', async () => {
+    const config = { ...CONFIG,
+      repos: { 'acme/widgets': { requiredCheckPrefixes: ['fast-checks /'] } } };
+    const p = new Poller({ client: client() as never, history, deploy: noDeploy(),
+      config, now: () => NOW });
+    p.setDerivedPrefixes('acme/widgets', ['lighthouse']);
+    const byName = await requiredByName(p);
+    expect(byName['fast-checks / ESLint']).toBe(true);
+    expect(byName['lighthouse']).toBe(false);
+  });
+
+  it('without config or derived prefixes, no prefixes apply (chain ends at none)', async () => {
+    // The hand-maintained FALLBACK list is gone — with neither config nor derived
+    // prefixes, nothing is prefix-required (only GitHub's isRequired marking counts,
+    // and these mid-run fixtures all carry isRequired: false).
+    const p = new Poller({ client: client() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const byName = await requiredByName(p);
+    expect(byName['fast-checks / ESLint']).toBe(false);
+    expect(byName['pr-affected-tests / Affected Unit + Server Tests']).toBe(false);
+    expect(byName['lighthouse']).toBe(false);
+  });
+
+  it('setDerivedPrefixes logs the derivation once', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.setDerivedPrefixes('acme/widgets', ['ci', 'build']);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0])).toMatch(/acme\/widgets.*ci, build/);
+    log.mockRestore();
+  });
+
+  it('deploy cycle re-derives from ci.yml at most once per 24h', async () => {
+    let t = NOW.getTime();
+    const ciYaml = 'jobs:\n  lint: {}\n  ci:\n    needs: [lint]\n';
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => ciYaml),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => new Date(t) });
+    await p.deployOnce();
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deploy.readFileAtHead))
+      .toHaveBeenCalledWith('acme/widgets', '.github/workflows/ci.yml', 'main');
+    expect(String(log.mock.calls[0])).toMatch(/ci, lint/); // derived and logged
+    t += 60_000;
+    await p.deployOnce();   // within 24h — no re-read
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(1);
+    t += 24 * 3600_000;
+    await p.deployOnce();   // ≥24h later — re-derives
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(2);
+    log.mockRestore();
+  });
+
+  it('unparseable ci.yml during deploy re-derivation keeps prior derived prefixes', async () => {
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => 'not: [valid: yaml'),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let t = NOW.getTime();
+    const p = new Poller({ client: client() as never, history, deploy,
+      config: CONFIG, now: () => new Date(t) });
+    p.setDerivedPrefixes('acme/widgets', ['fast-checks /']); // earlier successful derivation
+    expect(log).toHaveBeenCalledTimes(1);
+    t += 25 * 3600_000; // step past the 24h derivation throttle so deployOnce re-reads ci.yml
+    await p.deployOnce();
+    expect(vi.mocked(deploy.readFileAtHead)).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1); // setDerivedPrefixes never re-ran (unparseable)
+    // the earlier derived prefixes still classify required checks
+    const byName = await requiredByName(p);
+    expect(byName['fast-checks / ESLint']).toBe(true);
+    expect(byName['lighthouse']).toBe(false);
+    log.mockRestore();
+  });
+
+  it('a deploy fake without readFileAtHead does not break the deploy cycle (best-effort)', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await expect(p.deployOnce()).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task W1: derived needs graph
+// ---------------------------------------------------------------------------
+
+/** Build an all-events derived-graph node map from a plain needs adjacency. */
+const nodeMap = (m: Map<string, string[]>) =>
+  new Map([...m].map(([k, needs]) => [k, { needs, activity: { mode: 'all' as const } }]));
+
+describe('Poller derived needs graph (W1)', () => {
+  const WIDGETS_NEEDS = new Map<string, string[]>([
+    ['ci', ['static-checks /', 'build', 'build-test']],
+    ['static-checks /', ['Prepare (prisma + packages)']],
+    ['build', ['Prepare (prisma + packages)']],
+    ['build-test', ['Prepare (prisma + packages)']],
+    ['Prepare (prisma + packages)', []],
+  ]);
+
+  it('needsFor returns null without a derived graph', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.needsFor('acme/widgets', 'ci')).toBeNull();
+  });
+
+  it('matches check names to graph nodes by the shared prefix semantics', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.setDerivedGraph('acme/widgets', nodeMap(WIDGETS_NEEDS));
+    // exact node
+    expect(p.needsFor('acme/widgets', 'ci')).toEqual(['static-checks /', 'build', 'build-test']);
+    // a check under a uses-job node matches the ' /' prefix
+    expect(p.needsFor('acme/widgets', 'static-checks / TypeScript'))
+      .toEqual(['Prepare (prisma + packages)']);
+    // longest-prefix wins: build-test must not resolve to the 'build' node
+    expect(p.needsFor('acme/widgets', 'build-test')).toEqual(['Prepare (prisma + packages)']);
+    // unmatched name → null
+    expect(p.needsFor('acme/widgets', 'lighthouse')).toBeNull();
+    // other repos remain graph-less
+    expect(p.needsFor('other/repo', 'ci')).toBeNull();
+  });
+
+  it('deploy-cycle re-derivation populates the needs graph alongside prefixes', async () => {
+    const ciYaml = 'jobs:\n  lint: {}\n  ci:\n    needs: [lint]\n';
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => ciYaml),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.deployOnce();
+    expect(p.needsFor('acme/widgets', 'ci')).toEqual(['lint']);
+    expect(p.needsFor('acme/widgets', 'lint')).toEqual([]);
+    log.mockRestore();
+  });
+
+  it('needActiveFor evaluates the node activity per event, defaulting to true when unknown', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    // unknown repo/graph → true (never prune on missing knowledge)
+    expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'pull_request')).toBe(true);
+    p.setDerivedGraph('acme/widgets', new Map([
+      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] } }],
+      ['build', { needs: [], activity: { mode: 'all' } }],
+    ]));
+    expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'merge_group')).toBe(true);
+    expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'pull_request')).toBe(false);
+    expect(p.needActiveFor('acme/widgets', 'build', 'pull_request')).toBe(true);
+    // node missing from the graph → true
+    expect(p.needActiveFor('acme/widgets', 'ghost', 'pull_request')).toBe(true);
+  });
+
+  it('deploy-cycle re-derivation carries the if: event activity into the graph', async () => {
+    const ciYaml = "jobs:\n  mg-only:\n    if: github.event_name == 'merge_group'\n  ci:\n    needs: [mg-only]\n";
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => ciYaml),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.deployOnce();
+    expect(p.needActiveFor('acme/widgets', 'mg-only', 'merge_group')).toBe(true);
+    expect(p.needActiveFor('acme/widgets', 'mg-only', 'pull_request')).toBe(false);
+    log.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task W2: runner-wait ingestion, payload classification, ETA queue-delay
+// ---------------------------------------------------------------------------
+
+describe('Poller runner waits (W2)', () => {
+  const PREPARE = 'Prepare (prisma + packages)';
+  const AFFECTED = 'pr-affected-tests / Affected Unit + Server Tests';
+  const NEEDS = new Map<string, string[]>([
+    ['ci', ['fast-checks /', 'pr-affected-tests /']],
+    ['fast-checks /', [PREPARE]],
+    ['pr-affected-tests /', [PREPARE]],
+    [PREPARE, []],
+  ]);
+
+  const prepDone = {
+    ...CHECK_DONE, name: PREPARE, isRequired: false,
+    startedAt: '2026-06-10T11:48:00Z', completedAt: '2026-06-10T11:53:00Z',
+  };
+
+  function pollerWith(detail: Record<string, unknown>) {
+    const p = new Poller({ client: fakeClient(SWEEP_RESPONSE, detail) as never, history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    p.setDerivedGraph('acme/widgets', nodeMap(NEEDS));
+    return p;
+  }
+  const detailWith = (nodes: Record<string, unknown>[]) => ({
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      ...DETAIL_RESPONSE.r0.pr8962,
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+        contexts: { pageInfo: { hasNextPage: false }, nodes } } } }] },
+    } },
+  });
+
+  it('detail fetch ingests runner-wait samples (startedAt − needed completedAt)', async () => {
+    // AFFECTED started 11:55, its need (Prepare) completed 11:53 → 120s pickup wait
+    const p = pollerWith(detailWith([prepDone, CHECK_RUNNING]));
+    await p.sweepOnce();
+    await p.detailOnce();
+    expect(history.expectedRunnerWait('acme/widgets', AFFECTED, 'pull_request')).toBe(120);
+    // Prepare is a root job — no sample for it
+    expect(history.expectedRunnerWait('acme/widgets', PREPARE, 'pull_request')).toBeNull();
+  });
+
+  it('group-rollup fetch ingests merge_group runner-wait samples', async () => {
+    const GROUP_OID = 'oidW2';
+    const mg = (over: Record<string, unknown>) => ({
+      __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+      startedAt: null, completedAt: null, detailsUrl: 'u',
+      checkSuite: { workflowRun: { event: 'merge_group' } }, ...over,
+    });
+    const rollup = { repository: { o0: { oid: GROUP_OID, statusCheckRollup: { contexts: { nodes: [
+      mg({ name: PREPARE, status: 'COMPLETED', conclusion: 'SUCCESS',
+        startedAt: '2026-06-10T11:30:00Z', completedAt: '2026-06-10T11:33:00Z' }),
+      mg({ name: 'fast-checks / ESLint', startedAt: '2026-06-10T11:34:00Z' }),
+    ] } } } } };
+    const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+        headCommit: { oid: GROUP_OID }, pullRequest: { number: 8962 } },
+    ] } } } };
+    const queuedDetail = detailWith([prepDone]);
+    (queuedDetail.r0.pr8962 as Record<string, unknown>).mergeQueueEntry = {
+      position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+      headCommit: { oid: GROUP_OID } };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return queuedDetail;
+        if (q.includes('object(oid:')) return rollup;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.setDerivedGraph('acme/widgets', nodeMap(NEEDS));
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    // fast-checks / ESLint started 11:34, Prepare completed 11:33 → 60s, merge_group population
+    expect(history.expectedRunnerWait('acme/widgets', 'fast-checks / ESLint', 'merge_group')).toBe(60);
+  });
+
+  it('CheckView carries waitKind/blockedOn/waitingSeconds for queued checks', async () => {
+    // Prepare completed 11:58 → ESLint (queued) waits for a runner for 120s;
+    // ci (queued) is blocked on the still-queued ESLint; AFFECTED is running → null kind
+    const p = pollerWith(detailWith([
+      { ...prepDone, completedAt: '2026-06-10T11:58:00Z' },
+      { ...CHECK_DONE, status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+      { ...CHECK_DONE, name: 'ci', status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+      CHECK_RUNNING,
+    ]));
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    const byName = Object.fromEntries(pr.checks.map((c) => [c.name, c]));
+    expect(byName['fast-checks / ESLint']).toMatchObject({
+      waitKind: 'runner', waitingSeconds: 120, blockedOn: null });
+    expect(byName['ci']).toMatchObject({
+      waitKind: 'blocked', blockedOn: 'fast-checks / ESLint', waitingSeconds: null });
+    expect(byName[AFFECTED]).toMatchObject({
+      waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null });
+    // Prepare is a root node → unknown (queued anchor impossible)… it is COMPLETED here → null
+    expect(byName[PREPARE]!.waitKind).toBeNull();
+  });
+
+  it('a merge_group-only need is dropped for PR-phase checks: runner, not blocked', async () => {
+    // `ci` needs fast-checks + android-smoke; android-smoke runs on merge_group only
+    // so it never appears in a PR rollup. Without the activity gate `ci` would sit
+    // "blocked on android-smoke /" forever.
+    const p = new Poller({ client: fakeClient(SWEEP_RESPONSE, detailWith([
+      { ...prepDone, completedAt: '2026-06-10T11:53:00Z' },
+      CHECK_DONE, // fast-checks / ESLint completed 11:53
+      { ...CHECK_DONE, name: 'ci', status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+    ])) as never, history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    p.setDerivedGraph('acme/widgets', new Map([
+      ['ci', { needs: ['fast-checks /', 'android-smoke /'], activity: { mode: 'all' } }],
+      ['fast-checks /', { needs: [PREPARE], activity: { mode: 'all' } }],
+      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] } }],
+      [PREPARE, { needs: [], activity: { mode: 'all' } }],
+    ]));
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    const ci = pr.checks.find((c) => c.name === 'ci')!;
+    // anchored on the universal need's completion (11:53 → 420s), not blocked
+    expect(ci).toMatchObject({ waitKind: 'runner', waitingSeconds: 420, blockedOn: null });
+  });
+
+  it('expectedRunnerWaitSeconds: name-level median for runner-waiting checks, null for blocked', async () => {
+    for (let i = 0; i < 3; i++) {
+      history.recordRunnerWait('acme/widgets', 'fast-checks / ESLint', 'pull_request',
+        90, `2026-06-09T1${i}:00:00Z`);
+    }
+    for (let i = 0; i < 4; i++) {
+      history.recordRunnerWait('acme/widgets', 'other-check', 'pull_request',
+        300, `2026-06-09T2${i}:00:00Z`);
+    }
+    const p = pollerWith(detailWith([
+      { ...prepDone, completedAt: '2026-06-10T11:58:00Z' },
+      { ...CHECK_DONE, status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+      { ...CHECK_DONE, name: 'ci', status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+    ]));
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    const byName = Object.fromEntries(pr.checks.map((c) => [c.name, c]));
+    // ESLint is runner-waiting with name-level history → 90
+    expect(byName['fast-checks / ESLint']!.expectedRunnerWaitSeconds).toBe(90);
+    // 'ci' is BLOCKED (on the queued ESLint) — a pickup estimate is meaningless, skip the lookup
+    expect(byName['ci']!.waitKind).toBe('blocked');
+    expect(byName['ci']!.expectedRunnerWaitSeconds).toBeNull();
+  });
+
+  it('expectedRunnerWaitSeconds falls back to the event-level median when no name-level history', async () => {
+    for (let i = 0; i < 3; i++) {
+      history.recordRunnerWait('acme/widgets', 'fast-checks / ESLint', 'pull_request',
+        90, `2026-06-09T1${i}:00:00Z`);
+    }
+    for (let i = 0; i < 4; i++) {
+      history.recordRunnerWait('acme/widgets', 'other-check', 'pull_request',
+        300, `2026-06-09T2${i}:00:00Z`);
+    }
+    // every need of 'ci' completed → ci is runner-waiting, not blocked. The completed
+    // checks all started BEFORE prep's completion (negative pickup waits) so this set
+    // ingests no new samples that would shift the seeded event-level median.
+    const p = pollerWith(detailWith([
+      { ...prepDone, completedAt: '2026-06-10T11:58:00Z' },
+      CHECK_DONE,
+      { ...CHECK_RUNNING, status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-06-10T11:59:00Z' },
+      { ...CHECK_DONE, name: 'ci', status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+    ]));
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    const ci = pr.checks.find((c) => c.name === 'ci')!;
+    expect(ci.waitKind).toBe('runner');
+    // 'ci' has no name-level samples → event-level median of [90×3, 300×4] = 300
+    expect(ci.expectedRunnerWaitSeconds).toBe(300);
+  });
+
+  it('queued required checks extend the stage ETA by the learned pickup wait', async () => {
+    // Baseline: same snapshot, no learned waits.
+    const queuedNodes = [
+      { ...CHECK_DONE, status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
+    ];
+    const p1 = pollerWith(detailWith(queuedNodes));
+    await p1.sweepOnce();
+    await p1.detailOnce();
+    const base = p1.buildState().repos[0]!.prs.find((x) => x.number === 8962)!.stage.etaSeconds!;
+    // Learned 120s pickup waits → every queued/not-yet-appeared check gains 120s
+    for (let i = 0; i < 3; i++) {
+      history.recordRunnerWait('acme/widgets', 'fast-checks / ESLint', 'pull_request',
+        120, `2026-06-09T1${i}:00:00Z`);
+    }
+    const p2 = pollerWith(detailWith(queuedNodes));
+    await p2.sweepOnce();
+    await p2.detailOnce();
+    const withDelay = p2.buildState().repos[0]!.prs.find((x) => x.number === 8962)!.stage.etaSeconds!;
+    expect(withDelay).toBe(base + 120);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task C: SSE diffing
+// ---------------------------------------------------------------------------
+
+describe('Poller SSE diffing (emitUpdate deduplication)', () => {
+  it('two cycles with identical underlying data → only one "update" emission', async () => {
+    // The EMPTY_SWEEP client returns the same data every call — no state changes.
+    // First cycle emits; second cycle sees identical snapshot and must NOT emit again.
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return EMPTY_SWEEP;
+        throw new Error(`unexpected: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    let emitCount = 0;
+    p.on('update', () => emitCount++);
+    await p.sweepOnce();
+    await p.sweepOnce(); // same underlying data
+    expect(emitCount).toBe(1);
+  });
+
+  it('lastState is still refreshed on a skipped emission (generatedAt advances)', async () => {
+    let t = NOW.getTime();
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return EMPTY_SWEEP;
+        throw new Error(`unexpected: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();                // t=NOW, emits
+    const first = p.getState().generatedAt;
+    t += 30_000;
+    await p.sweepOnce();                // same data, +30s — skips emit but updates lastState
+    const second = p.getState().generatedAt;
+    expect(new Date(second).getTime()).toBeGreaterThan(new Date(first).getTime());
+  });
+
+  it('keepalive: identical data still re-emits once >60s pass since the last emission', async () => {
+    let t = NOW.getTime();
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return EMPTY_SWEEP;
+        throw new Error(`unexpected: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => new Date(t) });
+    let emitCount = 0;
+    p.on('update', () => emitCount++);
+    await p.sweepOnce();        // first emission
+    t += 30_000;
+    await p.sweepOnce();        // identical, 30s — suppressed
+    expect(emitCount).toBe(1);
+    t += 31_000;
+    await p.sweepOnce();        // 61s since last emission — keepalive forces a frame
+    expect(emitCount).toBe(2);
+    t += 30_000;
+    await p.sweepOnce();        // keepalive window reset — suppressed again
+    expect(emitCount).toBe(2);
+  });
+
+  it('a stage change triggers a second emission', async () => {
+    // First sweep: PR 8962 open (ci stage). Second sweep: PR 8962 is gone (vanished/closed).
+    // That removes it from the state → different snapshot → must emit again.
+    const sweepBox = { current: SWEEP_RESPONSE as Record<string, unknown> };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweepBox.current;
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    let emitCount = 0;
+    p.on('update', () => emitCount++);
+    await p.sweepOnce();
+    await p.detailOnce();
+    expect(emitCount).toBe(2);  // sweep + detail
+    sweepBox.current = EMPTY_SWEEP; // PR 8962 disappears
+    await p.sweepOnce();
+    expect(emitCount).toBe(3);  // new emission because snapshot changed
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task F: ETA accuracy tracking
+// ---------------------------------------------------------------------------
+
+describe('Poller ETA accuracy tracking', () => {
+  const doneDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      ...DETAIL_RESPONSE.r0.pr8962, mergeStateStatus: 'CLEAN',
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          CHECK_DONE,
+          { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests',
+            completedAt: '2026-06-10T11:58:00Z' },
+        ] } } } }] },
+    } },
+  };
+
+  function boxedClient(detailBox: { current: Record<string, unknown> },
+    sweepBox: { current: Record<string, unknown> } = { current: SWEEP_RESPONSE }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweepBox.current;
+        if (q.includes('pr8962: pullRequest')) return detailBox.current;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('ci→ready transition records predicted (first ETA) vs actual stage duration', async () => {
+    let t = NOW.getTime();
+    const detailBox = { current: DETAIL_RESPONSE as Record<string, unknown> };
+    const p = new Poller({ client: boxedClient(detailBox) as never, history,
+      deploy: noDeploy(), config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();    // PR enters ci; first non-null ETA = 600 (sum-shaped expected set)
+    await p.detailOnce();
+    expect(history.etaAccuracy('acme/widgets', 'ci')).toBeNull();
+    t += 240_000;           // 4 min later the run finishes
+    detailBox.current = doneDetail;
+    await p.detailOnce();   // ci → ready: predicted 600, actual 240 → |600−240| = 360
+    expect(history.etaAccuracy('acme/widgets', 'ci')).toEqual({ medianAbsErrSecs: 360, n: 1 });
+  });
+
+  it('transitions out of parked record nothing', async () => {
+    let t = NOW.getTime();
+    const draftSweep = {
+      ...SWEEP_RESPONSE,
+      open0: { issueCount: 1, nodes: [{ ...SWEEP_RESPONSE.open0.nodes[0], isDraft: true }] },
+      merged0: { issueCount: 0, nodes: [] },
+    };
+    const draftDetail = {
+      r0: { nameWithOwner: 'acme/widgets',
+        pr8962: { ...(doneDetail.r0.pr8962 as object), isDraft: true } },
+    };
+    const detailBox = { current: draftDetail as Record<string, unknown> };
+    const recordSpy = vi.spyOn(history, 'recordEtaAccuracy');
+    const p = new Poller({ client: boxedClient(detailBox, { current: draftSweep }) as never,
+      history, deploy: noDeploy(), config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.detailOnce();   // parked (draft)
+    t += 300_000;
+    detailBox.current = doneDetail;
+    await p.detailOnce();   // parked → ready: old stage not ETA-tracked
+    expect(recordSpy).not.toHaveBeenCalled();
+    recordSpy.mockRestore();
+  });
+
+  it('a queued PR leaving the board via merge records queue accuracy', async () => {
+    let t = NOW.getTime();
+    const queuedDetail = (over: Record<string, unknown> = {}) => ({
+      r0: { nameWithOwner: 'acme/widgets', pr8962: {
+        ...DETAIL_RESPONSE.r0.pr8962, mergeStateStatus: 'CLEAN',
+        autoMergeRequest: { mergeMethod: 'SQUASH' },
+        mergeQueueEntry: { position: 1, state: 'QUEUED', enqueuedAt: '2026-06-10T11:55:00Z',
+          headCommit: null },
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+          contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE] } } } }] },
+        ...over,
+      } },
+    });
+    const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'QUEUED', enqueuedAt: '2026-06-10T11:55:00Z',
+        headCommit: null, pullRequest: { number: 8962 } },
+    ] } } } };
+    const detailBox = { current: queuedDetail() as Record<string, unknown> };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return detailBox.current;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.detailOnce();   // stage=queue, no entries yet → ETA still null
+    await p.queueOnce();    // entries known → first ETA = 1×groupRun default = 900
+    t += 600_000;
+    detailBox.current = queuedDetail({ mergedAt: '2026-06-10T12:10:00Z',
+      mergeQueueEntry: null, mergeCommit: { oid: 'squash8962' } });
+    await p.detailOnce();   // merged off the board: predicted 900, actual 600 → err 300
+    expect(history.etaAccuracy('acme/widgets', 'queue'))
+      .toEqual({ medianAbsErrSecs: 300, n: 1 });
+  });
+
+  it('DashboardState repo groups expose accuracy only for stages with data', async () => {
+    history.recordEtaAccuracy('acme/widgets', 'ci', 600, 700, '2026-06-10T10:00:00Z');
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.accuracy).toEqual({ ci: { medianAbsErrSecs: 100, n: 1 } });
+  });
+
+  it('pruneCaches drops stage-tracker entries for vanished PRs', async () => {
+    const sweepBox = { current: SWEEP_RESPONSE as Record<string, unknown> };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweepBox.current;
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const internals = p as unknown as { stageTracker: Map<string, unknown> };
+    expect(internals.stageTracker.has('acme/widgets#8962')).toBe(true);
+    internals.stageTracker.set('acme/widgets#9999', { stageId: 'ci', enteredAt: 0, firstEta: null });
+    sweepBox.current = EMPTY_SWEEP;
+    await p.sweepOnce();
+    expect(internals.stageTracker.has('acme/widgets#9999')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task V1: RepoQueueView payload (groups + waiting)
+// ---------------------------------------------------------------------------
+
+describe('Poller buildQueueView — queue view payload (V1)', () => {
+  const GROUP_OID_A = 'oidGroupA'; // building at position 2
+  const GROUP_OID_B = 'oidGroupB'; // building at position 5
+
+  // Queue: positions 1–7
+  //   pos 1: AWAITING_CHECKS, oid=GROUP_OID_A (building) — covered by group A
+  //   pos 2: AWAITING_CHECKS, oid=GROUP_OID_A (same group) — group A top, covers (0,2]
+  //   pos 3: AWAITING_CHECKS, oid=GROUP_OID_B — covered by group B
+  //   pos 4: AWAITING_CHECKS, oid=GROUP_OID_B — covered by group B
+  //   pos 5: AWAITING_CHECKS, oid=GROUP_OID_B (group B top, covers (2,5])
+  //   pos 6: QUEUED (waiting)
+  //   pos 7: QUEUED (waiting)
+  const queueResponse = {
+    repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_A }, pullRequest: { number: 9001 } },
+      { position: 2, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_A }, pullRequest: { number: 9002 } },
+      { position: 3, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_B }, pullRequest: { number: 9003 } },
+      { position: 4, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_B }, pullRequest: { number: 9004 } },
+      { position: 5, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_B }, pullRequest: { number: 9005 } },
+      { position: 6, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9006 } },
+      { position: 7, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9007 } },
+    ] } } },
+  };
+
+  // PR 9002 is in the queue (AWAITING_CHECKS, pos 2)
+  const queuedDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr9002: {
+      number: 9002, title: 'feat: thing', url: 'u9002', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head9002', autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeCommit: null,
+      mergeQueueEntry: { position: 2, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: GROUP_OID_A } },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE] } } } }] },
+    } },
+  };
+
+  const mgCheck = (oid: string, over: Record<string, unknown>) => ({
+    __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+    startedAt: '2026-06-10T11:30:00Z', completedAt: null, detailsUrl: 'u',
+    checkSuite: { workflowRun: { event: 'merge_group' } }, ...over,
+  });
+
+  const rollupRunning = {
+    repository: {
+      o0: { oid: GROUP_OID_A, statusCheckRollup: { contexts: { nodes: [
+        mgCheck(GROUP_OID_A, { name: 'ci', status: 'IN_PROGRESS', conclusion: null }),
+      ] } } },
+      o1: { oid: GROUP_OID_B, statusCheckRollup: { contexts: { nodes: [
+        mgCheck(GROUP_OID_B, { name: 'ci', status: 'IN_PROGRESS', conclusion: null }),
+      ] } } },
+    },
+  };
+
+  const rollupGroupBFailed = {
+    repository: {
+      o0: { oid: GROUP_OID_A, statusCheckRollup: { contexts: { nodes: [
+        mgCheck(GROUP_OID_A, { name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS',
+          completedAt: '2026-06-10T11:45:00Z' }),
+      ] } } },
+      o1: { oid: GROUP_OID_B, statusCheckRollup: { contexts: { nodes: [
+        mgCheck(GROUP_OID_B, { name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE',
+          completedAt: '2026-06-10T11:42:00Z' }),
+      ] } } },
+    },
+  };
+
+  const queueSweep = {
+    open0: { issueCount: 1, nodes: [{ number: 9002, title: 'feat: thing', url: 'u9002', isDraft: false,
+      mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null }] },
+    open1: { issueCount: 0, nodes: [] },
+    merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+  };
+
+  function queueViewClient(rollupBox: { current: Record<string, unknown> }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return queueSweep;
+        if (q.includes('pr9002: pullRequest')) return queuedDetail;
+        if (q.includes('object(oid:')) return rollupBox.current;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('two building groups cover batch ranges; waiting entries are beyond both groups', async () => {
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const p = new Poller({ client: queueViewClient(rollupBox) as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    const queue = repo.queue!;
+    expect(queue).not.toBeNull();
+    // group A: oid=GROUP_OID_A, covers positions 1–2 (prev=0, this=2)
+    const groupA = queue.groups.find((g) => g.oid === GROUP_OID_A)!;
+    expect(groupA.prNumbers.sort()).toEqual([9001, 9002]);
+    // group B: oid=GROUP_OID_B, covers positions 3–5 (prev=2, this=5)
+    const groupB = queue.groups.find((g) => g.oid === GROUP_OID_B)!;
+    expect(groupB.prNumbers.sort()).toEqual([9003, 9004, 9005]);
+    // waiting: positions 6–7 (beyond max building pos=5)
+    expect(queue.waiting.map((w) => w.prNumber).sort()).toEqual([9006, 9007]);
+    expect(queue.waiting[0]!.position).toBeLessThan(queue.waiting[1]!.position);
+    // batchSize from config
+    expect(queue.batchSize).toBe(CONFIG.batchSize);
+  });
+
+  it('failed group flag propagates from group-check conclusion=FAILURE', async () => {
+    const rollupBox = { current: rollupGroupBFailed as Record<string, unknown> };
+    const p = new Poller({ client: queueViewClient(rollupBox) as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const queue = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    const groupA = queue.groups.find((g) => g.oid === GROUP_OID_A)!;
+    const groupB = queue.groups.find((g) => g.oid === GROUP_OID_B)!;
+    expect(groupA.failed).toBe(false);
+    expect(groupB.failed).toBe(true);
+  });
+
+  it('returns null when there are no queue entries for the repo', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    // No queue entries → queue must be null
+    expect(repo.queue).toBeNull();
+  });
+
+  it('a per-repo batchSize override flows into the queue view', async () => {
+    const config: AppConfig = { ...CONFIG, repos: { 'acme/widgets': { batchSize: 2 } } };
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const p = new Poller({ client: queueViewClient(rollupBox) as never, history, deploy: noDeploy(),
+      config, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const queue = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(queue.batchSize).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task Y1: workflow identity — scoped required population + groupChecks payload
+// ---------------------------------------------------------------------------
+
+describe('Poller workflow scoping (Y1)', () => {
+  const wfRun = (workflowName: string | null, runNumber: number | null = null) =>
+    ({ workflowRun: { event: 'pull_request', runNumber, workflow: workflowName ? { name: workflowName } : null } });
+
+  // PR 8970 mid-run: a real CI check running, plus Auto-merge PRs' ci-gate FAILURE
+  // that startsWith-matches the `ci` prefix (the upstream repo's queued-PR mixing bug).
+  const ciGateDetail = (ciGateWorkflow: string | null) => ({
+    r0: { nameWithOwner: 'acme/widgets', pr8970: {
+      number: 8970, title: 'docs: tweak', url: 'u8970', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8970', autoMergeRequest: null, mergeCommit: null, mergeQueueEntry: null,
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          { ...CHECK_DONE, isRequired: false, checkSuite: wfRun('CI', 7990) },
+          { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests', isRequired: false,
+            status: 'IN_PROGRESS', conclusion: null, startedAt: '2026-06-10T11:55:00Z', completedAt: null,
+            checkSuite: wfRun('CI', 7990) },
+          { ...CHECK_DONE, name: 'ci-gate', isRequired: false, conclusion: 'FAILURE',
+            checkSuite: wfRun(ciGateWorkflow, 511) },
+        ] } } } }] },
+    } },
+  });
+
+  async function build(ciGateWorkflow: string | null, rollupWf: string | null) {
+    const client = fakeClient(staleSweep, ciGateDetail(ciGateWorkflow), 'pr8970: pullRequest');
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: PREFIX_CONFIG, now: () => NOW });
+    if (rollupWf != null) p.setRollupWorkflowName('acme/widgets', rollupWf);
+    await p.sweepOnce();
+    await p.detailOnce();
+    return p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8970)!;
+  }
+
+  it("ci-gate FAILURE from 'Auto-merge PRs' does not park or read required when rollup workflow is 'CI'", async () => {
+    const pr = await build('Auto-merge PRs', 'CI');
+    expect(pr.stage.stage).toBe('ci');           // not parked/ci-failed
+    expect(pr.stage.substate).toBeNull();
+    const byName = Object.fromEntries(pr.checks.map((c) => [c.name, c]));
+    expect(byName['ci-gate']!.isRequired).toBe(false);
+    expect(byName['ci-gate']!.workflowName).toBe('Auto-merge PRs');
+    expect(byName['fast-checks / ESLint']!.isRequired).toBe(true);
+  });
+
+  it('the same ci-gate with workflowName null parks the PR (permissive for old data)', async () => {
+    const pr = await build(null, 'CI');
+    expect(pr.stage.stage).toBe('parked');
+    expect(pr.stage.substate).toBe('ci-failed');
+  });
+
+  it('without a known rollup workflow, prefix matching alone applies (pre-scoping behavior)', async () => {
+    const pr = await build('Auto-merge PRs', null);
+    expect(pr.stage.stage).toBe('parked');
+    expect(pr.stage.substate).toBe('ci-failed');
+  });
+
+  it('expectedSet excludes a live foreign-workflow prefix-matching name from the denominator', async () => {
+    // ci-gate's completed duration is in pull_request history; without the live
+    // foreign-name exclusion it would inflate the required denominator
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'ci-gate', 'pull_request',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:01:00Z`, 'SUCCESS');
+    }
+    const pr = await build('Auto-merge PRs', 'CI');
+    // 1 of 2 rollup-workflow expected checks done — ci-gate must not be a third entry
+    expect(pr.stage.percent).toBeGreaterThan(0);
+    expect(pr.stage.percent).toBeLessThan(100);
+    const prNoScope = await build('Auto-merge PRs', null);
+    expect(prNoScope.stage.stage).toBe('parked'); // sanity: scoping is what saved it above
+  });
+
+  it('rollupWorkflowFor returns the stored name, null when unknown', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.rollupWorkflowFor('acme/widgets')).toBeNull();
+    p.setRollupWorkflowName('acme/widgets', 'CI');
+    expect(p.rollupWorkflowFor('acme/widgets')).toBe('CI');
+  });
+
+  it('deploy-cycle re-derivation stores the workflow name from ci.yml', async () => {
+    const ciYaml = 'name: CI\njobs:\n  lint: {}\n  ci:\n    needs: [lint]\n';
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => ciYaml),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy,
+      config: CONFIG, now: () => NOW });
+    await p.deployOnce();
+    expect(p.rollupWorkflowFor('acme/widgets')).toBe('CI');
+    log.mockRestore();
+  });
+});
+
+describe('Poller groupChecks payload (Y1)', () => {
+  const GROUP_OID = 'oidY1';
+  const queuedDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      number: 8962, title: 'fix: overlap', url: 'u8962', isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: 'head8962', autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeCommit: null,
+      mergeQueueEntry: { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+        headCommit: { oid: GROUP_OID } },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [{ ...CHECK_DONE }] } } } }] },
+    } },
+  };
+  const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+    { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:30:00Z',
+      headCommit: { oid: GROUP_OID }, pullRequest: { number: 8962 } },
+  ] } } } };
+  const rollup = { repository: { o0: { oid: GROUP_OID, statusCheckRollup: { contexts: { nodes: [
+    { __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+      startedAt: '2026-06-10T11:50:00Z', completedAt: null, detailsUrl: 'gu',
+      checkSuite: { workflowRun: { event: 'merge_group', runNumber: 7994, workflow: { name: 'CI' } } } },
+  ] } } } } };
+
+  function groupClient() {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return queuedDetail;
+        if (q.includes('object(oid:')) return rollup;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('a queued PR exposes the merge-group build as groupChecks with merge_group expectations', async () => {
+    // merge_group history for 'ci': p50 = 480s
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:08:00Z`, 'SUCCESS');
+    }
+    const p = new Poller({ client: groupClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.groupChecks).not.toBeNull();
+    expect(pr.groupChecks).toHaveLength(1);
+    expect(pr.groupChecks![0]).toMatchObject({
+      name: 'ci', status: 'IN_PROGRESS', isRequired: true, workflowName: 'CI',
+      expectedSeconds: 480, url: 'gu',
+    });
+    // elapsed since 11:50 → 600s
+    expect(pr.groupChecks![0]!.elapsedSeconds).toBe(600);
+    // head-commit PR checks stay their own list
+    expect(pr.checks.map((c) => c.name)).toEqual(['fast-checks / ESLint']);
+  });
+
+  it('groupChecks is null while the group rollup has not been fetched yet', async () => {
+    const p = new Poller({ client: groupClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce(); // no queueOnce → group rollup unknown
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.groupChecks).toBeNull();
+  });
+
+  it('non-queued PRs carry groupChecks: null', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.stage.stage).toBe('ci');
+    expect(pr.groupChecks).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 7 Task Z1: in-repo .pr-dashboard.yml
+// ---------------------------------------------------------------------------
+
+describe('Poller in-repo .pr-dashboard.yml (Z1)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const blobResponse = (text: string | null) => ({
+    repository: { defaultBranchRef: { name: 'main' },
+      object: text == null ? null : { text } },
+  });
+
+  /** fakeClient + blob-query handling; textBox lets tests change the file between cycles. */
+  function repoCfgClient(textBox: { current: string | null; fail?: boolean }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('.pr-dashboard.yml')) {
+          if (textBox.fail) throw new Error('blob fetch boom');
+          return blobResponse(textBox.current);
+        }
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+  const blobCalls = (client: { graphql: ReturnType<typeof vi.fn> }) =>
+    client.graphql.mock.calls.filter(([q]) => (q as string).includes('.pr-dashboard.yml')).length;
+
+  const FILE_YAML = 'rollupJobId: rollup\nbatchSize: 12\n';
+  const NO_DEPLOY_CONFIG: AppConfig = { ...DEFAULTS, owners: ['acme', 'octo'] };
+
+  it('loads the file and applies in-repo settings over defaults, logging the source fields once', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const textBox = { current: FILE_YAML };
+    const client = repoCfgClient(textBox);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p.sweepOnce();             // PR 8962 makes acme/widgets a watched repo
+    await p.refreshRepoConfigs();
+    expect(p.settingsFor('acme/widgets')).toEqual({
+      requiredCheckPrefixes: undefined,
+      rollupJobId: 'rollup',                          // in-repo
+      workflowPath: '.github/workflows/ci.yml',       // default
+      batchSize: 12,                                  // in-repo
+    });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0]))
+      .toContain('[repo-config] acme/widgets: loaded .pr-dashboard.yml (source of: rollupJobId, batchSize)');
+    await p.refreshRepoConfigs();    // within 24h: no refetch, no re-log
+    expect(blobCalls(client)).toBe(1);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it('instance config override beats the in-repo file, per field', async () => {
+    const config: AppConfig = { ...NO_DEPLOY_CONFIG,
+      repos: { 'acme/widgets': { batchSize: 4 } } };
+    const p = new Poller({ client: repoCfgClient({ current: FILE_YAML }) as never, history,
+      deploy: noDeploy(), config, now: () => NOW });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    const s = p.settingsFor('acme/widgets');
+    expect(s.batchSize).toBe(4);          // override wins
+    expect(s.rollupJobId).toBe('rollup'); // in-repo survives for non-overridden fields
+  });
+
+  it('a repo BECOMES a deploy repo via its file: ensureClone + health run on the next deploy cycle', async () => {
+    const textBox = { current:
+      'deploy:\n  environments:\n    - name: qa\n      healthUrl: https://qa.file.dev/health\n' };
+    const deploy = fakeDeploy({ 'https://qa.file.dev/health': 'sha-qa' }, { 'sha-qa': 'yes' });
+    const p = new Poller({ client: repoCfgClient(textBox) as never, history, deploy,
+      config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(p.buildState().repos[0]!.hasDeploy).toBe(false);
+    await p.deployOnce(); // refresh happens inside the deploy cycle
+    expect(vi.mocked(deploy.ensureClone))
+      .toHaveBeenCalledWith('acme/widgets', 'https://github.com/acme/widgets.git');
+    expect(vi.mocked(deploy.health)).toHaveBeenCalledWith('https://qa.file.dev/health', 'commitSha');
+    expect(p.buildState().repos[0]!.hasDeploy).toBe(true);
+    // merged PR 8951 went live on the file-declared env
+    expect(history.listTrackedMerged(7, NOW).find((r) => r.number === 8951)!.qaLiveAt)
+      .toBe(NOW.toISOString());
+  });
+
+  it("an instance deploy entry stays 'override'-sourced: the in-repo deploy block is ignored (instance-override case)", async () => {
+    const textBox = { current:
+      'deploy:\n  environments:\n    - name: qa\n      healthUrl: https://qa.file.dev/health\n' };
+    const deploy = fakeDeploy({}, {});
+    const p = new Poller({ client: repoCfgClient(textBox) as never, history, deploy,
+      config: CONFIG, now: () => NOW }); // CONFIG has an instance deploy for acme/widgets
+    await p.sweepOnce();
+    await p.deployOnce();
+    const healthUrls = vi.mocked(deploy.health).mock.calls.map(([u]) => u);
+    expect(healthUrls).toContain('https://qa.widgets.example.com/health'); // instance config
+    expect(healthUrls).not.toContain('https://qa.file.dev/health');        // file ignored
+  });
+
+  it('absent file: defaults apply unchanged and the fetch stays on the 24h cadence', async () => {
+    let t = NOW.getTime();
+    const textBox = { current: null as string | null };
+    const client = repoCfgClient(textBox);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.deployOnce();
+    expect(blobCalls(client)).toBe(1);
+    expect(p.settingsFor('acme/widgets')).toEqual({
+      requiredCheckPrefixes: undefined, rollupJobId: 'ci',
+      workflowPath: '.github/workflows/ci.yml', batchSize: DEFAULTS.batchSize });
+    t += 60_000;
+    await p.deployOnce();            // within 24h — throttled
+    expect(blobCalls(client)).toBe(1);
+    t += 24 * 3600_000;
+    await p.deployOnce();            // past 24h — refetched
+    expect(blobCalls(client)).toBe(2);
+  });
+
+  it('a file change is picked up on the 24h refresh and logged again; removal reverts to defaults', async () => {
+    let t = NOW.getTime();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const textBox: { current: string | null } = { current: FILE_YAML };
+    const p = new Poller({ client: repoCfgClient(textBox) as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(12);
+    textBox.current = 'batchSize: 3\n';
+    t += 25 * 3600_000;
+    await p.refreshRepoConfigs();
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(3);
+    expect(log).toHaveBeenCalledTimes(2); // change → re-logged
+    textBox.current = null;               // file deleted upstream
+    t += 25 * 3600_000;
+    await p.refreshRepoConfigs();
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(DEFAULTS.batchSize);
+    expect(String(log.mock.calls[2])).toContain('removed');
+  });
+
+  it('a failed blob fetch keeps the previously parsed config (best-effort)', async () => {
+    let t = NOW.getTime();
+    const textBox = { current: FILE_YAML, fail: false };
+    const p = new Poller({ client: repoCfgClient(textBox) as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(12);
+    textBox.fail = true;
+    t += 25 * 3600_000;
+    await p.refreshRepoConfigs();   // fetch throws — prior parse survives, nothing stale
+    expect(p.settingsFor('acme/widgets').batchSize).toBe(12);
+    expect(p.buildState().staleSince).toBeNull();
+  });
+
+  it('file warnings are surfaced via console.warn with the repo prefix', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: repoCfgClient({ current: 'batchSize: -1\n' }) as never, history,
+      deploy: noDeploy(), config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    expect(String(warn.mock.calls[0])).toMatch(/\[repo-config\] acme\/widgets: batchSize/);
+  });
+
+  it('in-repo requiredCheckPrefixes beat derived prefixes but lose to the instance override', async () => {
+    const internals = (p: Poller) =>
+      (p as unknown as { effectivePrefixes(r: string): string[] | undefined });
+    const textBox = { current: "requiredCheckPrefixes: ['from-file']\n" };
+    // file > derived
+    const p1 = new Poller({ client: repoCfgClient(textBox) as never, history, deploy: noDeploy(),
+      config: NO_DEPLOY_CONFIG, now: () => NOW });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    p1.setDerivedPrefixes('acme/widgets', ['derived']);
+    await p1.sweepOnce();
+    await p1.refreshRepoConfigs();
+    expect(internals(p1).effectivePrefixes('acme/widgets')).toEqual(['from-file']);
+    // override > file
+    const p2 = new Poller({ client: repoCfgClient(textBox) as never, history, deploy: noDeploy(),
+      config: { ...NO_DEPLOY_CONFIG, repos: { 'acme/widgets': { requiredCheckPrefixes: ['override'] } } },
+      now: () => NOW });
+    await p2.sweepOnce();
+    await p2.refreshRepoConfigs();
+    expect(internals(p2).effectivePrefixes('acme/widgets')).toEqual(['override']);
+  });
+
+  it('in-repo workflowPath/rollupJobId drive the 24h ci.yml re-derivation', async () => {
+    const textBox = { current: 'rollupJobId: gate\nworkflowPath: .github/workflows/gate.yml\ndeploy:\n  environments: []\n' };
+    const ciYaml = 'jobs:\n  lint: {}\n  gate:\n    needs: [lint]\n';
+    const deploy = {
+      health: vi.fn(async () => null),
+      ensureClone: vi.fn(async () => {}),
+      fetchClone: vi.fn(async () => {}),
+      isAncestor: vi.fn(async () => 'missing' as const),
+      readFileAtHead: vi.fn(async () => ciYaml),
+    } as unknown as DeployWatcher;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: repoCfgClient(textBox) as never, history, deploy,
+      config: NO_DEPLOY_CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce(); // refresh makes widgets a deploy repo → derivation runs with file settings
+    expect(vi.mocked(deploy.readFileAtHead))
+      .toHaveBeenCalledWith('acme/widgets', '.github/workflows/gate.yml', 'main');
+    expect(String(log.mock.calls.find((c) => String(c).includes('derived'))))
+      .toMatch(/gate, lint/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 7 Task Z2: reconfigure (hot-apply) + reposReport (source attribution)
+// ---------------------------------------------------------------------------
+
+describe('Poller.reconfigure (Z2 hot-apply)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('swaps config, fires an immediate sweep, and re-arms the timer chain on the new intervals', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const client = fakeClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const sweepCalls = () =>
+      client.graphql.mock.calls.filter(([q]) => (q as string).includes('open0: search')).length;
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);   // initial kick
+    expect(sweepCalls()).toBe(1);
+    p.reconfigure({ ...CONFIG, intervals: { ...CONFIG.intervals, sweepMs: 10_000 } });
+    await vi.advanceTimersByTimeAsync(0);   // reconfigure restarts → immediate sweep
+    expect(sweepCalls()).toBe(2);
+    await vi.advanceTimersByTimeAsync(10_000); // NEW cadence fires at 10s, not 60s
+    expect(sweepCalls()).toBe(3);
+    expect(p.nextDelayMs('sweep')).toBe(10_000);
+    p.stop();
+  });
+
+  it('old timers are cleared: no double-fire from the pre-reconfigure chain', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const client = fakeClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, intervals: { ...CONFIG.intervals, sweepMs: 20_000, hotMs: 600_000, deployMs: 600_000 } },
+      now: () => NOW });
+    const sweepCalls = () =>
+      client.graphql.mock.calls.filter(([q]) => (q as string).includes('open0: search')).length;
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    p.reconfigure({ ...CONFIG, intervals: { ...CONFIG.intervals, sweepMs: 300_000, hotMs: 600_000, deployMs: 600_000 } });
+    await vi.advanceTimersByTimeAsync(0);   // immediate sweep from the restart
+    const after = sweepCalls();
+    await vi.advanceTimersByTimeAsync(100_000); // old 20s chain would have fired 5×
+    expect(sweepCalls()).toBe(after);
+    p.stop();
+  });
+
+  it('does not start timers when the poller was never started', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const client = fakeClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.reconfigure({ ...CONFIG, intervals: { ...CONFIG.intervals, sweepMs: 1_000 } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.graphql).not.toHaveBeenCalled();
+  });
+
+  it('a reconfigured exclude prunes the repo (open AND merged views) on the next sweep', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    expect(p.buildState().repos).toHaveLength(1);
+    p.reconfigure({ ...CONFIG, exclude: ['acme/widgets'] });
+    await p.sweepOnce();
+    expect(p.buildState().repos).toHaveLength(0);
+  });
+
+  it('a reconfigured retentionDays applies to the merged-PR window immediately', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();        // merged 8951 (20 min old) tracked under 7d retention
+    expect(p.buildState().repos[0]!.prs.some((x) => x.number === 8951)).toBe(true);
+    p.reconfigure({ ...CONFIG, retentionDays: 0.001 }); // ~86s window < the 20 min age
+    expect(p.buildState().repos.flatMap((r) => r.prs).some((x) => x.number === 8951)).toBe(false);
+  });
+});
+
+describe('Poller.reposReport (Z2 source attribution)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const fileYaml =
+    'rollupJobId: rollup\ndeploy:\n  environments:\n    - name: qa\n      healthUrl: https://qa.file.dev/health\n';
+  const reportClient = (text: string | null) => ({
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async (q: string) => {
+      if (q.includes('open0: search')) return SWEEP_RESPONSE;
+      if (q.includes('.pr-dashboard.yml')) return {
+        repository: { defaultBranchRef: { name: 'main' }, object: text == null ? null : { text } } };
+      throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+    }),
+  });
+
+  it('attributes override / in-repo / derived / default per field (instance deploy stays override)', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const config: AppConfig = { ...CONFIG, repos: { 'acme/widgets': { batchSize: 4 } } };
+    const p = new Poller({ client: reportClient(fileYaml) as never, history, deploy: noDeploy(),
+      config, now: () => NOW });
+    p.setDerivedPrefixes('acme/widgets', ['ci']);
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    const r = p.reposReport()['acme/widgets']!;
+    expect(r.batchSize).toEqual({ value: 4, source: 'override' });
+    expect(r.rollupJobId).toEqual({ value: 'rollup', source: 'in-repo' });
+    expect(r.workflowPath).toEqual({ value: '.github/workflows/ci.yml', source: 'default' });
+    expect(r.requiredCheckPrefixes).toEqual({ value: ['ci'], source: 'derived' });
+    // the instance-override case: config.json deploy block wins over the in-repo one
+    expect(r.deploy.source).toBe('override');
+    expect(r.deploy.value!.environments[0]!.healthUrl).toBe('https://qa.widgets.example.com/health');
+  });
+
+  it('file-only deploy reads in-repo; with no layers everything is default', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const config: AppConfig = { ...DEFAULTS, owners: ['acme', 'octo'] };
+    const p = new Poller({ client: reportClient(fileYaml) as never, history, deploy: noDeploy(),
+      config, now: () => NOW });
+    await p.sweepOnce();
+    await p.refreshRepoConfigs();
+    const r = p.reposReport()['acme/widgets']!;
+    expect(r.deploy.source).toBe('in-repo');
+    expect(r.deploy.value!.environments[0]!.healthUrl).toBe('https://qa.file.dev/health');
+    expect(r.batchSize).toEqual({ value: DEFAULTS.batchSize, source: 'default' });
+    expect(r.requiredCheckPrefixes).toEqual({ value: null, source: 'default' });
+    expect(r.rollupJobId.source).toBe('in-repo');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 7 review fix: generation guard (timer-chain resurrection)
+// ---------------------------------------------------------------------------
+
+describe('Poller reconfigure generation guard (timer-chain resurrection)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('in-flight sweep resolving after reconfigure does NOT re-arm the old chain', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // A deferred graphql promise lets us hold ONE sweep in-flight across a reconfigure.
+    // Only the first sweep call is deferred; subsequent ones resolve immediately.
+    let resolveSweep!: (v: unknown) => void;
+    const sweepInflight = new Promise((res) => { resolveSweep = res; });
+    let firstSweep = true;
+
+    let sweepCallCount = 0;
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if ((q as string).includes('open0: search')) {
+          sweepCallCount++;
+          if (firstSweep) {
+            firstSweep = false;
+            await sweepInflight; // hold the first sweep in-flight across the reconfigure
+          }
+          return SWEEP_RESPONSE;
+        }
+        if ((q as string).includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+
+    const INTERVAL = 5_000;
+    const p = new Poller({
+      client: client as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, intervals: { sweepMs: INTERVAL, hotMs: 600_000, deployMs: 600_000 } },
+      now: () => NOW,
+    });
+
+    // Start: initial kick fires sweep #1 (now in-flight, held by deferred).
+    p.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sweepCallCount).toBe(1);
+
+    // Reconfigure mid-flight: stop() bumps generation, start() bumps it again.
+    // The in-flight sweep's finally(arm) closure captures the OLD generation and must bail.
+    // The new start() fires its own initial kick (sweep #2), which blocks on withLatch('sweep')
+    // because sweep #1 still holds the latch — so sweepCallCount stays at 1.
+    p.reconfigure({ ...CONFIG, intervals: { sweepMs: INTERVAL, hotMs: 600_000, deployMs: 600_000 } });
+    await vi.advanceTimersByTimeAsync(0);
+    // sweep #1 still in-flight; new kick is latch-blocked
+    expect(sweepCallCount).toBe(1);
+
+    // Release the original in-flight sweep. Its finally(arm) should bail (old generation).
+    // The new chain's first arm() timer then fires after INTERVAL.
+    resolveSweep(undefined);
+    await vi.advanceTimersByTimeAsync(0); // let the promise chain settle
+    // Still 1 — the old chain's arm() bailed; new chain hasn't ticked yet
+    expect(sweepCallCount).toBe(1);
+
+    // Advance exactly one interval: the NEW chain fires sweep #2.
+    // Before the generation guard, the old chain's finally(arm) would ALSO schedule a timer,
+    // giving sweep #3 (double-fire) at the same tick.
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(sweepCallCount).toBe(2); // exactly one new sweep, not two
+
+    p.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 8 Task A3: webhook nudge + hot-interval relax
+// ---------------------------------------------------------------------------
+
+describe('Poller.nudge (webhook-driven out-of-band cycles)', () => {
+  it('pr-detail for a TRACKED PR → targeted detail fetch for just that PR', async () => {
+    const client = fakeClient();
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce(); // tracks acme/widgets#8962
+    client.graphql.mockClear();
+    await p.nudge({ kind: 'pr-detail', repo: 'acme/widgets', prNumber: 8962 });
+    expect(client.graphql).toHaveBeenCalledTimes(1);
+    const q = String(client.graphql.mock.calls[0]);
+    expect(q).toContain('pr8962: pullRequest'); // detail query, not a sweep
+    expect(q).not.toContain('open0: search');
+  });
+
+  it('targeted detail excludes other tracked PRs from the query', async () => {
+    const sweep = {
+      ...SWEEP_RESPONSE,
+      open0: { issueCount: 2, nodes: [
+        ...SWEEP_RESPONSE.open0.nodes,
+        { number: 9100, title: 'feat: other', url: 'u9100', isDraft: false,
+          mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null },
+      ] },
+    };
+    const client = fakeClient(sweep);
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    client.graphql.mockClear();
+    await p.nudge({ kind: 'pr-detail', repo: 'acme/widgets', prNumber: 8962 });
+    const q = String(client.graphql.mock.calls[0]);
+    expect(q).toContain('number: 8962');
+    expect(q).not.toContain('number: 9100'); // other tracked PR not refetched
+  });
+
+  it('pr-detail for an UNTRACKED PR → falls back to sweep + full detail', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const sweepSpy = vi.spyOn(p, 'sweepOnce');
+    const detailSpy = vi.spyOn(p, 'detailOnce');
+    await p.nudge({ kind: 'pr-detail', repo: 'acme/unknown', prNumber: 1 });
+    expect(sweepSpy).toHaveBeenCalledTimes(1);
+    expect(detailSpy).toHaveBeenCalledWith(false);
+  });
+
+  it('queue route → queueOnce; sweep route → sweepOnce + detailOnce(false)', async () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const sweepSpy = vi.spyOn(p, 'sweepOnce');
+    const detailSpy = vi.spyOn(p, 'detailOnce');
+    const queueSpy = vi.spyOn(p, 'queueOnce');
+    await p.nudge({ kind: 'queue', repo: 'acme/widgets' });
+    expect(queueSpy).toHaveBeenCalledTimes(1);
+    expect(sweepSpy).not.toHaveBeenCalled();
+    await p.nudge({ kind: 'sweep' });
+    expect(sweepSpy).toHaveBeenCalledTimes(1);
+    expect(detailSpy).toHaveBeenCalledWith(false);
+  });
+
+  it('respects the existing cycle latch: a nudge during an in-flight sweep is skipped', async () => {
+    let resolveSweep!: (v: unknown) => void;
+    const deferred = new Promise((r) => { resolveSweep = r; });
+    let sweepCalls = 0;
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) { sweepCalls++; await deferred; return SWEEP_RESPONSE; }
+        if (q.includes('pr8962: pullRequest')) return DETAIL_RESPONSE;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const first = p.sweepOnce();           // holds the 'sweep' latch
+    const nudged = p.nudge({ kind: 'sweep' }); // latch-blocked: must not double-fetch
+    resolveSweep(undefined);
+    await Promise.all([first, nudged]);
+    expect(sweepCalls).toBe(1);
+  });
+
+  it('a nudge whose fetch rejects is contained (runCycle), marking staleSince', async () => {
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async () => { throw new Error('boom'); }),
+    };
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const p = new Poller({ client: client as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await expect(p.nudge({ kind: 'sweep' })).resolves.toBeUndefined();
+    expect(p.buildState().staleSince).toBe(NOW.toISOString());
+    err.mockRestore();
+  });
+});
+
+describe('Poller.effectiveHotMs webhook relax', () => {
+  const WEBHOOKS_ON = { enabled: true, secretPath: '/tmp/s', path: '/api/webhooks/github' };
+
+  it('webhooks enabled + default hotMs → relaxed ×4', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, webhooks: WEBHOOKS_ON, hotMsExplicit: false }, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(CONFIG.intervals.hotMs * 4);
+    expect(p.nextDelayMs('hot')).toBe(CONFIG.intervals.hotMs * 4);
+  });
+
+  it('explicit intervals.hotMs in the config file wins — no relax', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, webhooks: WEBHOOKS_ON, hotMsExplicit: true }, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(CONFIG.intervals.hotMs);
+  });
+
+  it('webhooks disabled → unchanged', () => {
+    const p = new Poller({ client: fakeClient() as never, history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(CONFIG.intervals.hotMs);
+  });
+
+  it('rate-limit floor still beats the relax (degrades to 60s)', () => {
+    const c = fakeClient(); c.remaining = 500;
+    const p = new Poller({ client: c as never, history, deploy: noDeploy(),
+      config: { ...CONFIG, webhooks: WEBHOOKS_ON, hotMsExplicit: false }, now: () => NOW });
+    expect(p.effectiveHotMs()).toBe(60_000);
+  });
+});

@@ -1,0 +1,483 @@
+import { useEffect, useId, useRef, useState, type RefObject } from 'react';
+import type {
+  ConfigResponse,
+  ConfigPatch,
+  ConfigPutResult,
+  ConfigPutError,
+  SettingSource,
+  RepoSettingsReport,
+} from './types';
+
+interface SettingsPanelProps {
+  open: boolean;
+  onClose: () => void;
+  /** Element to return focus to on close (e.g. the gear button). */
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  /** Live SSE connection state — drives the restart "back online" detection. */
+  connected?: boolean;
+}
+
+// ---- editable form model (the safe subset, with intervals in SECONDS) ----
+
+interface FormModel {
+  owners: string[];
+  exclude: string[];
+  retentionDays: number;
+  batchSize: number;
+  sweepSec: number;
+  hotSec: number;
+  deploySec: number;
+}
+
+function toForm(c: ConfigResponse): FormModel {
+  const r = c.resolved;
+  return {
+    owners: [...r.owners],
+    exclude: [...r.exclude],
+    retentionDays: r.retentionDays,
+    batchSize: r.batchSize,
+    sweepSec: Math.round(r.intervals.sweepMs / 1000),
+    hotSec: Math.round(r.intervals.hotMs / 1000),
+    deploySec: Math.round(r.intervals.deployMs / 1000),
+  };
+}
+
+/** Build the PUT body — safe subset only, intervals converted back to ms. */
+function toPatch(f: FormModel): ConfigPatch {
+  return {
+    owners: f.owners,
+    exclude: f.exclude,
+    retentionDays: f.retentionDays,
+    batchSize: f.batchSize,
+    intervals: {
+      sweepMs: f.sweepSec * 1000,
+      hotMs: f.hotSec * 1000,
+      deployMs: f.deploySec * 1000,
+    },
+  };
+}
+
+const SOURCE_LABEL: Record<SettingSource, string> = {
+  override: 'override',
+  'in-repo': 'in-repo',
+  derived: 'derived',
+  default: 'default',
+};
+
+function SourceTag({ source }: { source: SettingSource }) {
+  return <span className={`source-tag source-${source}`}>{SOURCE_LABEL[source]}</span>;
+}
+
+// ---- chip list editor (owners / exclude) ----
+
+function ChipEditor({
+  label,
+  values,
+  onAdd,
+  onRemove,
+  removeNoun,
+}: {
+  label: string;
+  values: string[];
+  onAdd: (v: string) => void;
+  onRemove: (i: number) => void;
+  /** Singular noun used in the per-chip remove aria-label, e.g. "owner". */
+  removeNoun: string;
+}) {
+  const [draft, setDraft] = useState('');
+  const inputId = useId();
+  const commit = () => {
+    const v = draft.trim();
+    if (v) onAdd(v);
+    setDraft('');
+  };
+  return (
+    <div className="chip-editor">
+      <div className="chip-list">
+        {values.map((v, i) => (
+          <span className="chip" key={`${v}-${i}`}>
+            {v}
+            <button
+              type="button"
+              className="chip-x"
+              aria-label={`remove ${removeNoun} ${v}`}
+              onClick={() => onRemove(i)}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        {values.length === 0 && <span className="chip-empty">none</span>}
+      </div>
+      <input
+        id={inputId}
+        type="text"
+        className="chip-input"
+        aria-label={`add ${removeNoun}`}
+        placeholder={label}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          }
+        }}
+        onBlur={commit}
+      />
+    </div>
+  );
+}
+
+function deploySummary(report: RepoSettingsReport): string {
+  const d = report.deploy.value;
+  if (!d || d.environments.length === 0) return 'none';
+  return d.environments.map((e) => e.name).join(', ');
+}
+
+export function SettingsPanel({ open, onClose, returnFocusRef, connected }: SettingsPanelProps) {
+  const [config, setConfig] = useState<ConfigResponse | null>(null);
+  const [form, setForm] = useState<FormModel | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [appliedMsg, setAppliedMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmingRestart, setConfirmingRestart] = useState(false);
+  const [restartRequested, setRestartRequested] = useState(false);
+  const [backOnline, setBackOnline] = useState(false);
+
+  const panelRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
+
+  // Fetch config when the panel opens (not before).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoadError(null);
+    void (async () => {
+      try {
+        const res = await fetch('/api/config');
+        if (!res.ok) throw new Error(`GET /api/config → ${res.status}`);
+        const body = (await res.json()) as ConfigResponse;
+        if (cancelled) return;
+        setConfig(body);
+        setForm(toForm(body));
+      } catch (e) {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // Reset transient state each time the panel re-opens.
+  useEffect(() => {
+    if (!open) {
+      setConfig(null);
+      setForm(null);
+      setFieldErrors({});
+      setAppliedMsg(null);
+      setConfirmingRestart(false);
+      setRestartRequested(false);
+      setBackOnline(false);
+      wasDisconnectedRef.current = false;
+    }
+  }, [open]);
+
+  // Esc to close + focus management (move focus in on open, restore on close).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    // Move focus into the panel.
+    const focusTarget =
+      panelRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ) ?? panelRef.current;
+    focusTarget?.focus();
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      // Restore focus to the trigger.
+      returnFocusRef?.current?.focus();
+    };
+  }, [open, onClose, returnFocusRef]);
+
+  // Restart reconnect detection: once a restart was requested, the SSE stream
+  // drops then comes back. When `connected` flips back to true, show "back online".
+  const wasDisconnectedRef = useRef(false);
+  useEffect(() => {
+    if (!restartRequested) return;
+    if (connected === false) {
+      wasDisconnectedRef.current = true;
+    } else if (connected === true && wasDisconnectedRef.current) {
+      setBackOnline(true);
+    }
+  }, [connected, restartRequested]);
+
+  if (!open) return null;
+
+  const ownersEmpty = (form?.owners.length ?? 0) === 0;
+  const canSave = !!form && !ownersEmpty && !saving;
+
+  const patchForm = (next: Partial<FormModel>) =>
+    setForm((prev) => (prev ? { ...prev, ...next } : prev));
+
+  const handleSave = async () => {
+    if (!form || ownersEmpty) return;
+    setSaving(true);
+    setFieldErrors({});
+    setAppliedMsg(null);
+    try {
+      const res = await fetch('/api/config', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(toPatch(form)),
+      });
+      if (res.status === 400) {
+        const err = (await res.json()) as ConfigPutError;
+        setFieldErrors(err.fieldErrors ?? {});
+        if (err.offendingKeys?.length) {
+          setLoadError(`rejected keys: ${err.offendingKeys.join(', ')}`);
+        }
+        return;
+      }
+      if (!res.ok) throw new Error(`PUT /api/config → ${res.status}`);
+      const result = (await res.json()) as ConfigPutResult;
+      const applied = result.applied.length ? result.applied.join(', ') : 'nothing changed';
+      setAppliedMsg(`applied: ${applied}`);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRestart = async () => {
+    setConfirmingRestart(false);
+    try {
+      const res = await fetch('/api/admin/restart', { method: 'POST' });
+      if (!res.ok) throw new Error(`restart failed: ${res.status}`);
+      setRestartRequested(true);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <>
+      <div className="settings-overlay" data-testid="settings-overlay" onClick={onClose} />
+      <div
+        className="settings-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        ref={panelRef}
+        tabIndex={-1}
+      >
+        <header className="settings-head">
+          <h2 id={headingId}>Settings</h2>
+          <button type="button" className="settings-close" aria-label="Close settings" onClick={onClose}>
+            ×
+          </button>
+        </header>
+
+        {loadError && <p className="settings-error" role="alert">{loadError}</p>}
+        {!config && !loadError && <p className="settings-loading">Loading…</p>}
+
+        {form && config && (
+          <div className="settings-body">
+            {/* 1. Watched repos */}
+            <section className="settings-section">
+              <h3>Watched repos</h3>
+              <p className="settings-label">Owners</p>
+              <ChipEditor
+                label="add owner (e.g. acme)"
+                values={form.owners}
+                removeNoun="owner"
+                onAdd={(v) => setForm((p) => (p ? { ...p, owners: [...p.owners, v] } : p))}
+                onRemove={(i) =>
+                  setForm((p) => (p ? { ...p, owners: p.owners.filter((_, j) => j !== i) } : p))
+                }
+              />
+              {ownersEmpty && (
+                <p className="settings-hint settings-warn">owners list cannot be empty</p>
+              )}
+              <p className="settings-label">Exclude</p>
+              <ChipEditor
+                label="add exclude (owner/repo)"
+                values={form.exclude}
+                removeNoun="exclude"
+                onAdd={(v) => setForm((p) => (p ? { ...p, exclude: [...p.exclude, v] } : p))}
+                onRemove={(i) =>
+                  setForm((p) => (p ? { ...p, exclude: p.exclude.filter((_, j) => j !== i) } : p))
+                }
+              />
+            </section>
+
+            {/* 2. Tuning */}
+            <section className="settings-section">
+              <h3>Tuning</h3>
+              <div className="settings-grid">
+                <label htmlFor="cfg-retention">Retention (days)</label>
+                <input
+                  id="cfg-retention"
+                  type="number"
+                  min={1}
+                  value={form.retentionDays}
+                  onChange={(e) => patchForm({ retentionDays: Number(e.target.value) })}
+                />
+                {fieldErrors.retentionDays && (
+                  <p className="settings-field-error">{fieldErrors.retentionDays}</p>
+                )}
+
+                <label htmlFor="cfg-batch">Batch size</label>
+                <input
+                  id="cfg-batch"
+                  type="number"
+                  min={1}
+                  value={form.batchSize}
+                  onChange={(e) => patchForm({ batchSize: Number(e.target.value) })}
+                />
+                {fieldErrors.batchSize && (
+                  <p className="settings-field-error">{fieldErrors.batchSize}</p>
+                )}
+
+                <label htmlFor="cfg-sweep">Sweep interval (s)</label>
+                <input
+                  id="cfg-sweep"
+                  type="number"
+                  min={1}
+                  value={form.sweepSec}
+                  onChange={(e) => patchForm({ sweepSec: Number(e.target.value) })}
+                />
+                {fieldErrors['intervals.sweepMs'] && (
+                  <p className="settings-field-error">{fieldErrors['intervals.sweepMs']}</p>
+                )}
+
+                <label htmlFor="cfg-hot">Hot interval (s)</label>
+                <input
+                  id="cfg-hot"
+                  type="number"
+                  min={1}
+                  value={form.hotSec}
+                  onChange={(e) => patchForm({ hotSec: Number(e.target.value) })}
+                />
+                {fieldErrors['intervals.hotMs'] && (
+                  <p className="settings-field-error">{fieldErrors['intervals.hotMs']}</p>
+                )}
+
+                <label htmlFor="cfg-deploy">Deploy interval (s)</label>
+                <input
+                  id="cfg-deploy"
+                  type="number"
+                  min={1}
+                  value={form.deploySec}
+                  onChange={(e) => patchForm({ deploySec: Number(e.target.value) })}
+                />
+                {fieldErrors['intervals.deployMs'] && (
+                  <p className="settings-field-error">{fieldErrors['intervals.deployMs']}</p>
+                )}
+              </div>
+            </section>
+
+            {/* 3. Per-repo (read-only) */}
+            <section className="settings-section">
+              <h3>Per-repo settings</h3>
+              <p className="settings-hint">
+                edit via .pr-dashboard.yml in the repo, or repos./deploy. in config.json
+              </p>
+              {Object.entries(config.repos).map(([repo, report]) => (
+                <div className="repo-settings" key={repo}>
+                  <h4>{repo}</h4>
+                  <dl className="repo-settings-grid">
+                    <dt>rollupJobId</dt>
+                    <dd>
+                      <code>{report.rollupJobId.value}</code> <SourceTag source={report.rollupJobId.source} />
+                    </dd>
+                    <dt>workflowPath</dt>
+                    <dd>
+                      <code>{report.workflowPath.value}</code> <SourceTag source={report.workflowPath.source} />
+                    </dd>
+                    <dt>batchSize</dt>
+                    <dd>
+                      {report.batchSize.value} <SourceTag source={report.batchSize.source} />
+                    </dd>
+                    <dt>prefixes</dt>
+                    <dd>
+                      {report.requiredCheckPrefixes.value?.length ?? 0}{' '}
+                      <SourceTag source={report.requiredCheckPrefixes.source} />
+                    </dd>
+                    <dt>deploy</dt>
+                    <dd>
+                      {deploySummary(report)} <SourceTag source={report.deploy.source} />
+                    </dd>
+                  </dl>
+                </div>
+              ))}
+            </section>
+
+            {/* 4. Instance (read-only) */}
+            <section className="settings-section">
+              <h3>Instance</h3>
+              <p className="settings-hint">file-only for security</p>
+              <dl className="repo-settings-grid">
+                <dt>tokenSource</dt>
+                <dd><code>{config.resolved.tokenSource}</code></dd>
+                <dt>apiUrl</dt>
+                <dd><code>{config.resolved.apiUrl}</code></dd>
+                <dt>port</dt>
+                <dd><code>{config.resolved.port}</code></dd>
+                <dt>config file</dt>
+                <dd><code>{config.sources.configPath}</code></dd>
+              </dl>
+            </section>
+
+            {/* Actions */}
+            <footer className="settings-actions">
+              <button
+                type="button"
+                className="btn-save"
+                onClick={() => void handleSave()}
+                disabled={!canSave}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+
+              {!confirmingRestart && !restartRequested && (
+                <button
+                  type="button"
+                  className="btn-restart"
+                  onClick={() => setConfirmingRestart(true)}
+                >
+                  Restart…
+                </button>
+              )}
+              {confirmingRestart && (
+                <span className="restart-confirm">
+                  Restart service?
+                  <button type="button" className="btn-restart" onClick={() => void handleRestart()}>
+                    Confirm restart
+                  </button>
+                  <button type="button" className="btn-cancel" onClick={() => setConfirmingRestart(false)}>
+                    Cancel
+                  </button>
+                </span>
+              )}
+
+              {appliedMsg && <span className="applied-line" role="status">{appliedMsg}</span>}
+              {restartRequested && !backOnline && (
+                <span className="restart-line" role="status">restarting…</span>
+              )}
+              {restartRequested && backOnline && (
+                <span className="restart-line restart-back" role="status">back online</span>
+              )}
+            </footer>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}

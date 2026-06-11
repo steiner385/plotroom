@@ -1,0 +1,28 @@
+{
+  "owners": ["your-org", "your-username"],
+  "exclude": ["your-org/noisy-repo"],
+  "port": 4400,
+  "retentionDays": 7,
+  "batchSize": 6,
+  "tokenSource": "gh",
+  "apiUrl": "https://api.github.com/graphql",
+  "rateLimitFloor": 1000,
+  "deploy": {
+    "your-org/your-app": {
+      "cloneUrl": "https://github.com/your-org/your-app.git",
+      "defaultBranch": "main",
+      "environments": [
+        { "name": "qa", "healthUrl": "https://qa.your-app.example.com/health", "auto": true },
+        { "name": "prod", "healthUrl": "https://your-app.example.com/health", "auto": false, "shaKey": "commitSha" }
+      ]
+    }
+  },
+  "repos": {
+    "your-org/your-app": {
+      "rollupJobId": "ci",
+      "workflowPath": ".github/workflows/ci.yml",
+      "batchSize": 6
+    }
+  },
+  "intervals": { "sweepMs": 60000, "hotMs": 15000, "deployMs": 30000 }
+}
