@@ -3,11 +3,19 @@
 Locally-hosted dashboard for every open PR across one or more GitHub orgs/users:
 CI/CD lifecycle stage, percent complete, and ETA — all in a single browser tab.
 
+![Dashboard overview: status strip and per-repo metro rows](.github/images/dashboard.png)
+
 ## UI
 
 The dashboard opens with a **status strip** — five colour-coded tiles (Running, Queued, Deploying, Failed, Idle) that show live PR counts; clicking any tile filters the PR list to that state, and clicking again clears the filter. Below the strip, each open PR is rendered as a **metro-map row**: a horizontal track of nodes (CI → merge queue → QA deploy → prod) with the active node pulsing, done segments filled green, and a small elapsed/ETA annotation under the active node. Clicking a row expands a **check Gantt panel**: one row per CI job, grouped by workflow — the rollup workflow (e.g. `CI`) is shown first with required checks before advisory; other workflows (e.g. `Auto-merge PRs`) appear in a separate labeled section below. Each row has a proportional progress bar, elapsed time, and an ETA-accuracy footer line (`typically ±Xm, n=N`). At the very top, when any PRs are in the merge queue, a **queue-train strip** shows the current build batch(es) as blue bordered "cars" with progress bars, followed by dashed "next batch" and "then" cars listing the waiting PRs — clicking any PR anchor in a car smoothly scrolls the page to that PR's row (respecting `prefers-reduced-motion`). Queued PRs show two labeled sections in their expanded panel: the **merge group build** (driving the stage ETA) and **PR checks (head commit)**.
 
 ## Features
+
+![Expanded PR row: per-check Gantt with running progress bars, elapsed time, and ETAs](.github/images/expanded.png)
+
+![Status-strip filter: clicking the Running tile narrows the list to PRs with CI in flight](.github/images/running-filter.png)
+
+*Screenshots show public repos (`facebook/*`), captured from a demo instance.*
 
 - **Pipeline stages** per PR: CI → merge queue → QA deploy → awaiting prod
   (deploy stages only for repos with configured environments), plus
