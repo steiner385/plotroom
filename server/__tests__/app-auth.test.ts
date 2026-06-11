@@ -3,7 +3,7 @@ import { generateKeyPairSync, verify as cryptoVerify, type KeyObject } from 'nod
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AppTokenSource, createTokenSource, deriveRestBase } from '../auth';
+import { AppJwtSigner, AppTokenSource, InstallationRegistry, createTokenSource, deriveRestBase } from '../auth';
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -216,6 +216,105 @@ describe('AppTokenSource', () => {
     });
     await expect(source({ fetchFn: fn, installationId: 77 }).get())
       .rejects.toThrow(/missing token/);
+  });
+});
+
+// ---- AppJwtSigner --------------------------------------------------------------
+
+describe('AppJwtSigner', () => {
+  it('one signer is shareable across N token sources (no per-source PEM read)', async () => {
+    const signer = new AppJwtSigner({ appId: 999, privateKeyPath: pemPath, now: () => T0 });
+    const { fn, calls } = makeFetch({
+      'POST /app/installations/11/access_tokens': () => okToken('ghs_tok11', T0 + 3600_000),
+      'POST /app/installations/22/access_tokens': () => okToken('ghs_tok22', T0 + 3600_000),
+    });
+    // Built from the signer alone — the options carry no privateKeyPath, so a
+    // per-source PEM re-read is impossible by construction.
+    const a = new AppTokenSource({ signer, installationId: 11, fetchFn: fn, now: () => T0 });
+    const b = new AppTokenSource({ signer, installationId: 22, fetchFn: fn, now: () => T0 });
+    expect(await a.get()).toBe('ghs_tok11');
+    expect(await b.get()).toBe('ghs_tok22');
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://api.github.com/app/installations/11/access_tokens',
+      'https://api.github.com/app/installations/22/access_tokens',
+    ]);
+    // both JWTs come from the shared signer: same iss claim, verify against the key
+    for (const call of calls) {
+      const jwt = call.auth!.replace(/^Bearer /, '');
+      const [h, p, s] = jwt.split('.');
+      expect(cryptoVerify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(s!, 'base64url'))).toBe(true);
+      expect(JSON.parse(Buffer.from(p!, 'base64url').toString()).iss).toBe('999');
+    }
+  });
+
+  it('missing key file → clear construction error naming the path', () => {
+    expect(() => new AppJwtSigner({ appId: 1, privateKeyPath: join(dir, 'nope.pem') }))
+      .toThrow(/tokenSource "app".*nope\.pem/);
+  });
+});
+
+// ---- InstallationRegistry ------------------------------------------------------
+
+describe('InstallationRegistry', () => {
+  const signer = () => new AppJwtSigner({ appId: 12345, privateKeyPath: pemPath, now: () => T0 });
+
+  it('load() maps installation accounts; installationFor is case-insensitive', async () => {
+    const { fn } = makeFetch({
+      'GET /app/installations': () => ({ status: 200,
+        body: [{ id: 11, account: { login: 'Acme' } }, { id: 22, account: { login: 'globex' } }] }),
+    });
+    const reg = new InstallationRegistry({ signer: signer(), fetchFn: fn });
+    await reg.load();
+    expect(reg.accounts()).toEqual([{ id: 11, login: 'Acme' }, { id: 22, login: 'globex' }]);
+    expect(reg.installationFor('acme')).toBe(11);
+    expect(reg.installationFor('ACME')).toBe(11);
+    expect(reg.installationFor('globex')).toBe(22);
+    expect(reg.installationFor('ghost')).toBeNull();
+  });
+
+  it('refresh() picks up newly added installations', async () => {
+    let n = 0;
+    const { fn } = makeFetch({
+      'GET /app/installations': () => ({ status: 200,
+        body: ++n === 1
+          ? [{ id: 11, account: { login: 'acme' } }]
+          : [{ id: 11, account: { login: 'acme' } }, { id: 33, account: { login: 'newco' } }] }),
+    });
+    const reg = new InstallationRegistry({ signer: signer(), fetchFn: fn });
+    await reg.load();
+    expect(reg.installationFor('newco')).toBeNull();
+    await reg.refresh();
+    expect(reg.installationFor('newco')).toBe(33);
+    expect(reg.installationFor('acme')).toBe(11);
+  });
+
+  it('app.installationId restricts the registry to that one installation', async () => {
+    const { fn, calls } = makeFetch({
+      'GET /app/installations/22': () => ({ status: 200, body: { id: 22, account: { login: 'globex' } } }),
+    });
+    const reg = new InstallationRegistry({ signer: signer(), fetchFn: fn, installationId: 22 });
+    await reg.load();
+    expect(reg.accounts()).toEqual([{ id: 22, login: 'globex' }]);
+    expect(reg.installationFor('globex')).toBe(22);
+    expect(reg.installationFor('acme')).toBeNull();
+    // login resolved via GET /app/installations/{id} — never the full list
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/app/installations/22']);
+  });
+
+  it('zero installations → clear "install the app first" error', async () => {
+    const { fn } = makeFetch({ 'GET /app/installations': () => ({ status: 200, body: [] }) });
+    const reg = new InstallationRegistry({ signer: signer(), fetchFn: fn });
+    await expect(reg.load()).rejects.toThrow(/install the app first/i);
+  });
+
+  it('uses the REST base derived from a GitHub Enterprise apiUrl', async () => {
+    const { fn, calls } = makeFetch({
+      'GET /api/v3/app/installations': () => ({ status: 200, body: [{ id: 11, account: { login: 'acme' } }] }),
+    });
+    const reg = new InstallationRegistry({
+      signer: signer(), fetchFn: fn, apiUrl: 'https://ghe.example.com/api/graphql' });
+    await reg.load();
+    expect(calls[0]!.url).toBe('https://ghe.example.com/api/v3/app/installations');
   });
 });
 
