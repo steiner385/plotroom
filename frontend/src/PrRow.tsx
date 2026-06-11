@@ -10,6 +10,8 @@ function subLine(pr: PrView): string | null {
   const s = pr.stage;
   if (s.stage === 'parked') return stageLabel(s.stage, s.substate);
   if (s.stage === 'queue') {
+    // facing ejection — no group progress or waiting-line math applies
+    if (s.substate === 'unmergeable') return 'unmergeable — needs rebase before it can merge';
     const parts: string[] = [];
     if (s.substate === 'group-failed') parts.push('Queue group failed');
     // queue percent always tracks the merge-group build, never head-commit checks —

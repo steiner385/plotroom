@@ -162,10 +162,15 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .car.queued {
   background: var(--bg); border: 2px dashed var(--border); color: var(--muted);
 }
+.car.unmergeable {
+  background: color-mix(in srgb, var(--fail) 8%, var(--bg));
+  border: 2px dashed var(--fail); color: var(--muted);
+}
 .car-header { font-weight: 700; font-size: 10px; margin-bottom: 4px; }
 .car.building .car-header { color: var(--accent); }
 .car.building.failed .car-header { color: var(--fail); }
 .car.queued .car-header { color: var(--muted); }
+.car.unmergeable .car-header { color: var(--fail); }
 .car-numbers { font-size: 11px; line-height: 1.6; }
 .car-numbers a { color: var(--text); text-decoration: none; font-weight: 600; }
 .car-numbers a:hover { text-decoration: underline; }

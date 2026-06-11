@@ -37,6 +37,9 @@ export interface QueueGroupView {
 export interface RepoQueueView {
   groups: QueueGroupView[];
   waiting: { prNumber: number; position: number }[];
+  /** PR numbers of UNMERGEABLE entries (stale against the queue base, facing
+   *  ejection) — excluded from group coverage and waiting, surfaced separately. */
+  unmergeable: number[];
   batchSize: number;
 }
 export interface DashboardState {

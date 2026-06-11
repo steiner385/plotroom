@@ -119,6 +119,26 @@ describe('PrRow', () => {
     expect(screen.getByText('group 30%')).toBeInTheDocument();
   });
 
+  // HEADGREEN: a group member covered by a building group shows the group's
+  // progress with no waiting-line math (aheadCount is 0 for covered members)
+  it('covered group member shows the group percent and no "behind" math', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: null, percent: 45, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
+      queueAheadCount: 0,
+    })} hasDeploy />);
+    expect(screen.getByText('group 45%')).toBeInTheDocument();
+    expect(screen.queryByText(/behind/)).not.toBeInTheDocument();
+  });
+
+  it('queue/unmergeable shows the rebase-needed sub line and no waiting-line math', () => {
+    render(<PrRow pr={pr({
+      stage: { stage: 'queue', substate: 'unmergeable', percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+      queueAheadCount: 0,
+    })} hasDeploy />);
+    expect(screen.getByText('unmergeable — needs rebase before it can merge')).toBeInTheDocument();
+    expect(screen.queryByText(/behind/)).not.toBeInTheDocument();
+  });
+
   it('shows a muted ETA-accuracy line for the current stage in the expanded panel', () => {
     render(<PrRow pr={pr({})} hasDeploy
       accuracy={{ ci: { medianAbsErrSecs: 120, n: 14 } }} />);

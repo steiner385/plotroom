@@ -34,5 +34,6 @@ export function stageLabel(stage: string, substate: string | null): string {
   if (substate === 'unknown') return 'Deploy state unknown';
   if (substate === 'retrying') return 'CI retrying';
   if (substate === 'group-failed') return 'Queue group failed';
+  if (substate === 'unmergeable') return 'Queue — unmergeable';
   return STAGE_LABEL[stage] ?? stage;
 }

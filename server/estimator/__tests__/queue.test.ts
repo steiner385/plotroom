@@ -110,3 +110,91 @@ describe('queueStage', () => {
     expect(r.failed).toBe(false);
   });
 });
+
+// HEADGREEN multi-PR groups: covered members inherit group progress; UNMERGEABLE
+// entries are surfaced (not given waiting-line math) and are transparent to others.
+describe('queueStage — covered members + UNMERGEABLE entries', () => {
+  it('UNMERGEABLE entry → unmergeable: true, no percent/eta/waiting-line math', () => {
+    const r = queueStage({
+      entries: [e(1, 8878, 'UNMERGEABLE', 'staleOid'), e(2, 200, 'AWAITING_CHECKS', 'g1')],
+      prNumber: 8878, groups: GROUPS, medianGroupSecs: 900, batchSize: 6,
+    });
+    expect(r.unmergeable).toBe(true);
+    expect(r.percent).toBeNull();
+    expect(r.etaSeconds).toBeNull();
+    expect(r.aheadCount).toBe(0);
+    expect(r.failed).toBe(false);
+  });
+
+  it('non-unmergeable results carry unmergeable: false (all paths)', () => {
+    const building = queueStage({
+      entries: [e(1, 100, 'AWAITING_CHECKS', 'g1')],
+      prNumber: 100, groups: GROUPS, medianGroupSecs: 900, batchSize: 6,
+    });
+    expect(building.unmergeable).toBe(false);
+    const queued = queueStage({
+      entries: [e(1, 999, 'QUEUED')],
+      prNumber: 999, groups: GROUPS, medianGroupSecs: 900, batchSize: 6,
+    });
+    expect(queued.unmergeable).toBe(false);
+    const missing = queueStage({ entries: [], prNumber: 1, groups: [], medianGroupSecs: null, batchSize: 6 });
+    expect(missing.unmergeable).toBe(false);
+  });
+
+  it('UNMERGEABLE entry ahead is transparent: excluded from aheadCount and batch math', () => {
+    const entries = [
+      e(1, 100, 'UNMERGEABLE', 'staleOid'), // facing ejection — occupies no capacity
+      e(2, 200, 'AWAITING_CHECKS', 'g1'),
+      e(3, 999, 'QUEUED'),
+    ];
+    const r = queueStage({ entries, prNumber: 999, groups: GROUPS, medianGroupSecs: 900, batchSize: 6 });
+    expect(r.aheadCount).toBe(1); // only the building entry
+    // deepest building eta 120 + ceil((0+1)/6)=1 run * 900
+    expect(r.etaSeconds).toBe(120 + 900);
+  });
+
+  it('QUEUED entry covered by a building group inherits that group progress via coveringGroupOid', () => {
+    const entries = [
+      e(1, 100, 'QUEUED'), e(2, 200, 'QUEUED'),
+      e(3, 300, 'AWAITING_CHECKS', 'g1'), // group covers (0,3]
+    ];
+    const r = queueStage({
+      entries, prNumber: 100, groups: GROUPS, medianGroupSecs: 900, batchSize: 6,
+      coveringGroupOid: 'g1',
+    });
+    expect(r.percent).toBe(80);
+    expect(r.etaSeconds).toBe(120);
+    expect(r.aheadCount).toBe(0);
+    expect(r.failed).toBe(false);
+  });
+
+  it('coveringGroupOid without progress yet → default group ETA (same as own-group path)', () => {
+    const entries = [e(1, 100, 'QUEUED'), e(2, 300, 'AWAITING_CHECKS', 'unknown-oid')];
+    const r = queueStage({
+      entries, prNumber: 100, groups: [], medianGroupSecs: null, batchSize: 6,
+      coveringGroupOid: 'unknown-oid',
+    });
+    expect(r.percent).toBeNull();
+    expect(r.etaSeconds).toBe(900); // DEFAULT_GROUP_SECS
+    expect(r.aheadCount).toBe(0);
+  });
+
+  it('coveringGroupOid propagates group failure', () => {
+    const failedGroups = [{ oid: 'g1', percent: 89, etaSeconds: null, overdue: false, failed: true }];
+    const r = queueStage({
+      entries: [e(1, 100, 'QUEUED'), e(2, 300, 'AWAITING_CHECKS', 'g1')],
+      prNumber: 100, groups: failedGroups, medianGroupSecs: 900, batchSize: 6,
+      coveringGroupOid: 'g1',
+    });
+    expect(r.failed).toBe(true);
+  });
+
+  it("own AWAITING_CHECKS oid wins over a (stale) coveringGroupOid", () => {
+    const r = queueStage({
+      entries: [e(1, 100, 'AWAITING_CHECKS', 'g2')],
+      prNumber: 100, groups: GROUPS, medianGroupSecs: 900, batchSize: 6,
+      coveringGroupOid: 'g1',
+    });
+    expect(r.percent).toBe(30); // g2's, not g1's
+  });
+});

@@ -70,6 +70,15 @@ describe('trackState', () => {
       .toEqual(['done', 'fail', 'pending']);
   });
 
+  it('queue/unmergeable → parked (amber !) at the Queue node, label kept', () => {
+    expect(statuses(stage({ stage: 'queue', substate: 'unmergeable' }), true))
+      .toEqual(['done', 'parked', 'pending', 'pending', 'pending']);
+    expect(statuses(stage({ stage: 'queue', substate: 'unmergeable' }), false))
+      .toEqual(['done', 'parked', 'pending']);
+    expect(labels(stage({ stage: 'queue', substate: 'unmergeable' }), false))
+      .toEqual(['CI', 'Queue', 'Merged']);
+  });
+
   it('merged → all three lifecycle nodes done (terminal on simple repos)', () => {
     expect(statuses(stage({ stage: 'merged' }), false)).toEqual(['done', 'done', 'done']);
     // defensive on deploy repos (classify normally maps merged PRs to qa-deploy/awaiting-prod)
@@ -116,6 +125,16 @@ describe('MetroTrack', () => {
     const fail = container.querySelector('.node.fail')!;
     expect(fail.querySelector('.c')!.textContent).toBe('✗');
     expect(fail.querySelector('.node-label')!.textContent).toBe('Queue');
+    expect(container.querySelector('.node.active')).toBeNull();
+  });
+
+  it('renders an amber ! parked node at Queue for queue/unmergeable', () => {
+    const { container } = render(
+      <MetroTrack stage={stage({ stage: 'queue', substate: 'unmergeable' })} hasDeploy />,
+    );
+    const parked = container.querySelector('.node.parked')!;
+    expect(parked.querySelector('.c')!.textContent).toBe('!');
+    expect(parked.querySelector('.node-label')!.textContent).toBe('Queue');
     expect(container.querySelector('.node.active')).toBeNull();
   });
 

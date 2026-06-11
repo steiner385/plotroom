@@ -80,9 +80,22 @@ function WaitingCars({ waiting, batchSize }: { waiting: { prNumber: number; posi
   );
 }
 
+/** UNMERGEABLE entries (stale against the queue base, facing ejection) get a
+ *  distinct car — never folded into a group's car or the waiting line. */
+function UnmergeableCar({ numbers }: { numbers: number[] }) {
+  if (numbers.length === 0) return null;
+  return (
+    <div className="car unmergeable" title={numbers.map(prLabel).join(' ')}>
+      <div className="car-header">✗ unmergeable</div>
+      <PrLinks numbers={numbers} className="car-numbers" />
+    </div>
+  );
+}
+
 export function QueueTrain({ queue }: { queue: RepoQueueView | null }) {
   if (!queue) return null;
-  if (queue.groups.length === 0 && queue.waiting.length === 0) return null;
+  const unmergeable = queue.unmergeable ?? []; // tolerate a pre-upgrade server payload
+  if (queue.groups.length === 0 && queue.waiting.length === 0 && unmergeable.length === 0) return null;
 
   return (
     <div className="queue-train">
@@ -90,6 +103,7 @@ export function QueueTrain({ queue }: { queue: RepoQueueView | null }) {
         <BuildingCar key={g.oid} g={g} />
       ))}
       <WaitingCars waiting={queue.waiting} batchSize={queue.batchSize} />
+      <UnmergeableCar numbers={unmergeable} />
     </div>
   );
 }

@@ -12,7 +12,8 @@ const SIMPLE_LABELS = ['CI', 'Queue', 'Merged'];
  * Pure mapper: stage/substate → per-node track state.
  * Deploy repos get a 5-node lifecycle (CI/Queue/Merged/QA/Prod), simple repos 3 nodes.
  * Parked draft/conflicting relabel the CI node with the substate (amber `!`);
- * ci-failed / group-failed render as red ✗ at the CI / Queue node respectively.
+ * ci-failed / group-failed render as red ✗ at the CI / Queue node respectively;
+ * queue/unmergeable renders the Queue node as amber `!` (needs a rebase).
  */
 export function trackState(stage: StageResult, hasDeploy: boolean): TrackNode[] {
   const labels = hasDeploy ? DEPLOY_LABELS : SIMPLE_LABELS;
@@ -33,7 +34,8 @@ export function trackState(stage: StageResult, hasDeploy: boolean): TrackNode[] 
       break;
     case 'queue':
       nodes[0]!.status = 'done';
-      nodes[1]!.status = stage.substate === 'group-failed' ? 'fail' : 'active';
+      nodes[1]!.status = stage.substate === 'group-failed' ? 'fail'
+        : stage.substate === 'unmergeable' ? 'parked' : 'active';
       break;
     case 'merged':
       doneThrough(2);

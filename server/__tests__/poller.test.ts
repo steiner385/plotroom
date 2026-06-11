@@ -1760,6 +1760,155 @@ describe('Poller buildQueueView — queue view payload (V1)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// HEADGREEN multi-PR groups: covered members inherit the covering group's
+// progress + groupChecks; UNMERGEABLE entries are surfaced and excluded from
+// coverage/waiting (live incident 2026-06-11: #8878 pos 1 UNMERGEABLE rendered
+// as an innocuous queued row and was folded into the covering group's car).
+// ---------------------------------------------------------------------------
+
+describe('Poller queue group coverage + UNMERGEABLE (HEADGREEN)', () => {
+  const OID_A = 'oidHgA';
+  const OID_B = 'oidHgB';
+
+  const mgRunning = (oid: string) => ({
+    oid,
+    statusCheckRollup: { contexts: { nodes: [
+      { __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS', conclusion: null,
+        startedAt: '2026-06-10T11:50:00Z', completedAt: null, detailsUrl: 'gu',
+        checkSuite: { workflowRun: { event: 'merge_group', runNumber: 7994, workflow: { name: 'CI' } } } },
+    ] } },
+  });
+
+  const openNode = (number: number) => ({ number, title: `pr ${number}`, url: `u${number}`,
+    isDraft: false, mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null });
+
+  const queuedPrNode = (number: number, entry: Record<string, unknown>) => ({
+    number, title: `pr ${number}`, url: `u${number}`, isDraft: false, mergeStateStatus: 'BLOCKED',
+    mergedAt: null, headRefOid: `head${number}`, autoMergeRequest: { mergeMethod: 'SQUASH' },
+    mergeCommit: null, mergeQueueEntry: entry,
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+      contexts: { pageInfo: { hasNextPage: false }, nodes: [{ ...CHECK_DONE }] } } } }] },
+  });
+
+  function hgClient(sweep: Record<string, unknown>, detail: Record<string, unknown>,
+    detailMarker: string, queueResponse: Record<string, unknown>, rollup: Record<string, unknown>) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweep;
+        if (q.includes(detailMarker)) return detail;
+        if (q.includes('object(oid:')) return rollup;
+        if (q.includes('mergeQueue')) return queueResponse;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  function seedMergeGroupHistory() {
+    for (let i = 0; i < 5; i++) {
+      history.recordCheckDuration('acme/widgets', 'ci', 'merge_group',
+        `2026-06-0${i + 1}T10:00:00Z`, `2026-06-0${i + 1}T10:08:00Z`, 'SUCCESS');
+    }
+  }
+
+  it('live scenario: UNMERGEABLE entry is excluded from group coverage/waiting and listed in unmergeable; its row is queue/unmergeable', async () => {
+    // pos 1 UNMERGEABLE (own stale oid), pos 2 AWAITING_CHECKS oidA,
+    // pos 3 AWAITING_CHECKS oidB, pos 4–5 QUEUED
+    const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'UNMERGEABLE', enqueuedAt: null,
+        headCommit: { oid: 'staleOid8878' }, pullRequest: { number: 8878 } },
+      { position: 2, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: OID_A }, pullRequest: { number: 9002 } },
+      { position: 3, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: OID_B }, pullRequest: { number: 9003 } },
+      { position: 4, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9004 } },
+      { position: 5, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9005 } },
+    ] } } } };
+    const sweep = {
+      open0: { issueCount: 1, nodes: [openNode(8878)] },
+      open1: { issueCount: 0, nodes: [] },
+      merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+    };
+    const detail = { r0: { nameWithOwner: 'acme/widgets',
+      pr8878: queuedPrNode(8878, { position: 1, state: 'UNMERGEABLE', enqueuedAt: null,
+        headCommit: { oid: 'staleOid8878' } }) } };
+    const rollup = { repository: { o0: mgRunning(OID_A), o1: mgRunning(OID_B) } };
+    seedMergeGroupHistory();
+    const p = new Poller({ client: hgClient(sweep, detail, 'pr8878: pullRequest', queueResponse, rollup) as never,
+      history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    const queue = repo.queue!;
+    // UNMERGEABLE is transparent: group A covers only pos 2, group B only pos 3
+    expect(queue.groups.map((g) => g.oid)).toEqual([OID_A, OID_B]);
+    expect(queue.groups[0]!.prNumbers).toEqual([9002]);
+    expect(queue.groups[1]!.prNumbers).toEqual([9003]);
+    expect(queue.waiting.map((w) => w.prNumber)).toEqual([9004, 9005]);
+    expect(queue.unmergeable).toEqual([8878]);
+    // The UNMERGEABLE PR's row: queue/unmergeable, no waiting-line math
+    const pr = repo.prs.find((x) => x.number === 8878)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.stage.substate).toBe('unmergeable');
+    expect(pr.stage.percent).toBeNull();
+    expect(pr.stage.etaSeconds).toBeNull();
+  });
+
+  it('covered members (QUEUED under a building group) inherit the group percent/eta and groupChecks', async () => {
+    // pos 1–2 QUEUED, pos 3 AWAITING_CHECKS oidA → group covers (0,3]: all three
+    const queueResponse = { repository: { mergeQueue: { entries: { nodes: [
+      { position: 1, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9001 } },
+      { position: 2, state: 'QUEUED', enqueuedAt: null,
+        headCommit: null, pullRequest: { number: 9002 } },
+      { position: 3, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: OID_A }, pullRequest: { number: 9003 } },
+    ] } } } };
+    const sweep = {
+      open0: { issueCount: 3, nodes: [openNode(9001), openNode(9002), openNode(9003)] },
+      open1: { issueCount: 0, nodes: [] },
+      merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+    };
+    const detail = { r0: { nameWithOwner: 'acme/widgets',
+      pr9001: queuedPrNode(9001, { position: 1, state: 'QUEUED', enqueuedAt: null, headCommit: null }),
+      pr9002: queuedPrNode(9002, { position: 2, state: 'QUEUED', enqueuedAt: null, headCommit: null }),
+      pr9003: queuedPrNode(9003, { position: 3, state: 'AWAITING_CHECKS', enqueuedAt: null,
+        headCommit: { oid: OID_A } }),
+    } };
+    const rollup = { repository: { o0: mgRunning(OID_A) } };
+    seedMergeGroupHistory();
+    const p = new Poller({ client: hgClient(sweep, detail, 'pr9001: pullRequest', queueResponse, rollup) as never,
+      history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    const queue = repo.queue!;
+    expect(queue.groups).toHaveLength(1);
+    expect(queue.groups[0]!.prNumbers).toEqual([9001, 9002, 9003]);
+    expect(queue.waiting).toEqual([]);
+    expect(queue.unmergeable).toEqual([]);
+    const groupPercent = queue.groups[0]!.percent;
+    const groupEta = queue.groups[0]!.etaSeconds;
+    expect(groupPercent).not.toBeNull();
+    // Every member row — including the QUEUED-but-covered ones — shows the
+    // covering group's progress, zero ahead, and the group build's checks.
+    for (const n of [9001, 9002, 9003]) {
+      const pr = repo.prs.find((x) => x.number === n)!;
+      expect(pr.stage.stage).toBe('queue');
+      expect(pr.stage.percent).toBe(groupPercent);
+      expect(pr.stage.etaSeconds).toBe(groupEta);
+      expect(pr.queueAheadCount).toBe(0);
+      expect(pr.groupChecks).not.toBeNull();
+      expect(pr.groupChecks![0]).toMatchObject({ name: 'ci', status: 'IN_PROGRESS' });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task Y1: workflow identity — scoped required population + groupChecks payload
 // ---------------------------------------------------------------------------
 

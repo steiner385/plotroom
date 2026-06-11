@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatDur, formatEta } from '../format';
+import { formatDur, formatEta, stageLabel } from '../format';
 
 describe('formatDur', () => {
   it('formats compact durations', () => {
@@ -21,5 +21,14 @@ describe('formatEta', () => {
     expect(formatEta(null, null, true)).toBe('overdue');
     expect(formatEta(null, null, false)).toBe('');
     expect(formatEta(0, null, false)).toBe('done');
+  });
+});
+
+describe('stageLabel', () => {
+  it('labels queue/unmergeable distinctly', () => {
+    expect(stageLabel('queue', 'unmergeable')).toBe('Queue — unmergeable');
+  });
+  it('keeps the plain queue label without substate', () => {
+    expect(stageLabel('queue', null)).toBe('Merge queue');
   });
 });

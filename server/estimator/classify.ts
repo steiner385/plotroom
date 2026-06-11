@@ -12,7 +12,7 @@ export interface ClassifyInput {
   pr: PrSnapshot;
   prev: StageResult | null;
   ciProgress: ProgressResult | null;
-  queueProgress: { percent: number | null; etaSeconds: number | null; overdue: boolean; failed?: boolean } | null;
+  queueProgress: { percent: number | null; etaSeconds: number | null; overdue: boolean; failed?: boolean; unmergeable?: boolean } | null;
   deploy: DeployInfo;
   retentionDays: number;
   now: Date;
@@ -99,6 +99,11 @@ export function classify(i: ClassifyInput): StageResult | null {
 
   if (pr.queue) {
     const q = i.queueProgress;
+    // UNMERGEABLE = facing ejection (stale against the queue base). Either signal
+    // suffices: the queue-entries fetch (q.unmergeable) or the PR's own snapshot —
+    // they refresh on different cadences and either can lag the other. No
+    // percent/eta: waiting-line math is meaningless for an entry about to be ejected.
+    if (q?.unmergeable || pr.queue.state === 'UNMERGEABLE') return bare('queue', 'unmergeable');
     const substate = q?.failed ? 'group-failed' : null;
     return { stage: 'queue', substate, percent: q?.percent ?? null,
       etaSeconds: q?.etaSeconds ?? null, etaRangeSeconds: null, overdue: q?.overdue ?? false };

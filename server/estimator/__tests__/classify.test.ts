@@ -283,6 +283,30 @@ describe('classify', () => {
     expect(r.substate).toBeNull();
   });
 
+  // HEADGREEN: UNMERGEABLE queue entries face ejection — surface them instead of
+  // rendering an innocuous queued row with waiting-line math.
+  it('queueProgress.unmergeable → queue/unmergeable with no percent/eta', () => {
+    const r = classify(input({
+      pr: pr({ queue: { position: 1, state: 'UNMERGEABLE', enqueuedAt: null, groupHeadOid: 'staleOid' } }),
+      queueProgress: { percent: null, etaSeconds: null, overdue: false, failed: false, unmergeable: true },
+    }))!;
+    expect(r.stage).toBe('queue');
+    expect(r.substate).toBe('unmergeable');
+    expect(r.percent).toBeNull();
+    expect(r.etaSeconds).toBeNull();
+  });
+
+  it('snapshot queue state UNMERGEABLE → unmergeable even when queueProgress lags (stale entries)', () => {
+    const r = classify(input({
+      pr: pr({ queue: { position: 1, state: 'UNMERGEABLE', enqueuedAt: null, groupHeadOid: null } }),
+      // stale waiting-line math from an older queue fetch must not leak through
+      queueProgress: { percent: null, etaSeconds: 1800, overdue: false, failed: false },
+    }))!;
+    expect(r.stage).toBe('queue');
+    expect(r.substate).toBe('unmergeable');
+    expect(r.etaSeconds).toBeNull();
+  });
+
   // Item 7 — UNKNOWN-hold returns a copy (not same reference)
   it('UNKNOWN mergeability returns a copy of prev (not same object reference)', () => {
     const prev: StageResult = { stage: 'ready', substate: 'idle', percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false };

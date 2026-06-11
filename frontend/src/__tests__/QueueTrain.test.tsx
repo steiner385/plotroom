@@ -19,7 +19,7 @@ describe('QueueTrain', () => {
   });
 
   it('renders nothing when queue has no groups and no waiting entries', () => {
-    const queue: RepoQueueView = { groups: [], waiting: [], batchSize: 6 };
+    const queue: RepoQueueView = { groups: [], waiting: [], unmergeable: [], batchSize: 6 };
     const { container } = render(<QueueTrain queue={queue} />);
     expect(container.firstChild).toBeNull();
   });
@@ -31,6 +31,7 @@ describe('QueueTrain', () => {
         group({ oid: 'def456', prNumbers: [8905, 8902], percent: 30, etaSeconds: 600 }),
       ],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -48,6 +49,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ prNumbers: [8943, 8941] })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -63,6 +65,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ failed: true, percent: 89, etaSeconds: null })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -75,6 +78,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ percent: null, etaSeconds: null })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -85,7 +89,7 @@ describe('QueueTrain', () => {
 
   it('waiting: 7 entries with batchSize 6 → next-batch car (6 numbers) + then car (1)', () => {
     const waiting = Array.from({ length: 7 }, (_, i) => ({ prNumber: 8960 - i, position: i + 1 }));
-    const queue: RepoQueueView = { groups: [], waiting, batchSize: 6 };
+    const queue: RepoQueueView = { groups: [], waiting, unmergeable: [], batchSize: 6 };
     const { container } = render(<QueueTrain queue={queue} />);
     const dashed = container.querySelectorAll('.car.queued');
     expect(dashed).toHaveLength(2);
@@ -100,7 +104,7 @@ describe('QueueTrain', () => {
   it('next-batch car shows up to batchSize numbers then +N overflow', () => {
     // 10 waiting, batchSize 4 → first car shows 4, rest in "then" (6)
     const waiting = Array.from({ length: 10 }, (_, i) => ({ prNumber: 8900 + i, position: i + 1 }));
-    const queue: RepoQueueView = { groups: [], waiting, batchSize: 4 };
+    const queue: RepoQueueView = { groups: [], waiting, unmergeable: [], batchSize: 4 };
     const { container } = render(<QueueTrain queue={queue} />);
     const dashed = container.querySelectorAll('.car.queued');
     expect(dashed).toHaveLength(2);
@@ -115,7 +119,7 @@ describe('QueueTrain', () => {
     // batchSize=8, 10 waiting → next-batch car slices 8 entries but PrLinks only shows 6 + "+2"
     // "then" car shows 2 more (10 - 8 = 2 remaining)
     const waiting = Array.from({ length: 10 }, (_, i) => ({ prNumber: 9000 + i, position: i + 1 }));
-    const queue: RepoQueueView = { groups: [], waiting, batchSize: 8 };
+    const queue: RepoQueueView = { groups: [], waiting, unmergeable: [], batchSize: 8 };
     const { container } = render(<QueueTrain queue={queue} />);
     const dashed = container.querySelectorAll('.car.queued');
     expect(dashed).toHaveLength(2);
@@ -131,6 +135,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [],
       waiting: [{ prNumber: 8960, position: 1 }],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -143,6 +148,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ prNumbers: [8943, 8941, 8939] })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -157,6 +163,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ prNumbers: [100, 101, 102, 103, 104, 105, 106, 107] })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -177,6 +184,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({ prNumbers: [8943] })],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     render(<QueueTrain queue={queue} />);
@@ -193,6 +201,7 @@ describe('QueueTrain', () => {
     const queue: RepoQueueView = {
       groups: [group({})],
       waiting: [],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
@@ -207,10 +216,68 @@ describe('QueueTrain', () => {
         { prNumber: 8960, position: 1 },
         { prNumber: 8958, position: 2 },
       ],
+      unmergeable: [],
       batchSize: 6,
     };
     const { container } = render(<QueueTrain queue={queue} />);
     expect(container.querySelector('.car.building')).not.toBeNull();
     expect(container.querySelector('.car.queued')).not.toBeNull();
+  });
+
+  // HEADGREEN: UNMERGEABLE entries get their own distinct car instead of being
+  // folded into the covering group's car or rendered as innocuous queued rows.
+  it('renders an unmergeable car with ✗ header and anchor links', () => {
+    const queue: RepoQueueView = {
+      groups: [group({ prNumbers: [8943] })],
+      waiting: [],
+      unmergeable: [8878],
+      batchSize: 6,
+    };
+    const { container } = render(<QueueTrain queue={queue} />);
+    const car = container.querySelector('.car.unmergeable');
+    expect(car).not.toBeNull();
+    expect(car!.textContent).toContain('✗ unmergeable');
+    const link = car!.querySelector('a') as HTMLAnchorElement;
+    expect(link.href).toContain('#pr-8878');
+    expect(link.textContent).toBe('#8878');
+    // not folded into the building car
+    expect(container.querySelector('.car.building')!.textContent).not.toContain('#8878');
+  });
+
+  it('unmergeable car caps numbers at 6 with +N overflow and title tooltip', () => {
+    const queue: RepoQueueView = {
+      groups: [],
+      waiting: [],
+      unmergeable: [9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007],
+      batchSize: 6,
+    };
+    const { container } = render(<QueueTrain queue={queue} />);
+    const car = container.querySelector('.car.unmergeable')!;
+    expect(car.querySelectorAll('a')).toHaveLength(6);
+    expect(car.textContent).toContain('+2');
+    expect(car.getAttribute('title')).toContain('#9000');
+  });
+
+  it('queue with only unmergeable entries still renders the train', () => {
+    const queue: RepoQueueView = {
+      groups: [],
+      waiting: [],
+      unmergeable: [8878],
+      batchSize: 6,
+    };
+    const { container } = render(<QueueTrain queue={queue} />);
+    expect(container.querySelector('.queue-train')).not.toBeNull();
+    expect(container.querySelector('.car.unmergeable')).not.toBeNull();
+  });
+
+  it('no unmergeable car when the list is empty', () => {
+    const queue: RepoQueueView = {
+      groups: [group({})],
+      waiting: [],
+      unmergeable: [],
+      batchSize: 6,
+    };
+    const { container } = render(<QueueTrain queue={queue} />);
+    expect(container.querySelector('.car.unmergeable')).toBeNull();
   });
 });

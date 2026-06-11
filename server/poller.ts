@@ -76,6 +76,9 @@ export interface QueueGroupView {
 export interface RepoQueueView {
   groups: QueueGroupView[];
   waiting: { prNumber: number; position: number }[];
+  /** PR numbers of UNMERGEABLE entries (stale against the queue base, facing
+   *  ejection) — excluded from group coverage and waiting, surfaced separately. */
+  unmergeable: number[];
   batchSize: number;
 }
 export interface DashboardState {
@@ -863,6 +866,11 @@ export class Poller extends EventEmitter {
    *  (prevGroupPos, N] — so group.prNumbers includes all entries between it and
    *  the previous group.
    *
+   *  UNMERGEABLE entries are facing ejection: they are surfaced in `unmergeable`
+   *  and treated as transparent everywhere else — excluded from group coverage,
+   *  prNumbers, and waiting (a group at position N still covers the remaining
+   *  entries in (prevGroupPos, N]).
+   *
    *  Waiting = entries whose position is beyond the last group's coverage
    *  (i.e. they have no CI group yet), returned ascending by position.
    *
@@ -874,8 +882,16 @@ export class Poller extends EventEmitter {
 
     const byOid = new Map(groups.map((g) => [g.oid, g]));
 
-    // Sort all entries by position for batch-range calculation.
-    const sorted = [...entries].sort((a, b) => a.position - b.position);
+    // UNMERGEABLE entries are surfaced separately and transparent to coverage.
+    const unmergeable = entries
+      .filter((e) => e.state === 'UNMERGEABLE')
+      .sort((a, b) => a.position - b.position)
+      .map((e) => e.prNumber);
+
+    // Sort the remaining entries by position for batch-range calculation.
+    const sorted = entries
+      .filter((e) => e.state !== 'UNMERGEABLE')
+      .sort((a, b) => a.position - b.position);
 
     // Collect unique building groups (AWAITING_CHECKS with headCommitOid).
     // A group is identified by its OID; its representative position is the max
@@ -900,7 +916,7 @@ export class Poller extends EventEmitter {
     const queueGroups: QueueGroupView[] = [];
     let prevGroupPos = 0;
     for (const [oid, groupMaxPos] of orderedGroups) {
-      // All entries in (prevGroupPos, groupMaxPos]
+      // All non-unmergeable entries in (prevGroupPos, groupMaxPos]
       const covered = sorted.filter(
         (e) => e.position > prevGroupPos && e.position <= groupMaxPos);
       const prNumbers = covered.map((e) => e.prNumber);
@@ -920,7 +936,33 @@ export class Poller extends EventEmitter {
       .filter((e) => e.position > maxBuildingPos)
       .map((e) => ({ prNumber: e.prNumber, position: e.position }));
 
-    return { groups: queueGroups, waiting, batchSize: this.settingsFor(repo).batchSize };
+    return { groups: queueGroups, waiting, unmergeable,
+      batchSize: this.settingsFor(repo).batchSize };
+  }
+
+  /**
+   * The building-group oid covering a queued PR (HEADGREEN multi-PR groups):
+   * its own AWAITING_CHECKS oid when assigned, else the building group whose
+   * batch coverage range — (prevGroupPos, groupMaxPos], UNMERGEABLE entries
+   * transparent — includes the PR's position. Null for UNMERGEABLE entries,
+   * unknown PRs, and entries beyond all building groups.
+   */
+  private coveringGroupOidFor(entries: QueueEntry[], prNumber: number): string | null {
+    const me = entries.find((e) => e.prNumber === prNumber);
+    if (!me || me.state === 'UNMERGEABLE') return null;
+    if (me.state === 'AWAITING_CHECKS' && me.headCommitOid) return me.headCommitOid;
+    const groupPositions = new Map<string, number>(); // oid → max position
+    for (const e of entries) {
+      if (e.state === 'AWAITING_CHECKS' && e.headCommitOid) {
+        const prev = groupPositions.get(e.headCommitOid) ?? 0;
+        if (e.position > prev) groupPositions.set(e.headCommitOid, e.position);
+      }
+    }
+    const ordered = [...groupPositions.entries()].sort(([, pa], [, pb]) => pa - pb);
+    for (const [oid, maxPos] of ordered) {
+      if (me.position <= maxPos) return oid; // first group whose range reaches me
+    }
+    return null;
   }
 
   /** Memoized view of the last emitted state; never rebuilds per API consumer. */
@@ -986,12 +1028,18 @@ export class Poller extends EventEmitter {
       queueDelay: (n) => this.expectedRunnerWaitFor(pr.repo, n, 'pull_request') });
 
     let queueProgress: QueueStageResult | null = null;
+    let coveringOid: string | null = null;
     if (pr.queue) {
       const entries = this.queueEntries.get(pr.repo) ?? [];
+      // HEADGREEN: a member covered by a building group (own AWAITING_CHECKS oid,
+      // else the building group whose batch range includes its position) rides
+      // that group's progress instead of waiting-line math.
+      coveringOid = this.coveringGroupOidFor(entries, pr.number);
       // groups pre-computed once per repo per buildState call (not per PR)
       queueProgress = queueStage({ entries, prNumber: pr.number, groups,
         medianGroupSecs: this.medianGroupSecs(pr.repo),
-        batchSize: this.settingsFor(pr.repo).batchSize });
+        batchSize: this.settingsFor(pr.repo).batchSize,
+        coveringGroupOid: coveringOid });
     }
     const stage = classify({
       pr, prev: this.stages.get(key) ?? null, ciProgress, queueProgress,
@@ -1008,8 +1056,11 @@ export class Poller extends EventEmitter {
     // Queued PRs: expose the merge-group build's checks as their own labeled
     // payload (already fetched into groupChecks by queueOnce; isRequired true via
     // mapRollupContexts; merge_group-event history supplies expected durations).
-    const storedGroup = pr.queue?.groupHeadOid
-      ? this.groupChecks.get(pr.queue.groupHeadOid) : undefined;
+    // Covered members whose own snapshot carries no groupHeadOid use the covering
+    // building group's oid — the run actually driving their queue-stage ETA.
+    const effectiveGroupOid = pr.queue ? (pr.queue.groupHeadOid ?? coveringOid) : null;
+    const storedGroup = effectiveGroupOid
+      ? this.groupChecks.get(effectiveGroupOid) : undefined;
     const groupChecks = storedGroup?.length
       ? this.toCheckViews(pr.repo, storedGroup, now, prefixes) : null;
     return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
