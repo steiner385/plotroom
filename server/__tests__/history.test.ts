@@ -270,6 +270,43 @@ describe('eta accuracy (Task F)', () => {
   });
 });
 
+describe('eta accuracy flap guard (issue #54)', () => {
+  const AT = '2026-06-12T10:00:00Z';
+
+  it('rejects a stage-flap artifact: hours-long first ETA scored against a seconds-long actual', () => {
+    // The live failure mode: predicted=8534s, actual=8.3s ×8 (classification
+    // bounced through ci within one poll cycle)
+    expect(h.recordEtaAccuracy(REPO, 'ci', 8534, 8.3, AT)).toBe(false);
+    expect(h.etaAccuracy(REPO, 'ci')).toBeNull();
+  });
+
+  it('records a legitimately short stage when the prediction was also short', () => {
+    // predicted 90s → threshold max(60, 4.5) = 60 → actual 75s is a real sample
+    expect(h.recordEtaAccuracy(REPO, 'ci', 90, 75, AT)).toBe(true);
+    expect(h.etaAccuracy(REPO, 'ci')).toEqual({ medianAbsErrSecs: 15, n: 1 });
+  });
+
+  it('still records rows with predicted=0 (no usable first ETA) when actual clears the floor', () => {
+    expect(h.recordEtaAccuracy(REPO, 'ci', 0, 120, AT)).toBe(true);
+  });
+
+  it('60s floor boundary: actual ≥ 60 records, just below does not (small predictions)', () => {
+    expect(h.recordEtaAccuracy(REPO, 'ci', 100, 59.9, AT)).toBe(false);
+    expect(h.recordEtaAccuracy(REPO, 'ci', 100, 60, AT)).toBe(true);
+    expect(h.etaAccuracy(REPO, 'ci')).toEqual({ medianAbsErrSecs: 40, n: 1 });
+  });
+
+  it('5%-of-predicted boundary dominates the floor for large predictions', () => {
+    // predicted 8534s → threshold max(60, ~426.7) = ~426.7s
+    expect(h.recordEtaAccuracy(REPO, 'queue', 8534, 400, AT)).toBe(false); // ≥60 but <5%
+    expect(h.recordEtaAccuracy(REPO, 'queue', 8534, 426, AT)).toBe(false); // just under 5%
+    expect(h.recordEtaAccuracy(REPO, 'queue', 8534, 427, AT)).toBe(true);  // just over 5%
+    expect(h.etaAccuracy(REPO, 'queue')).toEqual({ medianAbsErrSecs: 8534 - 427, n: 1 });
+    // exact-threshold inclusivity on a float-exact pair: 2000 × 0.05 = 100
+    expect(h.recordEtaAccuracy(REPO, 'queue', 2000, 100, AT)).toBe(true);
+  });
+});
+
 describe('eta accuracy windowed read (issue #35 calibration panel)', () => {
   it('returns rows at/after since with full fields, ordered repo → stage → observed_at', () => {
     h.recordEtaAccuracy('octo/bridge', 'ci', 100, 150, '2026-06-10T10:30:00Z');
