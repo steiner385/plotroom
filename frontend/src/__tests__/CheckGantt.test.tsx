@@ -208,7 +208,7 @@ describe('CheckGantt', () => {
     expect(reqRow.classList.contains('g-advisory')).toBe(false);
   });
 
-  it('advisory row name element has title="advisory — does not gate merging"', () => {
+  it('name tooltips: full name on every row, advisory annotated', () => {
     const { container } = render(<CheckGantt stage="ci" checks={[
       check({ name: 'req-check', isRequired: true }),
       check({ name: 'lighthouse', isRequired: false }),
@@ -218,8 +218,10 @@ describe('CheckGantt', () => {
     const reqRow = rows.find((r) => r.textContent?.includes('req-check'))!;
     const advName = advRow.querySelector('.g-name') as HTMLElement;
     const reqName = reqRow.querySelector('.g-name') as HTMLElement;
-    expect(advName.title).toBe('advisory — does not gate merging');
-    expect(reqName.title).toBe('');
+    expect(advName.title).toContain('advisory, does not gate merging');
+    expect(advName.title).toContain(advName.textContent ?? '');
+    // required rows tooltip the full (possibly truncated) name
+    expect(reqName.title).toBe(reqName.textContent);
   });
 
 });

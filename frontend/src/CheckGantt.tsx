@@ -69,11 +69,12 @@ function GanttRow({ c, scale }: { c: CheckView; scale: number }) {
     ? `expected ~${formatDur(c.expectedSeconds)} (p10 ${formatDur(c.expectedLowSeconds!)} – p90 ${formatDur(c.expectedHighSeconds!)})`
     : undefined;
 
-  const advisoryNameTitle = c.isRequired ? undefined : 'advisory — does not gate merging';
+  // full name always hoverable (names truncate); advisory keeps its annotation
+  const nameTitle = c.isRequired ? c.name : `${c.name} — advisory, does not gate merging`;
 
   return (
     <li className={`g-row g-${kind}${extraClass}${advisoryClass}`}>
-      <span className="g-name" title={advisoryNameTitle}>
+      <span className="g-name" title={nameTitle}>
         {c.url
           ? <a href={c.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{c.name}</a>
           : <span>{c.name}</span>}
