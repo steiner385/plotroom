@@ -517,6 +517,78 @@ describe('metrics windowed queries use index support (no full-table scans)', () 
   });
 });
 
+describe('check_durations head_sha + run_attempt (issue #34)', () => {
+  it('migrates a pre-existing DB: columns added, old rows intact with NULLs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prdash-mig-'));
+    const path = join(dir, 'history.db');
+    const raw = new Database(path);
+    // pre-#34 schema (no head_sha / run_attempt)
+    raw.exec(`CREATE TABLE check_durations (
+      repo TEXT NOT NULL, check_name TEXT NOT NULL, event TEXT NOT NULL,
+      duration_secs REAL NOT NULL, completed_at TEXT NOT NULL, conclusion TEXT NOT NULL,
+      UNIQUE(repo, check_name, event, completed_at));`);
+    raw.prepare('INSERT INTO check_durations VALUES (?,?,?,?,?,?)')
+      .run(REPO, 'Build', 'pull_request', 120, '2026-06-10T10:02:00Z', 'SUCCESS');
+    raw.close();
+
+    const store = new HistoryStore(path);
+    try {
+      // legacy row still readable through the normal query paths
+      expect(store.expected(REPO, 'Build', 'pull_request')!.n).toBe(1);
+      // new ingestion records sha + attempt alongside the legacy row
+      expect(store.recordCheckDuration(REPO, 'Build', 'pull_request',
+        '2026-06-11T10:00:00Z', '2026-06-11T10:02:00Z', 'SUCCESS', 'abc123', 2)).toBe(true);
+    } finally {
+      store.close();
+    }
+    const check = new Database(path, { readonly: true });
+    try {
+      const rows = check.prepare(
+        'SELECT head_sha, run_attempt FROM check_durations ORDER BY completed_at').all() as
+        { head_sha: string | null; run_attempt: number | null }[];
+      expect(rows).toEqual([
+        { head_sha: null, run_attempt: null },       // legacy row
+        { head_sha: 'abc123', run_attempt: 2 },      // new ingestion
+      ]);
+    } finally {
+      check.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omitted or empty head_sha and omitted run_attempt store NULL on a fresh DB', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prdash-sha-'));
+    const path = join(dir, 'history.db');
+    const store = new HistoryStore(path);
+    store.recordCheckDuration(REPO, 'Build', 'pull_request',
+      '2026-06-11T10:00:00Z', '2026-06-11T10:02:00Z', 'SUCCESS');                 // omitted
+    store.recordCheckDuration(REPO, 'Build', 'pull_request',
+      '2026-06-11T11:00:00Z', '2026-06-11T11:02:00Z', 'SUCCESS', '', null);       // placeholder ''
+    store.close();
+    const check = new Database(path, { readonly: true });
+    try {
+      const rows = check.prepare('SELECT head_sha, run_attempt FROM check_durations').all() as
+        { head_sha: string | null; run_attempt: number | null }[];
+      expect(rows).toEqual([
+        { head_sha: null, run_attempt: null },
+        { head_sha: null, run_attempt: null },
+      ]);
+    } finally {
+      check.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('UNIQUE dedupe is unchanged: a re-ingest of the same (repo,name,event,completed_at) is ignored', () => {
+    expect(h.recordCheckDuration(REPO, 'Build', 'pull_request',
+      '2026-06-11T10:00:00Z', '2026-06-11T10:02:00Z', 'SUCCESS', 'sha-a', 1)).toBe(true);
+    // same key, different sha/attempt → INSERT OR IGNORE keeps the first row
+    expect(h.recordCheckDuration(REPO, 'Build', 'pull_request',
+      '2026-06-11T10:00:00Z', '2026-06-11T10:02:00Z', 'SUCCESS', 'sha-b', 2)).toBe(true);
+    expect(h.expected(REPO, 'Build', 'pull_request')!.n).toBe(1);
+  });
+});
+
 describe('merged_prs createdAt upsert semantics', () => {
   it('round-trips createdAt and treats an absent createdAt as null', () => {
     h.upsertMergedPr({ repo: REPO, number: 10, title: 't', url: 'u',

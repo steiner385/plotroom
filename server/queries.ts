@@ -89,7 +89,7 @@ function prDetailSelection(n: number): string {
       nodes { __typename ... on CheckRun {
         name status conclusion startedAt completedAt detailsUrl
         isRequired(pullRequestNumber: ${n})
-        checkSuite { workflowRun { event runNumber workflow { name } } }
+        checkSuite { workflowRun { event runNumber runAttempt workflow { name } } }
       } }
     } } } } }`;
 }
@@ -131,7 +131,7 @@ export function buildOidRollupQuery(owner: string, name: string, oids: string[])
     oid
     statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun {
       name status conclusion startedAt completedAt detailsUrl
-      checkSuite { workflowRun { event runNumber workflow { name } } }
+      checkSuite { workflowRun { event runNumber runAttempt workflow { name } } }
     } } } }
   } }`).join('\n  ');
   return `query {
@@ -150,7 +150,7 @@ export function buildBackfillQuery(owner: string, name: string, cursor: string |
         pageInfo { hasNextPage endCursor }
         nodes { oid statusCheckRollup { contexts(first: 100) { nodes { __typename ... on CheckRun {
           name status conclusion startedAt completedAt
-          checkSuite { workflowRun { event runNumber workflow { name } } }
+          checkSuite { workflowRun { event runNumber runAttempt workflow { name } } }
         } } } } }
       }
     } } }

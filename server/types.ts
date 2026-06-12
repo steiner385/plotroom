@@ -15,6 +15,10 @@ export interface CheckRun {
    *  `Auto-merge PRs`); null when the API omits it (old data, no workflow). */
   workflowName: string | null;
   runNumber: number | null;
+  /** Workflow-run attempt from the check's workflowRun (re-runs/spot-retries
+   *  increment it; issue #34 — flake radar / attempt waterfalls). Null when
+   *  the API omits the workflowRun (old data, no workflow). */
+  runAttempt: number | null;
   isRequired: boolean;
   url: string | null;
 }

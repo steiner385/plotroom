@@ -103,6 +103,7 @@ export class HistoryStore {
       CREATE TABLE IF NOT EXISTS check_durations (
         repo TEXT NOT NULL, check_name TEXT NOT NULL, event TEXT NOT NULL,
         duration_secs REAL NOT NULL, completed_at TEXT NOT NULL, conclusion TEXT NOT NULL,
+        head_sha TEXT, run_attempt INTEGER,
         UNIQUE(repo, check_name, event, completed_at)
       );
       CREATE INDEX IF NOT EXISTS idx_durations ON check_durations(repo, check_name, event, completed_at);
@@ -150,10 +151,15 @@ export class HistoryStore {
     // the column from CREATE TABLE above; pre-existing DBs get it from this ALTER
     // (duplicate-column tolerated, everything else rethrown).
     addColumnIfMissing(this.db, 'merged_prs', 'created_at TEXT');
+    // Migration (issue #34): check_durations gains head_sha + run_attempt —
+    // shared plumbing for flake radar / spot-reclaim ledger / attempt
+    // waterfalls. Both nullable; the UNIQUE constraint is unchanged.
+    addColumnIfMissing(this.db, 'check_durations', 'head_sha TEXT');
+    addColumnIfMissing(this.db, 'check_durations', 'run_attempt INTEGER');
 
     // Prepare all statements after schema is guaranteed to exist.
     this.stmtInsertDuration = this.db.prepare(
-      'INSERT OR IGNORE INTO check_durations (repo, check_name, event, duration_secs, completed_at, conclusion) VALUES (?,?,?,?,?,?)'
+      'INSERT OR IGNORE INTO check_durations (repo, check_name, event, duration_secs, completed_at, conclusion, head_sha, run_attempt) VALUES (?,?,?,?,?,?,?,?)'
     );
     this.stmtSelectDurations = this.db.prepare(
       `SELECT duration_secs FROM check_durations
@@ -271,12 +277,18 @@ export class HistoryStore {
     );
   }
 
+  /** `headSha`/`runAttempt` (issue #34): the PR/group head commit the check ran
+   *  against and the workflow-run attempt; both nullable ('' sha — placeholder
+   *  snapshots — normalizes to NULL). On a UNIQUE collision the first row wins
+   *  (INSERT OR IGNORE), exactly as before. */
   recordCheckDuration(repo: string, name: string, event: string,
-    startedAt: string | null, completedAt: string | null, conclusion: string): boolean {
+    startedAt: string | null, completedAt: string | null, conclusion: string,
+    headSha: string | null = null, runAttempt: number | null = null): boolean {
     if (!startedAt || !completedAt) return false;
     const secs = (Date.parse(completedAt) - Date.parse(startedAt)) / 1000;
     if (!(secs > 0)) return false; // rejects negative durations (SKIPPED placeholders) and NaN
-    this.stmtInsertDuration.run(repo, name, event, secs, completedAt, conclusion);
+    this.stmtInsertDuration.run(repo, name, event, secs, completedAt, conclusion,
+      headSha || null, runAttempt ?? null);
     return true;
   }
 

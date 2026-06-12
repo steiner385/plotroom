@@ -5,7 +5,7 @@ const CHECK = {
   __typename: 'CheckRun', name: 'static-checks / Unit Tests (3/8)', status: 'COMPLETED',
   conclusion: 'SUCCESS', startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:08:00Z',
   detailsUrl: 'https://github.com/x', isRequired: false,
-  checkSuite: { workflowRun: { event: 'merge_group', runNumber: 7994, workflow: { name: 'CI' } } },
+  checkSuite: { workflowRun: { event: 'merge_group', runNumber: 7994, runAttempt: 2, workflow: { name: 'CI' } } },
 };
 const STATUS_CTX = { __typename: 'StatusContext', context: 'legacy', state: 'SUCCESS' };
 
@@ -18,9 +18,11 @@ describe('mapRollupContexts', () => {
     expect(out[0].event).toBe('merge_group');
     expect(out[0].workflowName).toBe('CI');
     expect(out[0].runNumber).toBe(7994);
+    expect(out[0].runAttempt).toBe(2);
     expect(out[1].event).toBe('unknown');
     expect(out[1].workflowName).toBeNull();
     expect(out[1].runNumber).toBeNull();
+    expect(out[1].runAttempt).toBeNull();
   });
 
   it('keeps same-named checks from different workflows as separate runs', () => {

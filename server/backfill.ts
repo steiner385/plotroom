@@ -24,7 +24,8 @@ export async function backfillRepo(client: GithubClient, history: HistoryStore,
       // shared ingestion: completed durations + runner-pickup waits (needs graph permitting)
       ingestCheckSet(history, repo,
         mapRollupContexts(commit?.statusCheckRollup?.contexts?.nodes ?? []),
-        needsFor, activeFor, graphKeys, rollupWorkflowName);
+        needsFor, activeFor, graphKeys, rollupWorkflowName,
+        (commit?.oid as string | undefined) ?? null);
     }
     if (!hist.pageInfo?.hasNextPage) return;
     cursor = hist.pageInfo.endCursor;

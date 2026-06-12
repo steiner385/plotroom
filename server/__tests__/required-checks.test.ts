@@ -195,7 +195,7 @@ jobs:
     for (const text of ['jobs:\n  other: {}\n', 'name: CI\non: push\n']) {
       const g = deriveCiGraph(text)!;
       expect(g.prefixes).toEqual(['ci']);
-      expect(g.nodes).toEqual(new Map([['ci', { needs: [], activity: { mode: 'all' } }]]));
+      expect(g.nodes).toEqual(new Map([['ci', { needs: [], activity: { mode: 'all' }, runsOn: null }]]));
     }
   });
 });
@@ -355,9 +355,126 @@ jobs:
       nodes: { ci: { needs: [], activity: { mode: 'only' } } }, workflowName: null })).toBeNull();
   });
 
-  it('accepts a minimal valid value', () => {
+  it('accepts a minimal valid value — a legacy node without runsOn decodes to runsOn: null', () => {
     const g = ciGraphFromJson({ prefixes: ['ci'],
       nodes: { ci: { needs: [], activity: { mode: 'all' } } }, workflowName: null });
-    expect(g!.nodes.get('ci')).toEqual({ needs: [], activity: { mode: 'all' } });
+    expect(g!.nodes.get('ci')).toEqual({ needs: [], activity: { mode: 'all' }, runsOn: null });
+  });
+
+  it('round-trips runsOn candidates and coerces a garbage runsOn to null', () => {
+    const g = deriveCiGraph(`
+jobs:
+  build:
+    runs-on: kindash-runner
+  ci:
+    needs: [build]
+    runs-on: ubuntu-latest
+`)!;
+    const back = ciGraphFromJson(JSON.parse(JSON.stringify(ciGraphToJson(g))))!;
+    expect(back.nodes.get('build')!.runsOn).toEqual(['kindash-runner']);
+    expect(back.nodes.get('ci')!.runsOn).toEqual(['ubuntu-latest']);
+    // tolerant on the new field only: a corrupt runsOn must not reject the row
+    const coerced = ciGraphFromJson({ prefixes: ['ci'],
+      nodes: { ci: { needs: [], activity: { mode: 'all' }, runsOn: 'kindash-runner' } },
+      workflowName: null });
+    expect(coerced!.nodes.get('ci')!.runsOn).toBeNull();
+  });
+});
+
+describe('deriveCiGraph runs-on extraction (issue #34)', () => {
+  const runsOnOf = (yaml: string, prefix: string): string[] | null =>
+    deriveCiGraph(yaml)!.nodes.get(prefix)!.runsOn;
+
+  it('plain string runs-on → single raw label', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    runs-on: kindash-runner
+  ci:
+    needs: [build]
+`, 'build')).toEqual(['kindash-runner']);
+  });
+
+  it('array runs-on → all raw labels', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]
+  ci:
+    needs: [build]
+`, 'build')).toEqual(['self-hosted', 'linux', 'x64']);
+  });
+
+  it("ternary expression → both branches as candidates (condition literals like 'merge_group' excluded)", () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    runs-on: \${{ github.event_name == 'merge_group' && 'kindash-ondemand-2' || 'kindash-runner' }}
+  ci:
+    needs: [build]
+`, 'build')).toEqual(['kindash-ondemand-2', 'kindash-runner']);
+  });
+
+  it('array entry containing a ternary expands inside the array', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    runs-on: ["self-hosted", "\${{ github.event_name == 'merge_group' && 'kindash-ondemand' || 'kindash-runner' }}"]
+  ci:
+    needs: [build]
+`, 'build')).toEqual(['self-hosted', 'kindash-ondemand', 'kindash-runner']);
+  });
+
+  it('unrecognized expression → raw string preserved as the single candidate', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    runs-on: \${{ matrix.os }}
+  ci:
+    needs: [build]
+`, 'build')).toEqual(['${{ matrix.os }}']);
+  });
+
+  it('reusable-workflow job → null (inner runs-on unknowable)', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    name: build-checks
+    uses: ./.github/workflows/build.yml
+  ci:
+    needs: [build]
+`, 'build-checks /')).toBeNull();
+  });
+
+  it('reusable-workflow job with an outer runs-on with: input → fallback to the outer labels', () => {
+    expect(runsOnOf(`
+jobs:
+  build:
+    name: build-checks
+    uses: ./.github/workflows/build.yml
+    with:
+      runs-on: kindash-runner
+  ci:
+    needs: [build]
+`, 'build-checks /')).toEqual(['kindash-runner']);
+  });
+
+  it('job without runs-on → null; degraded rollup-only graph → null', () => {
+    expect(runsOnOf('jobs:\n  build: {}\n  ci:\n    needs: [build]\n', 'build')).toBeNull();
+    expect(deriveCiGraph('jobs:\n  other: {}\n')!.nodes.get('ci')!.runsOn).toBeNull();
+  });
+
+  it('two job keys sharing a display name union their runs-on candidates', () => {
+    expect(runsOnOf(`
+jobs:
+  build-pr:
+    name: build
+    runs-on: kindash-runner
+  build-mg:
+    name: build
+    runs-on: kindash-ondemand
+  ci:
+    needs: [build-pr, build-mg]
+`, 'build')).toEqual(['kindash-runner', 'kindash-ondemand']);
   });
 });

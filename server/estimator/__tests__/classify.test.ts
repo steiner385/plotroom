@@ -7,7 +7,7 @@ const NOW = new Date('2026-06-10T12:00:00Z');
 const run = (over: Partial<CheckRun>): CheckRun => ({
   name: 'ci', rawName: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS',
   startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:05:00Z',
-  event: 'pull_request', workflowName: null, runNumber: null, isRequired: true, url: null, ...over,
+  event: 'pull_request', workflowName: null, runNumber: null, runAttempt: null, isRequired: true, url: null, ...over,
 });
 const pr = (over: Partial<PrSnapshot>): PrSnapshot => ({
   repo: 'acme/widgets', number: 1, title: 't', url: 'u', headSha: 'h',

@@ -7,7 +7,7 @@ const NOW = new Date('2026-06-10T10:10:00Z');
 const run = (over: Partial<CheckRun>): CheckRun => ({
   name: 'x', rawName: 'x', status: 'COMPLETED', conclusion: 'SUCCESS',
   startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:05:00Z',
-  event: 'pull_request', workflowName: null, runNumber: null, isRequired: true, url: null, ...over,
+  event: 'pull_request', workflowName: null, runNumber: null, runAttempt: null, isRequired: true, url: null, ...over,
 });
 // p10 defaults to p50 — progress math only reads p50/p90, so fixtures stay terse
 const lookupOf = (m: Record<string, Omit<Expected, 'p10'> & { p10?: number }>) =>

@@ -7,7 +7,7 @@ const NOW = new Date('2026-06-10T12:00:00Z');
 const run = (over: Partial<CheckRun>): CheckRun => ({
   name: 'x', rawName: 'x', status: 'COMPLETED', conclusion: 'SUCCESS',
   startedAt: '2026-06-10T11:50:00Z', completedAt: '2026-06-10T11:55:00Z',
-  event: 'pull_request', workflowName: null, runNumber: null, isRequired: true, url: null, ...over,
+  event: 'pull_request', workflowName: null, runNumber: null, runAttempt: null, isRequired: true, url: null, ...over,
 });
 
 const queued = (over: Partial<CheckRun>): CheckRun =>

@@ -5,7 +5,7 @@ import type { CheckRun } from '../types';
 const run = (over: Partial<CheckRun>): CheckRun => ({
   name: 'x', rawName: 'x', status: 'COMPLETED', conclusion: 'SUCCESS',
   startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:05:00Z',
-  event: 'pull_request', workflowName: null, runNumber: null, isRequired: true, url: null, ...over,
+  event: 'pull_request', workflowName: null, runNumber: null, runAttempt: null, isRequired: true, url: null, ...over,
 });
 
 describe('canonicalizeCheckName', () => {

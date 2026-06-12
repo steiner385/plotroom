@@ -53,10 +53,14 @@ export function ingestCheckSet(history: HistoryStore, repo: string, checks: Chec
   needsFor: (canonicalName: string) => string[] | null,
   activeFor: NeedActivePredicate = () => true,
   graphKeys: readonly string[] | null = null,
-  rollupWorkflowName: string | null = null): void {
+  rollupWorkflowName: string | null = null,
+  headSha: string | null = null): void {
   for (const c of checks) {
     if (c.status === 'COMPLETED') {
-      history.recordCheckDuration(repo, c.name, c.event, c.startedAt, c.completedAt, c.conclusion ?? 'UNKNOWN');
+      // headSha: the commit this check set was fetched for (PR head / group head /
+      // default-branch commit); runAttempt rides on each check (issue #34)
+      history.recordCheckDuration(repo, c.name, c.event, c.startedAt, c.completedAt,
+        c.conclusion ?? 'UNKNOWN', headSha, c.runAttempt);
     }
   }
   for (const s of extractRunnerWaits(checks, needsFor, activeFor, graphKeys, rollupWorkflowName)) {
@@ -591,7 +595,7 @@ export class Poller extends EventEmitter {
         }
         ingestCheckSet(history, repo, snap.checks, (n) => this.needsFor(repo, n),
           (p, e) => this.needActiveFor(repo, p, e), this.graphKeysFor(repo),
-          this.rollupWorkflowFor(repo));
+          this.rollupWorkflowFor(repo), snap.headSha || null);
       }
     }
   }
@@ -639,7 +643,7 @@ export class Poller extends EventEmitter {
             this.groupChecks.set(commit.oid, checks);
             ingestCheckSet(this.deps.history, repo, checks, (n) => this.needsFor(repo, n),
               (p, e) => this.needActiveFor(repo, p, e), this.graphKeysFor(repo),
-              this.rollupWorkflowFor(repo));
+              this.rollupWorkflowFor(repo), commit.oid as string);
             this.maybeRecordGroupRun(repo, commit.oid, checks);
           }
         }
@@ -960,6 +964,19 @@ export class Poller extends EventEmitter {
   graphKeysFor(repo: string): string[] | null {
     const graph = this.derivedGraph.get(repo);
     return graph ? [...graph.keys()] : null;
+  }
+
+  /** Runner-pool label candidates for a canonical check name (issue #34): the
+   *  `runs-on` strings of the derived-graph node the name matches (raw labels;
+   *  for `${{ … }}` ternaries both branches are listed as candidates). Null
+   *  when the repo has no derived graph, the name matches no node, or the
+   *  node's pool is unknowable (reusable workflow without an outer label
+   *  input). Persisted/restored with the `ciGraph:<repo>` meta bundle. */
+  poolsFor(repo: string, canonicalCheckName: string): string[] | null {
+    const graph = this.derivedGraph.get(repo);
+    if (!graph) return null;
+    const node = matchingPrefix(canonicalCheckName, graph.keys());
+    return node !== null ? graph.get(node)!.runsOn : null;
   }
 
   /**

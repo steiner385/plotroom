@@ -5,6 +5,8 @@ interface JobDef {
   uses?: unknown;
   needs?: unknown;
   if?: unknown;
+  'runs-on'?: unknown;
+  with?: unknown;
 }
 
 /**
@@ -27,6 +29,11 @@ export interface CiGraphNode {
   needs: string[];
   /** Which workflow events the job can run for. */
   activity: EventActivity;
+  /** Runner-pool label candidates from the job's `runs-on` (issue #34): raw
+   *  strings for plain/array forms; for `${{ … && 'a' || 'b' }}` ternaries both
+   *  branches are listed. Null when unknowable (no `runs-on`; reusable-workflow
+   *  job without an outer label input) or on rows persisted before #34. */
+  runsOn: string[] | null;
 }
 
 export interface CiGraph {
@@ -76,9 +83,12 @@ export function ciGraphFromJson(raw: unknown): CiGraph | null {
   if (!g.nodes || typeof g.nodes !== 'object' || Array.isArray(g.nodes)) return null;
   const nodes = new Map<string, CiGraphNode>();
   for (const [prefix, node] of Object.entries(g.nodes)) {
-    const n = node as { needs?: unknown; activity?: unknown } | null;
+    const n = node as { needs?: unknown; activity?: unknown; runsOn?: unknown } | null;
     if (!n || typeof n !== 'object' || !isStringArray(n.needs) || !isActivity(n.activity)) return null;
-    nodes.set(prefix, { needs: n.needs, activity: n.activity });
+    // runsOn is tolerant by design: rows persisted before issue #34 lack it,
+    // and a corrupt value must not reject an otherwise-valid graph → null.
+    const runsOn = isStringArray(n.runsOn) ? n.runsOn : null;
+    nodes.set(prefix, { needs: n.needs, activity: n.activity, runsOn });
   }
   return { prefixes: g.prefixes, nodes, workflowName: g.workflowName ?? null };
 }
@@ -118,6 +128,66 @@ function extractActivity(ifExpr: unknown): EventActivity {
   if (pos.size > 0) return { mode: 'only', events: [...pos] };
   if (neg.size > 0) return { mode: 'except', events: [...neg] };
   return ALL;
+}
+
+/** Quoted branch values of a GitHub expression: in
+ *  `x == 'merge_group' && 'pool-a' || 'pool-b'` only the strings FOLLOWING
+ *  `&&`/`||` are result branches — condition literals (after `==`/`!=`) are not. */
+const EXPR_BRANCH = /(?:&&|\|\|)\s*'([^']+)'/g;
+
+/** Label candidates for one runs-on string: plain strings pass through raw;
+ *  `${{ … }}` ternaries yield both branches; an expression with no extractable
+ *  branches (e.g. `${{ matrix.os }}`) keeps the raw string so nothing is lost. */
+function labelCandidates(raw: string): string[] {
+  if (!raw.includes('${{')) return [raw];
+  const out: string[] = [];
+  for (const m of raw.matchAll(EXPR_BRANCH)) {
+    if (!out.includes(m[1]!)) out.push(m[1]!);
+  }
+  return out.length ? out : [raw];
+}
+
+/** Candidates from a runs-on VALUE (string, array, or {group, labels} form). */
+function runsOnCandidates(v: unknown): string[] | null {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    for (const c of labelCandidates(raw)) if (!out.includes(c)) out.push(c);
+  };
+  if (typeof v === 'string' && v) push(v);
+  else if (Array.isArray(v)) {
+    for (const e of v) if (typeof e === 'string' && e) push(e);
+  } else if (v && typeof v === 'object') {
+    const o = v as { group?: unknown; labels?: unknown };
+    if (typeof o.group === 'string' && o.group) push(o.group);
+    if (typeof o.labels === 'string' && o.labels) push(o.labels);
+    if (Array.isArray(o.labels)) for (const e of o.labels) if (typeof e === 'string' && e) push(e);
+  }
+  return out.length ? out : null;
+}
+
+/** A job's runner-pool label candidates (issue #34). Reusable-workflow calls
+ *  (`uses:`) carry no `runs-on` — the pool lives in the inner workflow and is
+ *  unknowable from this parse → null, EXCEPT when the caller threads it via a
+ *  conventional `with:` input (runs-on / runs_on / runner): outer-label fallback. */
+function extractRunsOn(job: JobDef): string[] | null {
+  if (typeof job.uses === 'string' && job.uses) {
+    const w = job.with;
+    if (w && typeof w === 'object' && !Array.isArray(w)) {
+      for (const key of ['runs-on', 'runs_on', 'runner']) {
+        const labels = runsOnCandidates((w as Record<string, unknown>)[key]);
+        if (labels) return labels;
+      }
+    }
+    return null;
+  }
+  return runsOnCandidates(job['runs-on']);
+}
+
+/** Union of two runsOn candidate lists (null = unknowable yields the other). */
+function mergeRunsOn(a: string[] | null, b: string[] | null): string[] | null {
+  if (!a) return b;
+  if (!b) return a;
+  return [...new Set([...a, ...b])];
 }
 
 /** Union of two activities (two job keys sharing a display name → one node). */
@@ -166,7 +236,7 @@ export function deriveCiGraph(ciYamlText: string, rollupJobId = 'ci'): CiGraph |
   const workflowName = typeof rawName === 'string' && rawName ? rawName : null;
   const jobs = (doc as { jobs?: unknown } | null)?.jobs;
   const rollupOnly = (): CiGraph =>
-    ({ prefixes: [rollupJobId], nodes: new Map([[rollupJobId, { needs: [], activity: ALL }]]), workflowName });
+    ({ prefixes: [rollupJobId], nodes: new Map([[rollupJobId, { needs: [], activity: ALL, runsOn: null }]]), workflowName });
   if (!jobs || typeof jobs !== 'object') return rollupOnly();
   const jobMap = jobs as Record<string, JobDef | null>;
   if (!(rollupJobId in jobMap)) return rollupOnly();
@@ -198,9 +268,11 @@ export function deriveCiGraph(ciYamlText: string, rollupJobId = 'ci'): CiGraph |
       if (!neededPrefixes.includes(np)) neededPrefixes.push(np);
     }
     const activity = extractActivity(job.if);
+    const runsOn = extractRunsOn(job);
     nodes.set(prefix, {
       needs: neededPrefixes,
       activity: existing ? mergeActivity(existing.activity, activity) : activity,
+      runsOn: existing ? mergeRunsOn(existing.runsOn, runsOn) : runsOn,
     });
     for (const k of neededKeys) {
       if (visited.has(k)) continue;

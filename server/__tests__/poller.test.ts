@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Poller, RetryThrottle, describeError, type DashboardState } from '../poller';
+import { Poller, RetryThrottle, describeError, ingestCheckSet, type DashboardState } from '../poller';
 import { HistoryStore } from '../history';
+import { deriveCiGraph } from '../required-checks';
+import type { CheckRun } from '../types';
 import { RateLimitError, type GithubClient } from '../github';
 import { ClientRouter } from '../client-router';
 import { DEFAULTS, type AppConfig } from '../config';
@@ -1233,7 +1235,7 @@ describe('Poller derived required-check prefixes', () => {
 
 /** Build an all-events derived-graph node map from a plain needs adjacency. */
 const nodeMap = (m: Map<string, string[]>) =>
-  new Map([...m].map(([k, needs]) => [k, { needs, activity: { mode: 'all' as const } }]));
+  new Map([...m].map(([k, needs]) => [k, { needs, activity: { mode: 'all' as const }, runsOn: null }]));
 
 describe('Poller derived needs graph (W1)', () => {
   const WIDGETS_NEEDS = new Map<string, string[]>([
@@ -1291,8 +1293,8 @@ describe('Poller derived needs graph (W1)', () => {
     // unknown repo/graph → true (never prune on missing knowledge)
     expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'pull_request')).toBe(true);
     p.setDerivedGraph('acme/widgets', new Map([
-      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] } }],
-      ['build', { needs: [], activity: { mode: 'all' } }],
+      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] }, runsOn: null }],
+      ['build', { needs: [], activity: { mode: 'all' }, runsOn: null }],
     ]));
     expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'merge_group')).toBe(true);
     expect(p.needActiveFor('acme/widgets', 'android-smoke /', 'pull_request')).toBe(false);
@@ -1436,10 +1438,10 @@ describe('Poller runner waits (W2)', () => {
       { ...CHECK_DONE, name: 'ci', status: 'QUEUED', conclusion: null, startedAt: null, completedAt: null },
     ]))), history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
     p.setDerivedGraph('acme/widgets', new Map([
-      ['ci', { needs: ['fast-checks /', 'android-smoke /'], activity: { mode: 'all' } }],
-      ['fast-checks /', { needs: [PREPARE], activity: { mode: 'all' } }],
-      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] } }],
-      [PREPARE, { needs: [], activity: { mode: 'all' } }],
+      ['ci', { needs: ['fast-checks /', 'android-smoke /'], activity: { mode: 'all' }, runsOn: null }],
+      ['fast-checks /', { needs: [PREPARE], activity: { mode: 'all' }, runsOn: null }],
+      ['android-smoke /', { needs: [], activity: { mode: 'only', events: ['merge_group'] }, runsOn: null }],
+      [PREPARE, { needs: [], activity: { mode: 'all' }, runsOn: null }],
     ]));
     await p.sweepOnce();
     await p.detailOnce();
@@ -3872,5 +3874,78 @@ describe('repo discovery + toggle list', () => {
     expect(p.currentExclude()).toEqual(CONFIG.exclude);
     p.reconfigure({ ...CONFIG, exclude: ['acme/late'] });
     expect(p.currentExclude()).toEqual(['acme/late']);
+  });
+});
+
+describe('telemetry plumbing (issue #34)', () => {
+  const COMPLETED_CHECK: CheckRun = {
+    name: 'Build', rawName: 'Build', status: 'COMPLETED', conclusion: 'SUCCESS',
+    startedAt: '2026-06-10T11:50:00Z', completedAt: '2026-06-10T11:53:00Z',
+    event: 'pull_request', workflowName: 'CI', runNumber: 12, runAttempt: 2,
+    isRequired: true, url: null,
+  };
+
+  it('ingestCheckSet threads head_sha and the check run_attempt into recordCheckDuration', () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    ingestCheckSet(history, 'acme/widgets', [COMPLETED_CHECK], () => null,
+      undefined, null, null, 'headsha123');
+    expect(spy).toHaveBeenCalledWith('acme/widgets', 'Build', 'pull_request',
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'headsha123', 2);
+    spy.mockRestore();
+  });
+
+  it('ingestCheckSet without a head sha records NULL sha (backward-compatible default)', () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    ingestCheckSet(history, 'acme/widgets', [{ ...COMPLETED_CHECK, runAttempt: null }], () => null);
+    expect(spy).toHaveBeenCalledWith('acme/widgets', 'Build', 'pull_request',
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', null, null);
+    spy.mockRestore();
+  });
+
+  it('detail-cycle ingestion threads the PR head sha (headRefOid) per snapshot', async () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    // CHECK_DONE is the completed check in DETAIL_RESPONSE; PR head = 'head8962';
+    // its workflowRun fake carries no runAttempt → null
+    expect(spy).toHaveBeenCalledWith('acme/widgets', 'fast-checks / ESLint', 'pull_request',
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'head8962', null);
+    spy.mockRestore();
+  });
+
+  const POOLS_YAML = `
+jobs:
+  build:
+    runs-on: \${{ github.event_name == 'merge_group' && 'kindash-ondemand-2' || 'kindash-runner' }}
+  static:
+    name: static-checks
+    uses: ./.github/workflows/static.yml
+  ci:
+    needs: [build, static]
+    runs-on: ubuntu-latest
+`;
+
+  it('poolsFor maps canonical check names to runs-on candidates via the derived graph', () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p.poolsFor('acme/widgets', 'build')).toBeNull(); // no graph yet
+    p.adoptDerivedGraph('acme/widgets', deriveCiGraph(POOLS_YAML)!);
+    expect(p.poolsFor('acme/widgets', 'build')).toEqual(['kindash-ondemand-2', 'kindash-runner']);
+    expect(p.poolsFor('acme/widgets', 'ci')).toEqual(['ubuntu-latest']);
+    // reusable workflow without an outer label input → unknowable
+    expect(p.poolsFor('acme/widgets', 'static-checks / TypeScript')).toBeNull();
+    expect(p.poolsFor('acme/widgets', 'no-such-check')).toBeNull();
+    expect(p.poolsFor('octo/unknown', 'ci')).toBeNull();
+  });
+
+  it('poolsFor survives a restart via the persisted ciGraph meta bundle', () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    p.adoptDerivedGraph('acme/widgets', deriveCiGraph(POOLS_YAML)!);
+    const p2 = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    expect(p2.poolsFor('acme/widgets', 'build')).toEqual(['kindash-ondemand-2', 'kindash-runner']);
   });
 });
