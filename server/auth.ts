@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createPrivateKey, sign, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { deriveRestBase } from './github';
 import type { AppAuthConfig } from './config';
 
 function fetchGhToken(): Promise<string> {
@@ -64,15 +65,9 @@ export class EnvTokenSource implements TokenProvider {
 
 // ---- tokenSource 'app': GitHub App installation tokens -----------------------
 
-/**
- * Derive the REST base URL from the configured GraphQL endpoint — App-auth
- * endpoints are REST-only. 'https://api.github.com/graphql' → 'https://api.github.com';
- * GitHub Enterprise 'https://ghe.example.com/api/graphql' → '…/api/v3'.
- */
-export function deriveRestBase(apiUrl: string): string {
-  const base = apiUrl.replace(/\/graphql\/?$/, '');
-  return base.endsWith('/api') ? `${base}/v3` : base;
-}
+// REST base derivation lives in github.ts (shared with GithubClient.restGet);
+// re-exported here for back-compat with existing imports.
+export { deriveRestBase };
 
 /** Refresh the installation token when less than this remains before expiry. */
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;

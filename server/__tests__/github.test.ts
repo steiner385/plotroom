@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { GithubClient, RateLimitError } from '../github';
+import { GithubClient, RateLimitError, HttpError, deriveRestBase } from '../github';
 
 const tokens = (t = 'tok') => ({ get: vi.fn(async () => t), refresh: vi.fn(async () => 'tok2') });
 const jsonRes = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -148,5 +148,76 @@ describe('GithubClient', () => {
     const fetchFn = vi.fn(async () => jsonRes({}, 500));
     const c = new GithubClient(tokens(), fetchFn as unknown as typeof fetch);
     await expect(c.graphql('q')).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe('GithubClient.restGet', () => {
+  it('GETs {restBase}{path} with bearer token, REST accept header, and user-agent', async () => {
+    const fetchFn = vi.fn(async () => jsonRes({ status: 'ahead' }));
+    const c = new GithubClient(tokens(), fetchFn as unknown as typeof fetch);
+    const body = await c.restGet<{ status: string }>('/repos/a/b/compare/x...y?per_page=1');
+    expect(body.status).toBe('ahead');
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
+    expect(url).toBe('https://api.github.com/repos/a/b/compare/x...y?per_page=1');
+    expect(init.headers.authorization).toBe('Bearer tok');
+    expect(init.headers.accept).toBe('application/vnd.github+json');
+    expect(init.headers['user-agent']).toBe('pr-dashboard');
+  });
+
+  it('derives the REST base from a GitHub Enterprise apiUrl', async () => {
+    const fetchFn = vi.fn(async () => jsonRes({ ok: 1 }));
+    const c = new GithubClient(tokens(), fetchFn as unknown as typeof fetch,
+      { apiUrl: 'https://ghe.example.com/api/graphql' });
+    await c.restGet('/repos/a/b/compare/x...y');
+    expect((fetchFn.mock.calls[0] as unknown as [string])[0])
+      .toBe('https://ghe.example.com/api/v3/repos/a/b/compare/x...y');
+  });
+
+  it('on 401 refreshes the token and retries exactly once', async () => {
+    const t = tokens();
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(jsonRes({}, 401))
+      .mockResolvedValueOnce(jsonRes({ ok: 1 }));
+    const c = new GithubClient(t, fetchFn as unknown as typeof fetch);
+    expect(await c.restGet('/x')).toEqual({ ok: 1 });
+    expect(t.refresh).toHaveBeenCalledTimes(1);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws HttpError carrying the status for 404 and 500', async () => {
+    for (const status of [404, 500]) {
+      const fetchFn = vi.fn(async () => jsonRes({}, status));
+      const c = new GithubClient(tokens(), fetchFn as unknown as typeof fetch);
+      const err = await c.restGet('/x').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HttpError);
+      expect((err as HttpError).status).toBe(status);
+    }
+  });
+
+  it('maps 429 and rate-limit-shaped 403 to RateLimitError; plain 403 stays HttpError', async () => {
+    const c429 = new GithubClient(tokens(),
+      (async () => jsonRes({}, 429, { 'retry-after': '17' })) as unknown as typeof fetch);
+    await c429.restGet('/x').catch((e: RateLimitError) => expect(e.retryAfterSeconds).toBe(17));
+    await expect(new GithubClient(tokens(),
+      (async () => jsonRes({}, 403, { 'x-ratelimit-remaining': '0' })) as unknown as typeof fetch)
+      .restGet('/x')).rejects.toThrow(RateLimitError);
+    const plain = await new GithubClient(tokens(),
+      (async () => jsonRes({}, 403)) as unknown as typeof fetch)
+      .restGet('/x').catch((e: unknown) => e);
+    expect(plain).toBeInstanceOf(HttpError);
+    expect((plain as HttpError).status).toBe(403);
+  });
+
+  it('wraps invalid JSON in a clear error', async () => {
+    const fetchFn = vi.fn(async () => textRes('<html>bad</html>', 200));
+    const c = new GithubClient(tokens(), fetchFn as unknown as typeof fetch);
+    await expect(c.restGet('/x')).rejects.toThrow(/invalid JSON response/);
+  });
+});
+
+describe('deriveRestBase (canonical home: github.ts)', () => {
+  it('github.com and GHE endpoints derive correctly', () => {
+    expect(deriveRestBase('https://api.github.com/graphql')).toBe('https://api.github.com');
+    expect(deriveRestBase('https://ghe.example.com/api/graphql')).toBe('https://ghe.example.com/api/v3');
   });
 });
