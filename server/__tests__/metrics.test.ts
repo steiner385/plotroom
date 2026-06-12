@@ -763,3 +763,39 @@ describe('computeMetrics: workflow lint (issue #48 rule 1 — timeout calibratio
     expect(computeMetrics(h, '3d', 'hour', NOW).lint).toEqual([]);
   });
 });
+
+describe('computeMetrics: live foreign-name exclusion (issue #61 follow-up)', () => {
+  // `ci-gate` (Auto-merge PRs) startsWith-matches the `ci` node but mirrors the
+  // whole CI lifecycle — hours-long SUCCESS spans BY DESIGN. History rows carry
+  // no workflow identity, so the static×runtime joins take a live foreign-name
+  // set (same pattern as the classify-layer expectedSet exclusion).
+  const graphs = () => new Map([[REPO, new Map([
+    ['build', gnode([])],
+    ['ci', gnode(['build'], { timeoutMinutes: 15 })],
+  ])]]);
+  const seed = () => {
+    seedDurations('build', 'pull_request', 100);
+    seedDurations('ci', 'pull_request', 10);
+    seedDurations('ci-gate', 'pull_request', 10_000);
+  };
+
+  it('excludes foreign names from the lint and critical-path joins', () => {
+    seed();
+    const foreign = new Map([[REPO, new Set(['ci-gate'])]]);
+    const m = computeMetrics(h, '3d', 'hour', NOW, [], () => 1, graphs(), foreign);
+    // ci p99 = 10s (its OWN samples, not ci-gate's) → the truthful too-loose INFO
+    expect(m.lint[0]!.findings).toMatchObject([
+      { rule: 'timeout', severity: 'info', job: 'ci', observed: 10 }]);
+    const pr = m.criticalPath.find((c) => c.event === 'pull_request')!;
+    expect(pr.path.find((s) => s.name === 'ci')!.durationP50).toBe(10);
+  });
+
+  it('regression guard: without the exclusion the foreign name poisons both joins', () => {
+    seed();
+    const m = computeMetrics(h, '3d', 'hour', NOW, [], () => 1, graphs());
+    expect(m.lint[0]!.findings).toMatchObject([
+      { rule: 'timeout', severity: 'warn', job: 'ci', observed: 10_000 }]);
+    const pr = m.criticalPath.find((c) => c.event === 'pull_request')!;
+    expect(pr.path.find((s) => s.name === 'ci')!.durationP50).toBe(10_000);
+  });
+});

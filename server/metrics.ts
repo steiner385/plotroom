@@ -244,7 +244,8 @@ export const LINT_MIN_RUNS = 5;
 export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   bucket: MetricsBucket, now: Date = new Date(), exclude: string[] = [],
   batchSizeFor: (repo: string) => number = () => 1,
-  ciGraphs: Map<string, Map<string, CiGraphNode>> = new Map()): MetricsPayload {
+  ciGraphs: Map<string, Map<string, CiGraphNode>> = new Map(),
+  foreignNames: Map<string, Set<string>> = new Map()): MetricsPayload {
   const dropped = new Set(exclude);
   const keep = <T extends { repo: string }>(rows: T[]): T[] =>
     dropped.size ? rows.filter((r) => !dropped.has(r.repo)) : rows;
@@ -499,6 +500,7 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   for (const [repo, graph] of [...ciGraphs].sort(([a], [b]) => a.localeCompare(b))) {
     if (dropped.has(repo)) continue;
     const allKeys = [...graph.keys()];
+    const foreign = foreignNames.get(repo);
     // node → lint input; the worst (max) p99 across events wins per node
     const lintInputs = new Map<string, TimeoutLintInput>();
     for (const event of CRITICAL_PATH_EVENTS) {
@@ -510,6 +512,12 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       const eventWait = history.expectedRunnerWaitForEvent(repo, event);
       const namesByNode = new Map<string, string[]>();
       for (const name of names) {
+        // A name whose LIVE check provably belongs to a foreign workflow
+        // (`ci-gate` from `Auto-merge PRs`) must not prefix-join a node of
+        // the rollup workflow's DAG (issue #61 follow-up): its durations are
+        // wall-clock CI-lifecycle spans, not job runtime — they would poison
+        // both the lint p99 and the node's critical-path weight.
+        if (foreign?.has(name)) continue;
         const nodeKey = matchingPrefix(name, activeKeys);
         if (nodeKey != null) namesByNode.set(nodeKey, [...(namesByNode.get(nodeKey) ?? []), name]);
         // lint joins against EVERY node (event activity doesn't gate a timeout)

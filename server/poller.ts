@@ -92,9 +92,17 @@ export function ingestCheckSet(history: HistoryStore, repo: string, checks: Chec
       // contamination, not runtime. Drop the sample rather than poison the
       // p99 tail (timeout lint) and expected medians. Non-SUCCESS rows always
       // record: flake radar consumes their identity, never their duration.
+      // The derived graph describes the ROLLUP workflow's jobs, so the timeout
+      // lookup is workflow-scoped: a foreign check (`ci-gate` from `Auto-merge
+      // PRs` startsWith-matching the `ci` node) must not inherit `ci`'s
+      // timeout — its hours-long SUCCESS spans are by design (it mirrors the
+      // whole CI lifecycle across spot retries). Foreign checks fall back to
+      // the absolute cap.
       if ((c.conclusion ?? '') === 'SUCCESS' && c.startedAt && c.completedAt) {
         const secs = (Date.parse(c.completedAt) - Date.parse(c.startedAt)) / 1000;
-        if (secs > maxPlausibleSuccessSecs(timeoutMinutesFor(c.name))) continue;
+        const timeout = workflowScopeAllows(c.workflowName, rollupWorkflowName)
+          ? timeoutMinutesFor(c.name) : null;
+        if (secs > maxPlausibleSuccessSecs(timeout)) continue;
       }
       // headSha: the commit this check set was fetched for (PR head / group head /
       // default-branch commit); runAttempt rides on each check (issue #34)
@@ -1082,6 +1090,27 @@ export class Poller extends EventEmitter {
     if (!graph) return null;
     const node = matchingPrefix(canonicalCheckName, graph.keys());
     return node !== null ? graph.get(node)!.needs : null;
+  }
+
+  /** Per-repo canonical names of LIVE checks that provably belong to a foreign
+   *  workflow (≠ the rollup workflow the derived graph describes). History
+   *  rows carry no workflow identity, so the metrics static×runtime joins
+   *  (lint #48, critical path #42) take this live knowledge to keep e.g.
+   *  `ci-gate` (`Auto-merge PRs`) from startsWith-matching the `ci` node —
+   *  the same pattern as the classify-layer expectedSet exclusion. */
+  liveForeignNames(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const pr of this.prs.values()) {
+      const rollupWf = this.rollupWorkflowFor(pr.repo);
+      if (rollupWf == null) continue; // no scoping possible
+      for (const c of pr.checks) {
+        if (workflowScopeAllows(c.workflowName, rollupWf)) continue;
+        let set = out.get(pr.repo);
+        if (!set) out.set(pr.repo, set = new Set());
+        set.add(c.name);
+      }
+    }
+    return out;
   }
 
   /** Derived `timeout-minutes` for the graph node a check name maps to — feeds

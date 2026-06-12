@@ -177,7 +177,7 @@ async function main() {
     },
     metrics: (window, bucket) => computeMetrics(history, window, bucket, new Date(),
       poller.currentExclude(), (repo) => poller.settingsFor(repo).batchSize,
-      poller.allDerivedGraphs()),
+      poller.allDerivedGraphs(), poller.liveForeignNames()),
     repos: () => poller.repoToggleList(),
     webhooks: webhookSecret != null ? {
       path: config.webhooks.path,

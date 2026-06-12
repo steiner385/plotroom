@@ -4597,3 +4597,73 @@ jobs:
     spy.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Workflow scoping of the duration guard + live foreign names (issue #61
+// follow-up): the derived graph describes the ROLLUP workflow's jobs, so a
+// foreign check (`ci-gate` from `Auto-merge PRs`) must not inherit the `ci`
+// node's timeout — its hours-long SUCCESS spans are by design (it mirrors the
+// whole CI lifecycle across spot retries).
+// ---------------------------------------------------------------------------
+
+describe('guard workflow scoping + liveForeignNames (issue #61 follow-up)', () => {
+  const gate = (over: Partial<CheckRun> = {}): CheckRun => ({
+    name: 'ci-gate', rawName: 'ci-gate', status: 'COMPLETED', conclusion: 'SUCCESS',
+    startedAt: '2026-06-12T02:00:00Z', completedAt: '2026-06-12T04:00:00Z', // 2h by design
+    event: 'pull_request', workflowName: 'Auto-merge PRs', runNumber: 7, runAttempt: 1,
+    isRequired: false, url: null, ...over,
+  });
+
+  it('a foreign-workflow check never inherits the prefix-matched node timeout', () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    // rollup workflow 'CI'; timeoutFor would say 15m (the false `ci` match) —
+    // scoping must ignore it and fall back to the 4h absolute cap → recorded
+    ingestCheckSet(history, 'acme/widgets', [gate()], () => null,
+      undefined, null, 'CI', 'sha1', () => 15);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it('the same span from the rollup workflow itself is rejected by its timeout', () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    ingestCheckSet(history, 'acme/widgets', [gate({ workflowName: 'CI' })], () => null,
+      undefined, null, 'CI', 'sha1', () => 15);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('null check workflow stays permissive (old data: timeout applies)', () => {
+    const spy = vi.spyOn(history, 'recordCheckDuration');
+    ingestCheckSet(history, 'acme/widgets', [gate({ workflowName: null })], () => null,
+      undefined, null, 'CI', 'sha1', () => 15);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('liveForeignNames exposes per-repo foreign check names from live snapshots', async () => {
+    const detail = {
+      r0: { nameWithOwner: 'acme/widgets', pr8962: {
+        number: 8962, title: 't', url: 'u', isDraft: false, mergeStateStatus: 'BLOCKED',
+        mergedAt: null, headRefOid: 'head8962', autoMergeRequest: null, mergeCommit: null,
+        mergeQueueEntry: null,
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING',
+          contexts: { pageInfo: { hasNextPage: false }, nodes: [
+            CHECK_DONE,
+            { ...CHECK_DONE, name: 'ci-gate',
+              checkSuite: { workflowRun: { event: 'pull_request', runNumber: 7,
+                workflow: { name: 'Auto-merge PRs' } } } },
+          ] } } } }] },
+      } },
+    };
+    const p = new Poller({ router: asRouter(fakeClient(SWEEP_RESPONSE, detail)), history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    expect(p.liveForeignNames()).toEqual(new Map()); // nothing fetched yet
+    await p.sweepOnce();
+    await p.detailOnce();
+    p.setRollupWorkflowName('acme/widgets', 'CI');
+    expect(p.liveForeignNames()).toEqual(new Map([['acme/widgets', new Set(['ci-gate'])]]));
+    // unknown rollup workflow → no scoping possible → nothing reads as foreign
+    p.setRollupWorkflowName('acme/widgets', null as unknown as string);
+    expect(p.liveForeignNames()).toEqual(new Map());
+  });
+});
