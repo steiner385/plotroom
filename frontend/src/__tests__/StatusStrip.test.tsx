@@ -7,7 +7,7 @@ const pr = (stage: string, substate: string | null = null): PrView => ({
   repo: 'x', number: 1, title: 'pr', url: 'u',
   stage: { stage: stage as PrView['stage']['stage'], substate, percent: null,
     etaSeconds: null, etaRangeSeconds: null, overdue: false },
-  queueAheadCount: null, checks: [], groupChecks: null,
+  queueAheadCount: null, checks: [], groupChecks: null, mergeEtaSim: null,
 });
 
 describe('bucketPr', () => {

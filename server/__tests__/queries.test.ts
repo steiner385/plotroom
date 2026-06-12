@@ -113,7 +113,8 @@ describe('queue + rollup + backfill builders', () => {
     expect(q).toContain('o0: object(oid: "abc")');
     expect(q).toContain('o1: object(oid: "def")');
     expect(q).toContain('... on Commit');
-    expect(q).toContain('checkSuite { workflowRun { event runNumber runAttempt workflow { name } } }');
+    // createdAt feeds the dispatch-stall classifier (issue #39)
+    expect(q).toContain('checkSuite { workflowRun { event runNumber runAttempt createdAt workflow { name } } }');
   });
   it('buildBackfillQuery pages default-branch history rollups', () => {
     const q = buildBackfillQuery('acme', 'widgets', null);

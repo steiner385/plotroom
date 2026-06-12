@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { queueStage } from '../queue';
+import { queueStage, simulateMergeEta, ejectProbability, EJECT_BUMP_MIN_PROB } from '../queue';
 import type { QueueEntry } from '../../types';
 
 const e = (position: number, prNumber: number, state: string, headCommitOid: string | null = null): QueueEntry =>
@@ -196,5 +196,81 @@ describe('queueStage — covered members + UNMERGEABLE entries', () => {
       coveringGroupOid: 'g1',
     });
     expect(r.percent).toBe(30); // g2's, not g1's
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #40: multi-train merge ETA simulation
+// ---------------------------------------------------------------------------
+
+describe('ejectProbability', () => {
+  it('returns ejects/(runs+ejects) at/above the min-sample floor', () => {
+    expect(ejectProbability(8, 2)).toBeCloseTo(0.2);
+    expect(ejectProbability(4, 1)).toBeCloseTo(0.2); // exactly 5 samples counts
+  });
+
+  it('returns 0 below EJECT_PROB_MIN_SAMPLES total samples', () => {
+    expect(ejectProbability(3, 1)).toBe(0);
+    expect(ejectProbability(0, 0)).toBe(0);
+  });
+});
+
+describe('simulateMergeEta', () => {
+  // 20 samples, p50 = 600, p90 = 900 (percentile() over sorted: ceil(.5*20)-1 = idx 9,
+  // ceil(.9*20)-1 = idx 17)
+  const samples = [
+    300, 350, 400, 450, 500, 520, 540, 560, 580, 600,
+    620, 640, 660, 680, 700, 750, 800, 900, 1000, 1200,
+  ];
+
+  it('one train (front of the waiting line, nothing building): p50 = dur50, p90 = dur90', () => {
+    const sim = simulateMergeEta({ queuedAhead: 0, batchSize: 6,
+      durationSamples: samples, ejectProb: 0, currentTrainEtaSecs: null })!;
+    expect(sim).toEqual({ p50Secs: 600, p90Secs: 900, trainsAhead: 0, assumesEjects: false });
+  });
+
+  it('adds the currently-building train ETA and counts it in trainsAhead', () => {
+    const sim = simulateMergeEta({ queuedAhead: 0, batchSize: 6,
+      durationSamples: samples, ejectProb: 0, currentTrainEtaSecs: 120 })!;
+    expect(sim).toEqual({ p50Secs: 720, p90Secs: 1020, trainsAhead: 1, assumesEjects: false });
+  });
+
+  it('batches the waiting line: 7 queued ahead at batchSize 6 → 2 future trains', () => {
+    const sim = simulateMergeEta({ queuedAhead: 7, batchSize: 6,
+      durationSamples: samples, ejectProb: 0, currentTrainEtaSecs: 60 })!;
+    // trains = ceil(8/6) = 2 → p50 = 60 + 2×600; p90 = 60 + 2×900
+    expect(sim.p50Secs).toBe(1260);
+    expect(sim.p90Secs).toBe(1860);
+    expect(sim.trainsAhead).toBe(2); // 1 future batch ahead of mine + the building train
+    expect(sim.assumesEjects).toBe(false);
+  });
+
+  it('eject bump: ejectProb > 15% adds ONE extra train at p90 only', () => {
+    const sim = simulateMergeEta({ queuedAhead: 0, batchSize: 6,
+      durationSamples: samples, ejectProb: 0.2, currentTrainEtaSecs: null })!;
+    expect(sim.p50Secs).toBe(600);       // p50 unchanged
+    expect(sim.p90Secs).toBe(1800);      // (1 + 1) × 900
+    expect(sim.assumesEjects).toBe(true);
+  });
+
+  it('no eject bump exactly AT the 15% threshold', () => {
+    const sim = simulateMergeEta({ queuedAhead: 0, batchSize: 6,
+      durationSamples: samples, ejectProb: EJECT_BUMP_MIN_PROB, currentTrainEtaSecs: null })!;
+    expect(sim.assumesEjects).toBe(false);
+    expect(sim.p90Secs).toBe(900);
+  });
+
+  it('returns null without duration samples (caller falls back to single number)', () => {
+    expect(simulateMergeEta({ queuedAhead: 2, batchSize: 6,
+      durationSamples: [], ejectProb: 0.5, currentTrainEtaSecs: 100 })).toBeNull();
+    // non-finite/non-positive samples are discarded, not counted
+    expect(simulateMergeEta({ queuedAhead: 2, batchSize: 6,
+      durationSamples: [NaN, -5, 0], ejectProb: 0, currentTrainEtaSecs: null })).toBeNull();
+  });
+
+  it('tolerates batchSize 0 and negative queuedAhead (defensive clamps)', () => {
+    const sim = simulateMergeEta({ queuedAhead: -3, batchSize: 0,
+      durationSamples: [600], ejectProb: 0, currentTrainEtaSecs: null })!;
+    expect(sim).toEqual({ p50Secs: 600, p90Secs: 600, trainsAhead: 0, assumesEjects: false });
   });
 });

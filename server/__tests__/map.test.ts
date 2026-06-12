@@ -123,3 +123,32 @@ describe('mapPrNode createdAt (Round 12 metrics)', () => {
     expect(mapPrNode('acme/widgets', BASE)!.createdAt).toBeNull();
   });
 });
+
+describe('mapRollupContexts runCreatedAt (issue #39 — dispatch-stall telemetry)', () => {
+  it('maps workflowRun.createdAt when present, null otherwise', () => {
+    const node = (workflowRun: Record<string, unknown> | null) => ({
+      __typename: 'CheckRun', name: 'ci', status: 'QUEUED', conclusion: null,
+      startedAt: null, completedAt: null, detailsUrl: 'u',
+      checkSuite: workflowRun ? { workflowRun } : null,
+    });
+    const [withCreated] = mapRollupContexts([
+      node({ event: 'merge_group', createdAt: '2026-06-10T11:50:00Z' })]);
+    expect(withCreated!.runCreatedAt).toBe('2026-06-10T11:50:00Z');
+    const [without] = mapRollupContexts([node({ event: 'merge_group' })]);
+    expect(without!.runCreatedAt).toBeNull();
+    const [noRun] = mapRollupContexts([node(null)]);
+    expect(noRun!.runCreatedAt).toBeNull();
+  });
+
+  it('a matrix family keeps the EARLIEST runCreatedAt (the run, not a late shard)', () => {
+    const shard = (i: number, createdAt: string) => ({
+      __typename: 'CheckRun', name: `Unit Tests (${i}/2)`, status: 'QUEUED', conclusion: null,
+      startedAt: null, completedAt: null, detailsUrl: 'u',
+      checkSuite: { workflowRun: { event: 'merge_group', createdAt } },
+    });
+    const out = mapRollupContexts([
+      shard(1, '2026-06-10T11:50:00Z'), shard(2, '2026-06-10T11:58:00Z')]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.runCreatedAt).toBe('2026-06-10T11:50:00Z');
+  });
+});

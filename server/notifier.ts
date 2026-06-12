@@ -20,6 +20,7 @@ import type { StageResult } from './types';
 
 export const NOTIFICATION_EVENT_TYPES = [
   'ci-failed', 'group-failed', 'queue-blocked', 'ready', 'overdue', 'prod-live',
+  'queue-stalled',
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -40,10 +41,11 @@ export const DEFAULT_NOTIFICATIONS: NotificationsConfig = {
   enabled: false,
   command: ['notify-send', '{title}', '{body}'],
   events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-    ready: false, overdue: false, 'prod-live': true },
+    ready: false, overdue: false, 'prod-live': true, 'queue-stalled': true },
 };
 
-/** One notification event — the SSE `notification` payload. */
+/** One notification event — the SSE `notification` payload.
+ *  Repo-level events ('queue-stalled') carry prNumber 0 and title = repo. */
 export interface NotificationEvent {
   repo: string;
   prNumber: number;
@@ -74,17 +76,20 @@ const LABELS: Record<NotificationEventType, string> = {
   ready: 'ready to merge',
   overdue: 'overdue',
   'prod-live': 'live on prod',
+  'queue-stalled': 'merge queue STALLED',
 };
 
 /** Render an event to the {title}/{body} strings both sinks display. */
 export function renderNotification(ev: NotificationEvent): { title: string; body: string } {
+  // repo-level events (queue-stalled) have no PR — "repo#0" must never render
+  const subject = ev.type === 'queue-stalled' ? ev.repo : `${ev.repo}#${ev.prNumber}`;
   return {
-    title: `${ev.repo}#${ev.prNumber} ${LABELS[ev.type]}`,
+    title: `${subject} ${LABELS[ev.type]}`,
     body: ev.detail ? `${ev.title} — ${ev.detail}` : ev.title,
   };
 }
 
-type StageEventType = Exclude<NotificationEventType, 'prod-live'>;
+type StageEventType = Exclude<NotificationEventType, 'prod-live' | 'queue-stalled'>;
 
 interface Condition {
   /** Whether the condition holds for a classify result (drives debounce clearing). */
@@ -165,6 +170,23 @@ export class Notifier extends EventEmitter {
     }
   }
 
+  /**
+   * Repo-level queue-health feed (issue #39): fires 'queue-stalled' once per
+   * dispatch-stall ENTRY — the debounce key clears as soon as the health
+   * classifier reports any other state, so a re-entered stall re-fires.
+   * Cap-backlog/healthy never notify (backlog self-heals; a banner suffices).
+   */
+  queueHealth(repo: string, state: string, detail: string): void {
+    const key = `${repo}|queue-stalled`;
+    if (state !== 'dispatch-stall') {
+      this.active.delete(key);
+      return;
+    }
+    if (this.active.has(key)) return; // already fired for this stall
+    this.active.add(key);
+    this.fire({ repo, prNumber: 0, title: repo, type: 'queue-stalled', detail });
+  }
+
   /** The "shipped" signal: a merged PR's commit just became prod ancestry. */
   prodLive(repo: string, prNumber: number, title: string): void {
     const key = `${repo}#${prNumber}|prod-live`;
@@ -173,9 +195,12 @@ export class Notifier extends EventEmitter {
     this.fire({ repo, prNumber, title, type: 'prod-live', detail: 'deployed to production' });
   }
 
-  /** Drop debounce state for PRs no longer tracked (keys are `repo#number`). */
+  /** Drop debounce state for PRs no longer tracked (keys are `repo#number`).
+   *  Repo-level keys (`repo|queue-stalled`) are exempt — they clear via
+   *  queueHealth when the stall resolves, not via PR lifecycle. */
   prune(livePrKeys: ReadonlySet<string>): void {
     for (const key of this.active) {
+      if (key.endsWith('|queue-stalled')) continue;
       if (!livePrKeys.has(key.slice(0, key.lastIndexOf('|')))) this.active.delete(key);
     }
   }

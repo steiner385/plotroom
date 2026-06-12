@@ -127,11 +127,15 @@ export function buildQueueQuery(owner: string, name: string, branch: string): st
 }
 
 export function buildOidRollupQuery(owner: string, name: string, oids: string[]): string {
+  // workflowRun.createdAt feeds the dispatch-stall classifier (issue #39):
+  // a run created >5min ago with no started check is wedged. GraphQL's
+  // WorkflowRun has NO runStartedAt field (schema-verified 2026-06-12) — the
+  // REST run_started_at==created_at signature is derived from check statuses.
   const fields = oids.map((oid, i) => `o${i}: object(oid: ${q(oid)}) { ... on Commit {
     oid
     statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun {
       name status conclusion startedAt completedAt detailsUrl
-      checkSuite { workflowRun { event runNumber runAttempt workflow { name } } }
+      checkSuite { workflowRun { event runNumber runAttempt createdAt workflow { name } } }
     } } } }
   } }`).join('\n  ');
   return `query {

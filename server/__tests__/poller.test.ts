@@ -3737,7 +3737,7 @@ describe('Poller notifier wiring (issue #19)', () => {
     enabled: false, // command sink off — bus emission is what's under test
     command: [],
     events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-      ready: true, overdue: true, 'prod-live': true },
+      ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true },
   };
 
   function notifierHarness() {
@@ -3845,7 +3845,7 @@ describe('Poller notifier wiring (issue #19)', () => {
     const cfgWith = (enabled: boolean): AppConfig => ({ ...CONFIG,
       notifications: { enabled, command: ['notify-send', '{title}', '{body}'],
         events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-          ready: true, overdue: true, 'prod-live': true } } });
+          ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true } } });
     const execCalls: string[] = [];
     // index.ts wiring shape: the notifier reads the POLLER's live config, so a
     // PUT /api/config → reconfigure() flips the command sink with no restart
@@ -4068,7 +4068,7 @@ describe('Poller queue cycle records group failures (issue #38)', () => {
     const events: NotificationEvent[] = [];
     const notifier = new Notifier({ config: () => ({ enabled: false, command: [],
       events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-        ready: true, overdue: true, 'prod-live': true } }) });
+        ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true } }) });
     notifier.on('notification', (ev: NotificationEvent) => events.push(ev));
     (p as unknown as { deps: { notifier?: Notifier } }).deps.notifier = notifier;
     p.buildState();
@@ -4145,5 +4145,216 @@ describe('CheckView likelyFlake annotation (issue #37)', () => {
     const checks = state.repos.find((r) => r.repo === 'acme/widgets')!
       .prs.find((x) => x.number === 8962)!.checks;
     for (const c of checks) expect(c.likelyFlake).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issues #39/#40: queue ops console payload + multi-train merge ETA simulation
+// ---------------------------------------------------------------------------
+
+describe('Poller queue ops console (#39) + merge ETA simulation (#40)', () => {
+  const OPS_EVENTS_ON: NotificationsConfig = {
+    enabled: false, command: [],
+    events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
+      ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true },
+  };
+
+  const opsSweep = (n: number) => ({
+    open0: { issueCount: 1, nodes: [{ number: n, title: 'feat: thing', url: `u${n}`, isDraft: false,
+      mergedAt: null, repository: { nameWithOwner: 'acme/widgets' }, mergeCommit: null }] },
+    open1: { issueCount: 0, nodes: [] },
+    merged0: { issueCount: 0, nodes: [] }, merged1: { issueCount: 0, nodes: [] },
+  });
+
+  const opsDetail = (n: number, mq: Record<string, unknown>) => ({
+    r0: { nameWithOwner: 'acme/widgets', [`pr${n}`]: {
+      number: n, title: 'feat: thing', url: `u${n}`, isDraft: false, mergeStateStatus: 'BLOCKED',
+      mergedAt: null, headRefOid: `head${n}`, autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeCommit: null, mergeQueueEntry: mq,
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [CHECK_DONE] } } } }] },
+    } },
+  });
+
+  function opsClient(sweep: Record<string, unknown>, detailMarker: string,
+    detail: Record<string, unknown>, queue: Record<string, unknown>,
+    rollup?: Record<string, unknown>) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return sweep;
+        if (q.includes(detailMarker)) return detail;
+        if (q.includes('object(oid:')) return rollup ?? { repository: {} };
+        if (q.includes('mergeQueue')) return queue;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  /** Seed 4 clean trains (durations 600,600,600,1200 — p50=600, p90=1200) in
+   *  the last 24h plus one ejected group: ejectProb = 1/5 = 0.2 (> 15% bump),
+   *  batch success 4/5 = 80%, trains/hr = 4/24. */
+  function seedTrainHistory() {
+    history.recordGroupRun('acme/widgets', 600, '2026-06-10T08:00:00Z');
+    history.recordGroupRun('acme/widgets', 600, '2026-06-10T09:00:00Z');
+    history.recordGroupRun('acme/widgets', 600, '2026-06-10T10:00:00Z');
+    history.recordGroupRun('acme/widgets', 1200, '2026-06-10T11:00:00Z');
+    history.recordGroupFailure('acme/widgets', 'e2e', 'oidEjected', '2026-06-10T07:00:00Z');
+  }
+
+  // ---- waiting-only queue: healthy + full ops payload + sims ----
+
+  const waitingQueue = { repository: { mergeQueue: { entries: { nodes: [
+    { position: 1, state: 'QUEUED', enqueuedAt: '2026-06-10T11:30:00Z',
+      headCommit: null, pullRequest: { number: 9006 } },
+    { position: 2, state: 'QUEUED', enqueuedAt: '2026-06-10T11:50:00Z',
+      headCommit: null, pullRequest: { number: 9007 } },
+  ] } } } };
+
+  it('waiting-only queue: healthy badge, depth, per-entry waits, trains/hr, success rate, ejects', async () => {
+    seedTrainHistory();
+    const client = opsClient(opsSweep(9006), 'pr9006: pullRequest',
+      opsDetail(9006, { position: 1, state: 'QUEUED',
+        enqueuedAt: '2026-06-10T11:30:00Z', headCommit: null }), waitingQueue);
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const queue = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(queue.health).toEqual({ state: 'healthy', detail: 'queue healthy',
+      since: NOW.toISOString() });
+    expect(queue.depth).toBe(2);
+    expect(queue.entriesWithWaitSecs).toEqual([
+      { prNumber: 9006, position: 1, waitSecs: 1800 },
+      { prNumber: 9007, position: 2, waitSecs: 600 },
+    ]);
+    expect(queue.trainsPerHour).toBeCloseTo(4 / 24);
+    expect(queue.batchSuccessRatePct).toBe(80);
+    expect(queue.ejects24h).toBe(1);
+  });
+
+  it('waiting entries carry the multi-train ETA sim; PrView mirrors it; queueAheadCount stays', async () => {
+    seedTrainHistory();
+    const client = opsClient(opsSweep(9006), 'pr9006: pullRequest',
+      opsDetail(9006, { position: 1, state: 'QUEUED',
+        enqueuedAt: '2026-06-10T11:30:00Z', headCommit: null }), waitingQueue);
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    const queue = repo.queue!;
+    // front of the line, nothing building: 1 train → p50 = 600; eject bump
+    // (prob 0.2 > 15%) adds one extra train at p90 → 2 × 1200 = 2400
+    const expectedSim = { p50Secs: 600, p90Secs: 2400, trainsAhead: 0, assumesEjects: true };
+    expect(queue.waiting.find((w) => w.prNumber === 9006)!.sim).toEqual(expectedSim);
+    // 9007 has one QUEUED entry ahead — still one train at batchSize 6
+    expect(queue.waiting.find((w) => w.prNumber === 9007)!.sim).toEqual(expectedSim);
+    const pr = repo.prs.find((x) => x.number === 9006)!;
+    expect(pr.stage.stage).toBe('queue');
+    expect(pr.mergeEtaSim).toEqual(expectedSim);
+    expect(pr.queueAheadCount).toBe(0); // unchanged contract
+  });
+
+  it('without observed train durations the sim is null (UI falls back to the single number)', async () => {
+    const client = opsClient(opsSweep(9006), 'pr9006: pullRequest',
+      opsDetail(9006, { position: 1, state: 'QUEUED',
+        enqueuedAt: '2026-06-10T11:30:00Z', headCommit: null }), waitingQueue);
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.queue!.waiting[0]!.sim).toBeNull();
+    expect(repo.prs.find((x) => x.number === 9006)!.mergeEtaSim).toBeNull();
+  });
+
+  // ---- dispatch-stall: wedged run, no check ever picked up ----
+
+  const STALL_OID = 'oidStalled';
+  const stallQueue = { repository: { mergeQueue: { entries: { nodes: [
+    { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:40:00Z',
+      headCommit: { oid: STALL_OID }, pullRequest: { number: 9001 } },
+  ] } } } };
+  // run created 10 min ago, every check still QUEUED with no startedAt
+  const stallRollup = { repository: { o0: { oid: STALL_OID, statusCheckRollup: { contexts: { nodes: [
+    { __typename: 'CheckRun', name: 'ci', status: 'QUEUED', conclusion: null,
+      startedAt: null, completedAt: null, detailsUrl: 'u',
+      checkSuite: { workflowRun: { event: 'merge_group', createdAt: '2026-06-10T11:50:00Z' } } },
+  ] } } } } };
+
+  it('dispatch-stall: wedged >5min run flips health red, keeps since stable, notifies once', async () => {
+    const notifier = new Notifier({ config: () => OPS_EVENTS_ON });
+    let t = NOW.getTime();
+    const client = opsClient(opsSweep(9001), 'pr9001: pullRequest',
+      opsDetail(9001, { position: 1, state: 'AWAITING_CHECKS',
+        enqueuedAt: '2026-06-10T11:40:00Z', headCommit: { oid: STALL_OID } }),
+      stallQueue, stallRollup);
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => new Date(t), notifier });
+    const events: NotificationEvent[] = [];
+    p.on('notification', (ev: NotificationEvent) => events.push(ev));
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const s1 = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(s1.health.state).toBe('dispatch-stall');
+    expect(s1.health.detail).toContain('do NOT admin-merge');
+    const since = s1.health.since;
+    t += 60_000; // a minute later, still stalled — same state entry
+    const s2 = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(s2.health.state).toBe('dispatch-stall');
+    expect(s2.health.since).toBe(since);
+    // queue-stalled fired exactly once (debounced per state entry)
+    expect(events.filter((e) => e.type === 'queue-stalled')).toHaveLength(1);
+    expect(events.find((e) => e.type === 'queue-stalled')).toMatchObject({
+      repo: 'acme/widgets', prNumber: 0 });
+    // a building (non-waiting) entry never carries a sim
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!
+      .prs.find((x) => x.number === 9001)!;
+    expect(pr.mergeEtaSim).toBeNull();
+  });
+
+  // ---- cap-backlog: runs start but checks sit in runner waits ----
+
+  const BACKLOG_OID = 'oidBacklog';
+  const backlogQueue = { repository: { mergeQueue: { entries: { nodes: [
+    { position: 1, state: 'AWAITING_CHECKS', enqueuedAt: '2026-06-10T11:40:00Z',
+      headCommit: { oid: BACKLOG_OID }, pullRequest: { number: 9001 } },
+  ] } } } };
+  // lint finished 5 min ago; ci's needs are satisfied but no runner picked it up
+  const backlogRollup = { repository: { o0: { oid: BACKLOG_OID, statusCheckRollup: { contexts: { nodes: [
+    { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-06-10T11:45:00Z', completedAt: '2026-06-10T11:55:00Z', detailsUrl: 'u',
+      checkSuite: { workflowRun: { event: 'merge_group', createdAt: '2026-06-10T11:44:00Z' } } },
+    { __typename: 'CheckRun', name: 'ci', status: 'QUEUED', conclusion: null,
+      startedAt: null, completedAt: null, detailsUrl: 'u',
+      checkSuite: { workflowRun: { event: 'merge_group', createdAt: '2026-06-10T11:44:00Z' } } },
+  ] } } } } };
+
+  it('cap-backlog: started run with a ≥60s runner wait reads amber, no notification', async () => {
+    const notifier = new Notifier({ config: () => OPS_EVENTS_ON });
+    const client = opsClient(opsSweep(9001), 'pr9001: pullRequest',
+      opsDetail(9001, { position: 1, state: 'AWAITING_CHECKS',
+        enqueuedAt: '2026-06-10T11:40:00Z', headCommit: { oid: BACKLOG_OID } }),
+      backlogQueue, backlogRollup);
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW, notifier });
+    p.setDerivedGraph('acme/widgets', new Map([
+      ['ci', { needs: ['lint'], activity: { mode: 'all' as const }, runsOn: null }],
+      ['lint', { needs: [], activity: { mode: 'all' as const }, runsOn: null }],
+    ]));
+    const events: NotificationEvent[] = [];
+    p.on('notification', (ev: NotificationEvent) => events.push(ev));
+    await p.sweepOnce();
+    await p.detailOnce();
+    await p.queueOnce();
+    const queue = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(queue.health.state).toBe('cap-backlog');
+    expect(queue.health.detail).toContain('wait or raise cap');
+    expect(events.filter((e) => e.type === 'queue-stalled')).toHaveLength(0);
   });
 });

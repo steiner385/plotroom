@@ -792,3 +792,38 @@ describe('group failures (issue #38)', () => {
       at: '2026-06-10T10:00:00Z' }]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issues #39/#40: queue ops counts + train-duration samples
+// ---------------------------------------------------------------------------
+
+describe('queue ops rollups (issues #39/#40)', () => {
+  it('groupRunSamples returns the last-20 durations, newest first', () => {
+    for (let i = 0; i < 25; i++) {
+      h.recordGroupRun(REPO, 100 + i, `2026-06-${String(1 + Math.floor(i / 4)).padStart(2, '0')}T1${i % 4}:00:00Z`);
+    }
+    const samples = h.groupRunSamples(REPO);
+    expect(samples).toHaveLength(20);
+    expect(samples[0]).toBe(124); // newest completed_at first
+    expect(h.groupRunSamples('other/repo')).toEqual([]);
+  });
+
+  it('countGroupRuns is windowed and repo-scoped', () => {
+    h.recordGroupRun(REPO, 600, '2026-06-10T10:00:00Z');
+    h.recordGroupRun(REPO, 700, '2026-06-11T10:00:00Z');
+    h.recordGroupRun(REPO, 800, '2026-06-12T10:00:00Z');
+    h.recordGroupRun('other/repo', 900, '2026-06-12T10:00:00Z');
+    expect(h.countGroupRuns(REPO, '2026-06-11T00:00:00Z')).toBe(2);
+    expect(h.countGroupRuns(REPO, '2026-06-13T00:00:00Z')).toBe(0);
+    expect(h.countGroupRuns('other/repo', '2026-06-11T00:00:00Z')).toBe(1);
+  });
+
+  it('countGroupEjects counts DISTINCT ejected group shas (multi-check eject = 1)', () => {
+    h.recordGroupFailure(REPO, 'e2e', 'oidA', '2026-06-12T10:00:00Z');
+    h.recordGroupFailure(REPO, 'unit', 'oidA', '2026-06-12T10:01:00Z'); // same group
+    h.recordGroupFailure(REPO, 'e2e', 'oidB', '2026-06-12T11:00:00Z');
+    h.recordGroupFailure(REPO, 'e2e', 'oidOld', '2026-06-01T10:00:00Z'); // outside window
+    expect(h.countGroupEjects(REPO, '2026-06-11T00:00:00Z')).toBe(2);
+    expect(h.countGroupEjects('other/repo', '2026-06-11T00:00:00Z')).toBe(0);
+  });
+});

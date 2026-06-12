@@ -1,4 +1,4 @@
-import type { RepoQueueView, QueueGroupView } from './types';
+import type { RepoQueueView, QueueGroupView, MergeEtaSimulation, QueueHealthState } from './types';
 import { formatDur } from './format';
 import { scrollBehavior } from './motion';
 
@@ -57,13 +57,29 @@ function BuildingCar({ g }: { g: QueueGroupView }) {
   );
 }
 
-function WaitingCars({ waiting, batchSize }: { waiting: { prNumber: number; position: number }[]; batchSize: number }) {
+/** `~22m / ~41m p90` — the multi-train ETA range (issue #40); null-safe. */
+function simText(sim: MergeEtaSimulation | null | undefined): string | null {
+  if (!sim) return null;
+  return `~${formatDur(sim.p50Secs)} / ~${formatDur(sim.p90Secs)} p90`;
+}
+
+function simTooltip(sim: MergeEtaSimulation): string {
+  const ejects = sim.assumesEjects ? ', assumes ≤1 eject' : '';
+  const trains = `${sim.trainsAhead} train${sim.trainsAhead === 1 ? '' : 's'} ahead`;
+  return `merges in ~${formatDur(sim.p50Secs)} (p50) / ~${formatDur(sim.p90Secs)} (p90${ejects}); ${trains}`;
+}
+
+function WaitingCars({ waiting, batchSize }: { waiting: { prNumber: number; position: number; sim?: MergeEtaSimulation | null }[]; batchSize: number }) {
   if (waiting.length === 0) return null;
 
   // First car: "next batch" — up to batchSize entries
   const nextBatch = waiting.slice(0, batchSize);
   // Remaining: collapsed into a single "then" car
   const rest = waiting.slice(batchSize);
+  // multi-train ETA (issue #40): the front entry speaks for the next batch;
+  // the LAST entry (worst case) speaks for the collapsed "then" car
+  const nextSim = simText(nextBatch[0]?.sim);
+  const restSim = simText(rest[rest.length - 1]?.sim);
 
   return (
     <>
@@ -71,15 +87,62 @@ function WaitingCars({ waiting, batchSize }: { waiting: { prNumber: number; posi
         title={`waiting — next batch to start building when a slot frees: ${nextBatch.map((w) => prLabel(w.prNumber)).join(' ')}`}>
         <div className="car-header">next batch</div>
         <PrLinks numbers={nextBatch.map((w) => w.prNumber)} className="car-numbers" />
+        {nextSim && (
+          <div className="car-progress" title={simTooltip(nextBatch[0]!.sim!)}>{nextSim}</div>
+        )}
       </div>
       {rest.length > 0 && (
         <div className="car queued"
           title={`waiting further back in the queue: ${rest.map((w) => prLabel(w.prNumber)).join(' ')}`}>
           <div className="car-header">then</div>
           <span className="car-numbers car-count">{rest.length} more</span>
+          {restSim && (
+            <div className="car-progress" title={simTooltip(rest[rest.length - 1]!.sim!)}>{restSim}</div>
+          )}
         </div>
       )}
     </>
+  );
+}
+
+// ---- ops header strip (issue #39) ------------------------------------------
+
+const HEALTH_LABELS: Record<QueueHealthState, string> = {
+  healthy: 'healthy',
+  'cap-backlog': 'cap backlog',
+  'dispatch-stall': 'DISPATCH STALL',
+};
+
+/** Compact operator strip above the train: health badge (remediation as
+ *  tooltip + visible text when not healthy), depth, trains/hr, batch success
+ *  rate, oldest wait. Hidden entirely on pre-upgrade payloads (no `health`). */
+function OpsStrip({ queue }: { queue: RepoQueueView }) {
+  const health = queue.health;
+  if (!health) return null;
+  const oldest = (queue.entriesWithWaitSecs ?? [])
+    .reduce<number | null>((acc, e) => Math.max(acc ?? 0, e.waitSecs), null);
+  return (
+    <div className="queue-ops">
+      <span className={`ops-health ${health.state}`} title={health.detail}>
+        ● {HEALTH_LABELS[health.state] ?? health.state}
+      </span>
+      {health.state !== 'healthy' && (
+        <span className="ops-remediation">{health.detail}</span>
+      )}
+      <span className="ops-stat">depth {queue.depth ?? 0}</span>
+      {queue.trainsPerHour != null && (
+        <span className="ops-stat">{queue.trainsPerHour.toFixed(1)} trains/hr</span>
+      )}
+      {queue.batchSuccessRatePct != null && (
+        <span className="ops-stat">{queue.batchSuccessRatePct}% batch success</span>
+      )}
+      {(queue.ejects24h ?? 0) > 0 && (
+        <span className="ops-stat">{queue.ejects24h} eject{queue.ejects24h === 1 ? '' : 's'} 24h</span>
+      )}
+      {oldest != null && (
+        <span className="ops-stat">oldest wait ~{formatDur(oldest)}</span>
+      )}
+    </div>
   );
 }
 
@@ -122,13 +185,16 @@ export function QueueTrain({ queue }: { queue: RepoQueueView | null }) {
     && unmergeable.length === 0 && queueBlocked.length === 0) return null;
 
   return (
-    <div className="queue-train">
-      {queue.groups.map((g) => (
-        <BuildingCar key={g.oid} g={g} />
-      ))}
-      <WaitingCars waiting={queue.waiting} batchSize={queue.batchSize} />
-      <UnmergeableCar numbers={unmergeable} />
-      <QueueBlockedCar numbers={queueBlocked} culprit={queue.unmergeableCulprit ?? null} />
+    <div className="queue-section">
+      <OpsStrip queue={queue} />
+      <div className="queue-train">
+        {queue.groups.map((g) => (
+          <BuildingCar key={g.oid} g={g} />
+        ))}
+        <WaitingCars waiting={queue.waiting} batchSize={queue.batchSize} />
+        <UnmergeableCar numbers={unmergeable} />
+        <QueueBlockedCar numbers={queueBlocked} culprit={queue.unmergeableCulprit ?? null} />
+      </div>
     </div>
   );
 }

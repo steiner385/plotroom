@@ -17,7 +17,8 @@ import { familyDisplayName } from './normalize';
 import { computeProgress } from './estimator/progress';
 import { applyEtaCalibration, CALIBRATED_STAGES } from './estimator/calibrate';
 import { classify, requiredChecks, matchesRequiredPrefix, matchingPrefix, workflowScopeAllows, type DeployInfo } from './estimator/classify';
-import { queueStage, type GroupProgress, type QueueStageResult } from './estimator/queue';
+import { queueStage, simulateMergeEta, ejectProbability, type GroupProgress, type QueueStageResult, type MergeEtaSimulation } from './estimator/queue';
+import { classifyQueueHealth, type GroupBuildTelemetry, type QueueHealthState } from './estimator/queue-health';
 import { classifyWait, extractRunnerWaits, type NeedActivePredicate } from './estimator/waits';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -48,6 +49,10 @@ export interface PrView {
    *  stage ETA), so the UI can label it separately from head-commit PR checks.
    *  Null when not queued or the group rollup hasn't been fetched yet. */
   groupChecks: CheckView[] | null;
+  /** Multi-train merge ETA simulation (issue #40) for WAITING queue entries —
+   *  null for building/covered/unmergeable entries, non-queued PRs, and repos
+   *  without observed train durations (UI falls back to the single number). */
+  mergeEtaSim: MergeEtaSimulation | null;
 }
 
 /**
@@ -119,9 +124,16 @@ export interface QueueGroupView {
   etaSeconds: number | null;
   failed: boolean;
 }
+/** Queue health (issue #39): classifier state + its remediation string +
+ *  when the queue entered this state (ISO; resets on every state change). */
+export interface QueueHealthView {
+  state: QueueHealthState;
+  detail: string;
+  since: string;
+}
 export interface RepoQueueView {
   groups: QueueGroupView[];
-  waiting: { prNumber: number; position: number }[];
+  waiting: { prNumber: number; position: number; sim: MergeEtaSimulation | null }[];
   /** PR numbers of GENUINELY conflicting UNMERGEABLE entries (the PR's own
    *  snapshot is DIRTY against the base — needs a rebase, facing ejection) —
    *  excluded from group coverage and waiting, surfaced separately. */
@@ -137,6 +149,20 @@ export interface RepoQueueView {
    *  when no DIRTY snapshot identifies it. Null without UNMERGEABLE entries. */
   unmergeableCulprit: number | null;
   batchSize: number;
+  /** Ops console (issue #39): dispatch-stall vs cap-backlog discrimination. */
+  health: QueueHealthView;
+  /** Live queue depth — every entry, including UNMERGEABLE ones. */
+  depth: number;
+  /** Time-in-queue per entry (live enqueuedAt → now), ascending by position;
+   *  entries without a parseable enqueuedAt are omitted. */
+  entriesWithWaitSecs: { prNumber: number; position: number; waitSecs: number }[];
+  /** Clean trains completed in the last 24h ÷ 24. */
+  trainsPerHour: number;
+  /** runs / (runs + distinct ejected groups) over the last 7d, %; null with
+   *  no samples at all. */
+  batchSuccessRatePct: number | null;
+  /** Distinct ejected group shas in the last 24h. */
+  ejects24h: number;
 }
 export interface DashboardState {
   generatedAt: string;
@@ -261,6 +287,7 @@ export class Poller extends EventEmitter {
   private groupChecks = new Map<string, CheckRun[]>();    // group head oid → checks
   private recordedGroups = new Set<string>();             // oids whose completed run was recorded
   private queueEnqueuedAt = new Map<string, string>();    // PR key → enqueuedAt while queued
+  private queueHealthSince = new Map<string, { state: QueueHealthState; since: string }>(); // repo → current health state + entry time (#39)
   private stageTracker = new Map<string, StageTrack>();   // PR key → current stage + first ETA
   private repoFileConfigs = new Map<string, RepoFileConfig>(); // repo → parsed .pr-dashboard.yml
   private repoConfigThrottle = new RetryThrottle(PREFIX_DERIVE_INTERVAL_MS); // 24h on success, backoff on failure
@@ -500,6 +527,9 @@ export class Poller extends EventEmitter {
     const queuedRepos = new Set([...this.prs.values()].filter((p) => p.queue).map((p) => p.repo));
     for (const repo of this.queueEntries.keys()) {
       if (!queuedRepos.has(repo)) this.queueEntries.delete(repo);
+    }
+    for (const repo of this.queueHealthSince.keys()) {
+      if (!this.queueEntries.has(repo)) this.queueHealthSince.delete(repo);
     }
     const liveOids = new Set([...this.queueEntries.values()].flat()
       .map((e) => e.headCommitOid).filter((o): o is string => !!o));
@@ -1188,7 +1218,7 @@ export class Poller extends EventEmitter {
     const deployMap = this.effectiveDeploy();
     const repos = [...byRepo.entries()]
       .map(([repo, prs]) => {
-        const queue = this.buildQueueView(repo, repoGroupProgress.get(repo) ?? []);
+        const queue = this.buildQueueView(repo, repoGroupProgress.get(repo) ?? [], now);
         return {
           repo,
           hasDeploy: repo in deployMap,
@@ -1221,7 +1251,7 @@ export class Poller extends EventEmitter {
    *
    *  Returns null when there are no queue entries for this repo.
    */
-  private buildQueueView(repo: string, groups: GroupProgress[]): RepoQueueView | null {
+  private buildQueueView(repo: string, groups: GroupProgress[], now: Date): RepoQueueView | null {
     const entries = this.queueEntries.get(repo);
     if (!entries?.length) return null;
 
@@ -1286,12 +1316,115 @@ export class Poller extends EventEmitter {
     }
 
     // Waiting = entries whose position is beyond all building groups' coverage.
+    // Each carries its multi-train ETA simulation (issue #40) when computable.
     const waiting = sorted
       .filter((e) => e.position > maxBuildingPos)
-      .map((e) => ({ prNumber: e.prNumber, position: e.position }));
+      .map((e) => ({ prNumber: e.prNumber, position: e.position,
+        sim: this.mergeEtaSimFor(repo, entries, e.prNumber, groups) }));
+
+    // ---- ops console (issue #39) ----
+    const telemetry = orderedGroups.map(([oid]) => this.groupTelemetryFor(repo, oid, now));
+    const classified = classifyQueueHealth(telemetry, now);
+    const prev = this.queueHealthSince.get(repo);
+    const since = prev?.state === classified.state ? prev.since : now.toISOString();
+    this.queueHealthSince.set(repo, { state: classified.state, since });
+    // repo-level stall notification — debounced once per state entry by the notifier
+    this.deps.notifier?.queueHealth(repo, classified.state, classified.detail);
+    const entriesWithWaitSecs = [...entries]
+      .sort((a, b) => a.position - b.position)
+      .flatMap((e) => {
+        if (!e.enqueuedAt) return [];
+        const at = Date.parse(e.enqueuedAt);
+        if (!Number.isFinite(at)) return [];
+        return [{ prNumber: e.prNumber, position: e.position,
+          waitSecs: Math.max(0, Math.round((now.getTime() - at) / 1000)) }];
+      });
+    const { history } = this.deps;
+    const dayAgo = new Date(now.getTime() - 86400_000).toISOString();
+    const weekAgo = new Date(now.getTime() - 7 * 86400_000).toISOString();
+    const runs7d = history.countGroupRuns(repo, weekAgo);
+    const ejects7d = history.countGroupEjects(repo, weekAgo);
 
     return { groups: queueGroups, waiting, unmergeable, queueBlocked, unmergeableCulprit,
-      batchSize: this.settingsFor(repo).batchSize };
+      batchSize: this.settingsFor(repo).batchSize,
+      health: { ...classified, since },
+      depth: entries.length,
+      entriesWithWaitSecs,
+      trainsPerHour: history.countGroupRuns(repo, dayAgo) / 24,
+      batchSuccessRatePct: runs7d + ejects7d > 0
+        ? Math.round((runs7d / (runs7d + ejects7d)) * 100) : null,
+      ejects24h: history.countGroupEjects(repo, dayAgo),
+    };
+  }
+
+  /**
+   * Build the per-group telemetry the queue-health classifier (issue #39)
+   * consumes, from the group rollup's checks. `runStartedAt` is always null:
+   * GraphQL's WorkflowRun exposes no run_started_at, so "the run never
+   * started" derives from no check having left the queued statuses.
+   */
+  private groupTelemetryFor(repo: string, oid: string, now: Date): GroupBuildTelemetry {
+    const checks = this.groupChecks.get(oid) ?? [];
+    const graphKeys = this.graphKeysFor(repo);
+    const rollupWf = this.rollupWorkflowFor(repo);
+    const createds = checks.map((c) => c.runCreatedAt)
+      .filter((t): t is string => t != null);
+    let runnerWaitsInProgress = 0;
+    let maxRunnerWaitSecs: number | null = null;
+    for (const c of checks) {
+      const inRollupWorkflow = workflowScopeAllows(c.workflowName, rollupWf);
+      const wait = classifyWait(c, checks,
+        inRollupWorkflow ? this.needsFor(repo, c.name) : null, now,
+        (pfx, e) => this.needActiveFor(repo, pfx, e), graphKeys, rollupWf);
+      if (wait?.kind !== 'runner') continue;
+      runnerWaitsInProgress++;
+      if (wait.waitingSeconds != null) {
+        maxRunnerWaitSecs = Math.max(maxRunnerWaitSecs ?? 0, wait.waitingSeconds);
+      }
+    }
+    return {
+      oid,
+      runCreatedAt: createds.length ? createds.reduce((a, b) => (a < b ? a : b)) : null,
+      runStartedAt: null,
+      anyCheckStarted: checks.some((c) => c.status === 'IN_PROGRESS' || c.status === 'COMPLETED'),
+      runnerWaitsInProgress,
+      maxRunnerWaitSecs,
+    };
+  }
+
+  /**
+   * Multi-train merge ETA simulation (issue #40) for one WAITING queue entry.
+   * Mirrors queueStage's waiting-line decomposition (queuedAhead, deepest
+   * building train's remaining ETA) and feeds it the observed train-duration
+   * samples + 7-day eject probability. Null for building/covered/UNMERGEABLE
+   * entries and when no train durations have been observed yet.
+   */
+  private mergeEtaSimFor(repo: string, entries: QueueEntry[], prNumber: number,
+    groups: GroupProgress[]): MergeEtaSimulation | null {
+    const me = entries.find((x) => x.prNumber === prNumber);
+    if (!me || me.state === 'UNMERGEABLE' || me.state === 'MERGEABLE') return null;
+    if (me.state === 'AWAITING_CHECKS' && me.headCommitOid) return null; // building — group ETA applies
+    if (this.coveringGroupOidFor(entries, prNumber)) return null;        // covered — rides that group
+    const durationSamples = this.deps.history.groupRunSamples(repo);
+    if (!durationSamples.length) return null; // simulateMergeEta would return null anyway
+    const byOid = new Map(groups.map((g) => [g.oid, g]));
+    const ahead = entries.filter((x) => x.position < me.position
+      && x.state !== 'MERGEABLE' && x.state !== 'UNMERGEABLE');
+    const building = ahead.filter((x) => x.state === 'AWAITING_CHECKS' && x.headCommitOid);
+    const queuedAhead = ahead.length - building.length;
+    const deepest = [...building].sort((a, b) => b.position - a.position)[0];
+    const currentTrainEtaSecs = deepest
+      ? (byOid.get(deepest.headCommitOid!)?.etaSeconds ?? this.medianGroupSecs(repo))
+      : null;
+    const weekAgo = new Date(this.now().getTime() - 7 * 86400_000).toISOString();
+    return simulateMergeEta({
+      queuedAhead,
+      batchSize: this.settingsFor(repo).batchSize,
+      durationSamples,
+      ejectProb: ejectProbability(this.deps.history.countGroupRuns(repo, weekAgo),
+        this.deps.history.countGroupEjects(repo, weekAgo)),
+      currentTrainEtaSecs,
+    });
   }
 
   /**
@@ -1474,10 +1607,15 @@ export class Poller extends EventEmitter {
       ? this.groupChecks.get(effectiveGroupOid) : undefined;
     const groupChecks = storedGroup?.length
       ? this.toCheckViews(pr.repo, storedGroup, now, prefixes) : null;
+    // multi-train ETA (issue #40): waiting queue entries only (the helper
+    // returns null for building/covered/unmergeable entries)
+    const mergeEtaSim = stage.stage === 'queue'
+      ? this.mergeEtaSimFor(pr.repo, this.queueEntries.get(pr.repo) ?? [], pr.number, groups)
+      : null;
     return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
       queueAheadCount,
       checks: this.checkViews(pr, now, prefixes),
-      groupChecks };
+      groupChecks, mergeEtaSim };
   }
 
   private viewForMergedPr(rec: MergedPrRecord, now: Date): PrView | null {
@@ -1521,7 +1659,7 @@ export class Poller extends EventEmitter {
     this.deps.notifier?.observe({ repo: rec.repo, prNumber: rec.number, title: rec.title,
       prev: prevStage, next: stage });
     return { repo: rec.repo, number: rec.number, title: rec.title, url: rec.url, stage,
-      queueAheadCount: null, checks: [], groupChecks: null };
+      queueAheadCount: null, checks: [], groupChecks: null, mergeEtaSim: null };
   }
 
   private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {
