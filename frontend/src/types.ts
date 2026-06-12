@@ -137,3 +137,17 @@ export interface ConfigPutError {
   offendingKeys?: string[];
   fieldErrors?: Record<string, string>;
 }
+
+// ---- Metrics API mirror (GET /api/metrics) ----
+// BINDING CONTRACT with `server/metrics.ts` (round 12 plan) — change both
+// together. All p50/p90 values are seconds; meanHours is hours. `date` is a
+// UTC day (YYYY-MM-DD); `at` is a full ISO timestamp.
+
+export interface MetricsPayload {
+  windowDays: number;
+  runnerWaits: { repo: string; event: string; days: { date: string; p50: number; p90: number; n: number }[] }[];
+  queue: { repo: string; mergesPerDay: { date: string; count: number }[]; queueWaitDays: { date: string; p50: number; n: number }[]; groupRunDays: { date: string; p50: number; n: number }[] }[];
+  slowestJobs: { repo: string; jobs: { name: string; event: string; p50: number; p90: number; variability: number; n: number; trend: { date: string; p50: number }[] }[] }[]; // top 10 by p50, variability = p90/p50
+  velocity: { repo: string; mergedPerDay: { date: string; count: number }[]; mergeToQaDays: { date: string; p50: number; n: number }[]; avgLifespanDays: { date: string; meanHours: number; n: number }[] }[];
+  trends: { repo: string; samples: { at: string; open: number; ci: number; queue: number; failed: number }[] }[]; // raw state_samples within window (≤15min cadence)
+}

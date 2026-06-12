@@ -135,3 +135,53 @@ describe('App', () => {
     expect(screen.getByText('#20')).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round 12 (metrics tab): Pipeline | Metrics tab bar
+// ---------------------------------------------------------------------------
+
+vi.mock('../MetricsView', () => ({
+  MetricsView: () => <div data-testid="metrics-view-stub">metrics-view</div>,
+}));
+
+describe('App tab bar', () => {
+  it('renders a tablist with Pipeline selected by default; pipeline content visible', () => {
+    render(<App />);
+    const tablist = screen.getByRole('tablist', { name: 'Dashboard views' });
+    const tabs = within(tablist).getAllByRole('tab');
+    expect(tabs.map((t) => t.textContent)).toEqual(['Pipeline', 'Metrics']);
+    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
+    // pipeline content (status strip + repos) is rendered, metrics is not
+    expect(screen.getByRole('group', { name: 'Status overview' })).toBeInTheDocument();
+    expect(screen.queryByTestId('metrics-view-stub')).not.toBeInTheDocument();
+  });
+
+  it('tabs wire aria-controls to tabpanel ids that exist in the DOM', () => {
+    render(<App />);
+    for (const tab of screen.getAllByRole('tab')) {
+      const controls = tab.getAttribute('aria-controls')!;
+      expect(document.getElementById(controls)).not.toBeNull();
+    }
+  });
+
+  it('switching to Metrics shows MetricsView and hides the pipeline panel', () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));
+    expect(screen.getByRole('tab', { name: 'Metrics' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Pipeline' })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByTestId('metrics-view-stub')).toBeInTheDocument();
+    expect(document.getElementById('tabpanel-pipeline')).toHaveAttribute('hidden');
+    expect(document.getElementById('tabpanel-metrics')).not.toHaveAttribute('hidden');
+  });
+
+  it('switching back to Pipeline restores the board (state preserved, panel unhidden)', () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Pipeline' }));
+    expect(document.getElementById('tabpanel-pipeline')).not.toHaveAttribute('hidden');
+    expect(screen.getByRole('group', { name: 'Status overview' })).toBeInTheDocument();
+    // metrics stays mounted (no refetch churn) but hidden
+    expect(document.getElementById('tabpanel-metrics')).toHaveAttribute('hidden');
+  });
+});

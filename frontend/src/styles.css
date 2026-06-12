@@ -318,3 +318,64 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .applied-line { font-size: 12px; color: var(--done); }
 .restart-line { font-size: 12px; color: var(--muted); }
 .restart-back { color: var(--done); }
+
+/* --- Tab bar (Round 12: Pipeline | Metrics) --- */
+.tab-bar { display: flex; gap: 4px; margin: 10px 0 14px; border-bottom: 1px solid var(--border); }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 6px 14px 7px; margin-bottom: -1px; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--muted); font-family: inherit;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- Metrics tab (Round 12) --- */
+.metrics-controls { display: flex; gap: 6px; align-items: center; margin-bottom: 14px; }
+.metrics-window-btn {
+  background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.metrics-window-btn[aria-pressed='true'] {
+  color: var(--accent); border-color: var(--accent); font-weight: 700;
+}
+.metrics-refresh {
+  background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 9px; font-size: 13px; cursor: pointer; line-height: 1;
+}
+.metrics-refresh:hover, .metrics-window-btn:hover { border-color: var(--accent); color: var(--text); }
+.metrics-error { color: var(--fail); font-size: 13px; }
+
+.metric-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 12px;
+}
+.metric-panel h2 { margin: 0 0 8px; font-size: 13px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em; }
+.metric-empty { color: var(--muted); font-size: 12px; font-style: italic; margin: 4px 0; }
+.metric-repo { margin-bottom: 10px; }
+.metric-repo h3 { margin: 6px 0 6px; font-size: 13px; color: var(--text); font-weight: 600; }
+.metric-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; }
+.metric-cell { display: flex; flex-direction: column; gap: 4px; }
+.metric-label { font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; }
+.metric-stat b { display: block; font-size: 20px; line-height: 1.1; color: var(--text);
+  font-variant-numeric: tabular-nums; }
+.metric-stat span { font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; }
+
+.metric-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.metric-table th {
+  text-align: left; color: var(--muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.04em; font-weight: 600; padding: 3px 10px 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.metric-table td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums; }
+.metric-table tr:last-child td { border-bottom: none; }
+.metric-job-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.var-high { color: var(--amber); font-weight: 700; }
+
+.sparkline, .bars, .dual-line { display: block; }

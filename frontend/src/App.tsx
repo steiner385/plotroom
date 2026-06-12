@@ -4,7 +4,10 @@ import { PrRow } from './PrRow';
 import { StatusStrip, bucketPr, type Bucket } from './StatusStrip';
 import { QueueTrain } from './QueueTrain';
 import { SettingsPanel } from './SettingsPanel';
+import { MetricsView } from './MetricsView';
 import type { PrView } from './types';
+
+type TabId = 'pipeline' | 'metrics';
 
 // ---- localStorage helpers (private-mode safe) ----
 
@@ -48,6 +51,11 @@ export function App() {
   const [activeFilter, setActiveFilter] = useState<Bucket | null>(null);
   const [collapsedRepos, setCollapsedRepos] = useState<Set<string>>(() => readCollapsedSet());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tab, setTab] = useState<TabId>('pipeline');
+  // Mount MetricsView lazily (first visit) and keep it mounted afterwards, so
+  // switching tabs doesn't refetch; the panel divs always exist in the DOM so
+  // every aria-controls id resolves.
+  const [metricsVisited, setMetricsVisited] = useState(false);
   const gearRef = useRef<HTMLButtonElement>(null);
   const handleSettingsClose = useCallback(() => setSettingsOpen(false), []);
 
@@ -103,6 +111,26 @@ export function App() {
         returnFocusRef={gearRef}
         connected={connected}
       />
+      <nav className="tab-bar" role="tablist" aria-label="Dashboard views">
+        <button type="button" role="tab" id="tab-pipeline"
+          aria-selected={tab === 'pipeline'} aria-controls="tabpanel-pipeline"
+          className={tab === 'pipeline' ? 'tab active' : 'tab'}
+          onClick={() => setTab('pipeline')}>
+          Pipeline
+        </button>
+        <button type="button" role="tab" id="tab-metrics"
+          aria-selected={tab === 'metrics'} aria-controls="tabpanel-metrics"
+          className={tab === 'metrics' ? 'tab active' : 'tab'}
+          onClick={() => { setTab('metrics'); setMetricsVisited(true); }}>
+          Metrics
+        </button>
+      </nav>
+      <div role="tabpanel" id="tabpanel-metrics" aria-labelledby="tab-metrics"
+        hidden={tab !== 'metrics'}>
+        {metricsVisited && <MetricsView />}
+      </div>
+      <div role="tabpanel" id="tabpanel-pipeline" aria-labelledby="tab-pipeline"
+        hidden={tab !== 'pipeline'}>
       <StatusStrip prs={allPrs} activeFilter={activeFilter} onFilter={setActiveFilter} />
       {state.repos.map((r) => {
         const isCollapsed = collapsedRepos.has(r.repo);
@@ -155,6 +183,7 @@ export function App() {
           </section>
         );
       })}
+      </div>
     </main>
   );
 }

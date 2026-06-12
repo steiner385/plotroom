@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { HistoryStore } from '../history';
+import { HistoryStore, addColumnIfMissing } from '../history';
 
 let h: HistoryStore;
 beforeEach(() => {
@@ -318,5 +318,167 @@ describe('runner waits (W2)', () => {
     expect(h.expectedRunnerWaitForEvent(REPO, 'pull_request')).toBeNull(); // n=2
     h.recordRunnerWait(REPO, 'mobile', 'pull_request', 90, at(2));
     expect(h.expectedRunnerWaitForEvent(REPO, 'pull_request')).toBe(90);   // n=3
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 12 (metrics tab): merged_prs.created_at migration + state samples
+// ---------------------------------------------------------------------------
+
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+describe('merged_prs created_at migration', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function preMigrationDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'prdash-hist-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    // exact old merged_prs shape (no created_at column)
+    const raw = new Database(path);
+    raw.exec(`CREATE TABLE merged_prs (
+      repo TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
+      merged_at TEXT NOT NULL, merge_commit_sha TEXT,
+      qa_live_at TEXT, prod_live_at TEXT,
+      PRIMARY KEY (repo, number)
+    );`);
+    raw.prepare('INSERT INTO merged_prs (repo, number, title, url, merged_at, merge_commit_sha) VALUES (?,?,?,?,?,?)')
+      .run(REPO, 1, 'old row', 'u', '2026-06-10T10:00:00Z', 'abc');
+    raw.close();
+    return path;
+  }
+
+  it('opens a pre-existing DB, keeps old rows readable (createdAt null), accepts the new column', () => {
+    const path = preMigrationDb();
+    const store = new HistoryStore(path);
+    const old = store.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))
+      .find((r) => r.number === 1)!;
+    expect(old.title).toBe('old row');
+    expect(old.createdAt).toBeNull();
+    store.upsertMergedPr({ repo: REPO, number: 2, title: 'new row', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'def', createdAt: '2026-06-09T12:00:00Z' });
+    const fresh = store.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))
+      .find((r) => r.number === 2)!;
+    expect(fresh.createdAt).toBe('2026-06-09T12:00:00Z');
+    store.close();
+  });
+
+  it('re-opening an already-migrated DB does not throw (ALTER is idempotent via try/catch)', () => {
+    const path = preMigrationDb();
+    new HistoryStore(path).close();
+    const again = new HistoryStore(path);
+    expect(again.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))).toHaveLength(1);
+    again.close();
+  });
+});
+
+describe('addColumnIfMissing (migration helper)', () => {
+  it('adds the column once and is a no-op when it already exists (duplicate swallowed)', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE t (a TEXT)');
+    addColumnIfMissing(db, 't', 'b TEXT');
+    expect(() => addColumnIfMissing(db, 't', 'b TEXT')).not.toThrow();
+    const cols = (db.prepare('PRAGMA table_info(t)').all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toEqual(['a', 'b']);
+    db.close();
+  });
+
+  it('rethrows non-duplicate-column SQLite errors instead of swallowing them', () => {
+    const db = new Database(':memory:');
+    // no such table → must surface, NOT be mistaken for "column already exists"
+    expect(() => addColumnIfMissing(db, 'missing_table', 'b TEXT')).toThrow(/no such table/i);
+    db.close();
+  });
+});
+
+describe('metrics windowed queries use index support (no full-table scans)', () => {
+  it('the since-queries on the two large tables hit completed_at/started_at indexes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prdash-idx-'));
+    const path = join(dir, 'history.db');
+    new HistoryStore(path).close();
+    const raw = new Database(path, { readonly: true });
+    try {
+      const plan = (sql: string): string =>
+        (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[])
+          .map((r) => r.detail).join('; ');
+      expect(plan("SELECT repo FROM check_durations WHERE conclusion='SUCCESS' AND completed_at >= '2026'"))
+        .toMatch(/USING INDEX idx_durations_completed/);
+      expect(plan("SELECT repo FROM runner_waits WHERE started_at >= '2026'"))
+        .toMatch(/USING INDEX idx_runner_waits_started/);
+    } finally {
+      raw.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('merged_prs createdAt upsert semantics', () => {
+  it('round-trips createdAt and treats an absent createdAt as null', () => {
+    h.upsertMergedPr({ repo: REPO, number: 10, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x', createdAt: '2026-06-08T09:00:00Z' });
+    h.upsertMergedPr({ repo: REPO, number: 11, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'y' });
+    const recs = h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'));
+    expect(recs.find((r) => r.number === 10)!.createdAt).toBe('2026-06-08T09:00:00Z');
+    expect(recs.find((r) => r.number === 11)!.createdAt).toBeNull();
+  });
+
+  it('re-upsert without createdAt does not null-out a known created_at', () => {
+    h.upsertMergedPr({ repo: REPO, number: 12, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x', createdAt: '2026-06-08T09:00:00Z' });
+    h.upsertMergedPr({ repo: REPO, number: 12, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x' });
+    expect(h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0]!.createdAt)
+      .toBe('2026-06-08T09:00:00Z');
+  });
+
+  it('re-upsert with createdAt fills a previously-null created_at', () => {
+    h.upsertMergedPr({ repo: REPO, number: 13, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x' });
+    h.upsertMergedPr({ repo: REPO, number: 13, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x', createdAt: '2026-06-08T09:00:00Z' });
+    expect(h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0]!.createdAt)
+      .toBe('2026-06-08T09:00:00Z');
+  });
+});
+
+describe('state samples (metrics trends)', () => {
+  const COUNTS = { open: 5, ci: 2, queue: 1, failed: 0 };
+
+  it('records and reads back window-scoped samples, oldest first', () => {
+    h.recordStateSample(REPO, '2026-06-10T10:00:00Z', COUNTS);
+    h.recordStateSample(REPO, '2026-06-10T10:20:00Z', { open: 6, ci: 3, queue: 0, failed: 1 });
+    const rows = h.stateSamplesSince('2026-06-10T00:00:00Z');
+    expect(rows).toEqual([
+      { repo: REPO, at: '2026-06-10T10:00:00Z', open: 5, ci: 2, queue: 1, failed: 0 },
+      { repo: REPO, at: '2026-06-10T10:20:00Z', open: 6, ci: 3, queue: 0, failed: 1 },
+    ]);
+    expect(h.stateSamplesSince('2026-06-11T00:00:00Z')).toEqual([]);
+  });
+
+  it('throttles to at most one row per 15 minutes per repo', () => {
+    expect(h.recordStateSample(REPO, '2026-06-10T10:00:00Z', COUNTS)).toBe(true);
+    expect(h.recordStateSample(REPO, '2026-06-10T10:05:00Z', COUNTS)).toBe(false);
+    expect(h.recordStateSample(REPO, '2026-06-10T10:14:59Z', COUNTS)).toBe(false);
+    expect(h.recordStateSample(REPO, '2026-06-10T10:15:00Z', COUNTS)).toBe(true);
+    expect(h.stateSamplesSince('2026-06-01T00:00:00Z')).toHaveLength(2);
+  });
+
+  it('throttle windows are independent per repo', () => {
+    expect(h.recordStateSample(REPO, '2026-06-10T10:00:00Z', COUNTS)).toBe(true);
+    expect(h.recordStateSample('octo/bridge', '2026-06-10T10:01:00Z', COUNTS)).toBe(true);
+    expect(h.recordStateSample(REPO, '2026-06-10T10:02:00Z', COUNTS)).toBe(false);
+  });
+
+  it('prunes samples older than 90 days when a new sample lands', () => {
+    h.recordStateSample(REPO, '2026-01-01T10:00:00Z', COUNTS);
+    h.recordStateSample(REPO, '2026-06-10T10:00:00Z', COUNTS);
+    const rows = h.stateSamplesSince('2025-01-01T00:00:00Z');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.at).toBe('2026-06-10T10:00:00Z');
   });
 });
