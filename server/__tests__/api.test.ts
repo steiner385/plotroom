@@ -476,7 +476,8 @@ import type { MetricsBucket, MetricsPayload, MetricsWindow } from '../metrics';
 
 const EMPTY_METRICS = (w: MetricsWindow, b: MetricsBucket): MetricsPayload =>
   ({ window: w, bucket: b, runnerWaits: [], queue: [], slowestJobs: [], velocity: [],
-    trends: [], calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [] });
+    leadTime: [], trends: [], calibration: [], flakiness: [], trainKillers: [],
+    criticalPath: [], lint: [] });
 
 describe('GET /api/metrics', () => {
   function metricsApp() {

@@ -5,8 +5,8 @@ import type { MetricsBucket, MetricsPayload, MetricsWindow } from '../types';
 
 const EMPTY: MetricsPayload = {
   window: '3d', bucket: 'hour',
-  runnerWaits: [], queue: [], slowestJobs: [], velocity: [], trends: [], calibration: [],
-  flakiness: [], trainKillers: [], criticalPath: [], lint: [],
+  runnerWaits: [], queue: [], slowestJobs: [], velocity: [], leadTime: [], trends: [],
+  calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [],
 };
 
 const H = (h: number): string => `2026-06-11T${String(h).padStart(2, '0')}`;
@@ -59,6 +59,17 @@ const PAYLOAD: MetricsPayload = {
         { bucket: H(8), p50: 600, n: 2 }, { bucket: H(9), p50: 540, n: 1 }, { bucket: H(10), p50: 660, n: 2 }],
       avgLifespanBuckets: [
         { bucket: H(8), meanHours: 20, n: 2 }, { bucket: H(9), meanHours: 30, n: 1 }, { bucket: H(10), meanHours: 26, n: 2 }] },
+  ],
+  leadTime: [
+    { repo: 'acme/widgets',
+      segments: [
+        { id: 'toFirstGreen', medianSecs: 5400, n: 2 },
+        { id: 'greenToEnqueued', medianSecs: 300, n: 2 },
+        { id: 'queue', medianSecs: 1200, n: 3 },
+        { id: 'qaDeploy', medianSecs: 600, n: 8 },
+        { id: 'awaitingProd', medianSecs: 86400, n: 6 },
+      ],
+      totalP50Secs: 93900, totalN: 6, prodDeploys: 6, deploysPerDay: 2 },
   ],
   trends: [
     { repo: 'acme/widgets', points: [
@@ -155,11 +166,11 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-const PANELS = ['Trends', 'Runner-wait health', 'Queue throughput',
+const PANELS = ['Lead time', 'Trends', 'Runner-wait health', 'Queue throughput',
   'Slowest / most-variable jobs', 'Merge velocity + deploy lag', 'ETA calibration'];
 
 describe('MetricsView', () => {
-  it('fetches window=3d bucket=hour by default and renders all six panels', async () => {
+  it('fetches window=3d bucket=hour by default and renders the core panels', async () => {
     const fetchFn = mockFetchOk();
     render(<MetricsView now={NOW} />);
     expect(screen.getByText('Loading metrics…')).toBeInTheDocument();
@@ -237,7 +248,7 @@ describe('MetricsView', () => {
     mockFetchOk(EMPTY);
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Trends' });
-    expect(screen.getAllByText('no data yet')).toHaveLength(9);
+    expect(screen.getAllByText('no data yet')).toHaveLength(10); // every panel except lint
     expect(screen.getByText('no findings')).toBeInTheDocument();
   });
 
@@ -536,5 +547,116 @@ describe('MetricsView — workflow lint panel (issue #48 rule 1)', () => {
     const heading = await screen.findByRole('heading', { name: 'Workflow lint' });
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('no findings')).toBeInTheDocument();
+  });
+});
+
+describe('MetricsView — lead time panel (issue #44)', () => {
+  const ltPanel = async () => {
+    const heading = await screen.findByRole('heading', { name: 'Lead time' });
+    return heading.closest('section')! as HTMLElement;
+  };
+
+  it('renders the DORA headline tiles: deploy frequency and created→prod p50', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    expect(within(panel).getByText('2/day')).toBeInTheDocument();
+    expect(within(panel).getByText('deploy frequency (prod)')).toBeInTheDocument();
+    expect(within(panel).getByText('6 prod deploys in window')).toBeInTheDocument();
+    // totalP50Secs 93900 = 26h 5m
+    expect(within(panel).getByText('26h 5m')).toBeInTheDocument();
+    expect(within(panel).getByText('lead time created → prod (p50)')).toBeInTheDocument();
+    expect(within(panel).getByText('n=6')).toBeInTheDocument();
+  });
+
+  it('renders one stacked bar with a segment per populated stage, hover = value + n', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    const bar = within(panel).getByTestId('leadtime-bar-acme/widgets');
+    const segs = [...bar.querySelectorAll('.leadtime-seg')];
+    expect(segs).toHaveLength(5);
+    expect(segs.map((el) => el.getAttribute('title'))).toEqual([
+      'to first green: 1h 30m (n=2)',
+      'green → enqueued: 5m (n=2)',
+      'queue: 20m (n=3)',
+      'QA deploy: 10m (n=8)',
+      'awaiting prod: 24h (n=6)',
+    ]);
+    // widths proportional to medians: awaitingProd (86400 of 93900) dominates
+    const widths = segs.map((el) => parseFloat((el as HTMLElement).style.width));
+    expect(widths[4]).toBeGreaterThan(80);
+    expect(Math.round(widths.reduce((a, b) => a + b))).toBe(100);
+  });
+
+  it("legend labels every segment; n under 5 reads 'collecting'", async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    const legend = panel.querySelector('.chart-legend')! as HTMLElement;
+    const items = [...legend.querySelectorAll('.legend-item')].map((el) => el.textContent);
+    expect(items).toHaveLength(5);
+    expect(items[0]).toContain('to first green');
+    expect(items[0]).toContain('1h 30m (n=2)');
+    expect(items[0]).toContain('collecting');      // n=2 < 5
+    expect(items[2]).toContain('collecting');      // queue n=3 < 5
+    expect(items[3]).not.toContain('collecting');  // qaDeploy n=8
+    expect(items[4]).not.toContain('collecting');  // awaitingProd n=6
+  });
+
+  it('segments without data (medianSecs null) are absent from the bar but in the legend', async () => {
+    mockFetchOk({ ...PAYLOAD, leadTime: [
+      { repo: 'acme/widgets',
+        segments: [
+          { id: 'toFirstGreen', medianSecs: null, n: 0 },
+          { id: 'greenToEnqueued', medianSecs: null, n: 0 },
+          { id: 'queue', medianSecs: null, n: 0 },
+          { id: 'qaDeploy', medianSecs: 600, n: 8 },
+          { id: 'awaitingProd', medianSecs: 86400, n: 6 },
+        ],
+        totalP50Secs: 90000, totalN: 6, prodDeploys: 6, deploysPerDay: 2 },
+    ] });
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    const bar = within(panel).getByTestId('leadtime-bar-acme/widgets');
+    expect(bar.querySelectorAll('.leadtime-seg')).toHaveLength(2);
+    const legend = panel.querySelector('.chart-legend')! as HTMLElement;
+    const items = [...legend.querySelectorAll('.legend-item')].map((el) => el.textContent);
+    expect(items).toHaveLength(5);
+    expect(items[0]).toContain('to first green');
+    expect(items[0]).toContain('collecting');      // n=0 — only populates from new merges
+    expect(items[0]).not.toContain('(n=');         // no fabricated value
+  });
+
+  it('all-null segments show the collecting placeholder instead of an empty bar', async () => {
+    mockFetchOk({ ...PAYLOAD, leadTime: [
+      { repo: 'acme/widgets',
+        segments: [
+          { id: 'toFirstGreen', medianSecs: null, n: 0 },
+          { id: 'greenToEnqueued', medianSecs: null, n: 0 },
+          { id: 'queue', medianSecs: null, n: 0 },
+          { id: 'qaDeploy', medianSecs: null, n: 0 },
+          { id: 'awaitingProd', medianSecs: null, n: 0 },
+        ],
+        totalP50Secs: null, totalN: 0, prodDeploys: 1, deploysPerDay: 1 },
+    ] });
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    expect(within(panel).queryByTestId('leadtime-bar-acme/widgets')).toBeNull();
+    expect(within(panel).getByText(/collecting data — segments populate/)).toBeInTheDocument();
+  });
+
+  it("empty state shows 'no data yet' without lead-time rows", async () => {
+    mockFetchOk(EMPTY);
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    expect(within(panel).getByText('no data yet')).toBeInTheDocument();
+  });
+
+  it('documents which segments only populate from new merges', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await ltPanel();
+    expect(within(panel).getByText(/first-green and enqueued timestamps\s+only record from new merges/)).toBeInTheDocument();
   });
 });

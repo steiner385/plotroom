@@ -1750,6 +1750,133 @@ describe('Poller ETA accuracy tracking', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #44: lead-time timestamps (first_green_at + enqueued_at on merged_prs)
+// ---------------------------------------------------------------------------
+
+describe('Poller lead-time timestamps (issue #44)', () => {
+  const KEY = 'acme/widgets#8962';
+  const doneDetail = {
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      ...DETAIL_RESPONSE.r0.pr8962, mergeStateStatus: 'CLEAN',
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS',
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [
+          CHECK_DONE,
+          { ...CHECK_DONE, name: 'pr-affected-tests / Affected Unit + Server Tests',
+            completedAt: '2026-06-10T11:58:00Z' },
+        ] } } } }] },
+    } },
+  };
+  const queuedDetail = (over: Record<string, unknown> = {}) => ({
+    r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      ...(doneDetail.r0.pr8962 as object),
+      autoMergeRequest: { mergeMethod: 'SQUASH' },
+      mergeQueueEntry: { position: 1, state: 'QUEUED', enqueuedAt: '2026-06-10T12:02:00Z',
+        headCommit: null },
+      ...over,
+    } },
+  });
+
+  function boxedClient(detailBox: { current: Record<string, unknown> }) {
+    return {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return SWEEP_RESPONSE;
+        if (q.includes('pr8962: pullRequest')) return detailBox.current;
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  it('ci → ready records firstGreenAt ONCE and persists it on merge', async () => {
+    let t = NOW.getTime();
+    const detailBox = { current: DETAIL_RESPONSE as Record<string, unknown> };
+    const p = new Poller({ router: asRouter(boxedClient(detailBox)), history,
+      deploy: noDeploy(), config: CONFIG, now: () => new Date(t) });
+    const internals = p as unknown as { firstGreenAt: Map<string, string> };
+    await p.sweepOnce();
+    await p.detailOnce();                          // ci — nothing recorded yet
+    expect(internals.firstGreenAt.has(KEY)).toBe(false);
+    t += 240_000;
+    const firstGreenIso = new Date(t).toISOString();
+    detailBox.current = doneDetail;
+    await p.detailOnce();                          // ci → ready: record
+    expect(internals.firstGreenAt.get(KEY)).toBe(firstGreenIso);
+    // a new push sends the PR back to ci and green again — first stamp wins
+    t += 60_000;
+    detailBox.current = DETAIL_RESPONSE;
+    await p.detailOnce();                          // ready → ci
+    t += 60_000;
+    detailBox.current = doneDetail;
+    await p.detailOnce();                          // ci → ready (again)
+    expect(internals.firstGreenAt.get(KEY)).toBe(firstGreenIso);
+    // merge: persisted onto the merged_prs row, in-memory entry consumed
+    t += 60_000;
+    detailBox.current = { r0: { nameWithOwner: 'acme/widgets', pr8962: {
+      ...(doneDetail.r0.pr8962 as object), mergedAt: '2026-06-10T12:08:00Z',
+      mergeCommit: { oid: 'squash8962' } } } };
+    await p.detailOnce();
+    const rec = history.listTrackedMerged(7, new Date(t)).find((r) => r.number === 8962)!;
+    expect(rec.firstGreenAt).toBe(firstGreenIso);
+    expect(internals.firstGreenAt.has(KEY)).toBe(false);
+  });
+
+  it('ci → queue (auto-merge armed enqueue racing the poll) also records firstGreenAt', async () => {
+    let t = NOW.getTime();
+    const detailBox = { current: DETAIL_RESPONSE as Record<string, unknown> };
+    const p = new Poller({ router: asRouter(boxedClient(detailBox)), history,
+      deploy: noDeploy(), config: CONFIG, now: () => new Date(t) });
+    const internals = p as unknown as { firstGreenAt: Map<string, string> };
+    await p.sweepOnce();
+    await p.detailOnce();                          // ci
+    t += 120_000;
+    detailBox.current = queuedDetail();
+    await p.detailOnce();                          // ci → queue (never saw ready)
+    expect(internals.firstGreenAt.get(KEY)).toBe(new Date(t).toISOString());
+  });
+
+  it('enqueuedAt is persisted onto merged_prs alongside the queue-wait sample', async () => {
+    let t = NOW.getTime();
+    const detailBox = { current: queuedDetail() as Record<string, unknown> };
+    const p = new Poller({ router: asRouter(boxedClient(detailBox)), history,
+      deploy: noDeploy(), config: CONFIG, now: () => new Date(t) });
+    await p.sweepOnce();
+    await p.detailOnce();                          // queued: enqueuedAt 12:02 captured
+    t += 600_000;
+    detailBox.current = queuedDetail({ mergedAt: '2026-06-10T12:12:00Z',
+      mergeQueueEntry: null, mergeCommit: { oid: 'squash8962' } });
+    await p.detailOnce();                          // merged
+    const rec = history.listTrackedMerged(7, new Date(t)).find((r) => r.number === 8962)!;
+    expect(rec.enqueuedAt).toBe('2026-06-10T12:02:00Z');
+    // the queue-wait sample still records (12:12 − 12:02 = 600s)
+    expect(history.medianQueueWait('acme/widgets')).toBe(600);
+  });
+
+  it('a PR merged with no observed transitions persists nulls (no fabrication)', async () => {
+    const detailBox = { current: {
+      r0: { nameWithOwner: 'acme/widgets', pr8962: {
+        ...(doneDetail.r0.pr8962 as object), mergedAt: '2026-06-10T11:59:00Z',
+        mergeCommit: { oid: 'squash8962' } } },
+    } as Record<string, unknown> };
+    const p = new Poller({ router: asRouter(boxedClient(detailBox)), history,
+      deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();                          // first sight is already merged
+    const rec = history.listTrackedMerged(7, NOW).find((r) => r.number === 8962)!;
+    expect(rec.firstGreenAt).toBeNull();
+    expect(rec.enqueuedAt).toBeNull();
+  });
+
+  it('pruneCaches drops firstGreenAt entries for vanished PRs', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const internals = p as unknown as { firstGreenAt: Map<string, string> };
+    internals.firstGreenAt.set('acme/widgets#9999', '2026-06-10T11:00:00Z');
+    await p.sweepOnce(); // sweep does not contain PR 9999
+    expect(internals.firstGreenAt.has('acme/widgets#9999')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task V1: RepoQueueView payload (groups + waiting)
 // ---------------------------------------------------------------------------
 

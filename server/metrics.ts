@@ -92,6 +92,22 @@ export interface MetricsPayload {
   criticalPath: { repo: string; event: string; endToEndP50Secs: number;
     path: { name: string; durationP50: number; waitP50: number }[];
     offPath: { name: string; slackSecs: number }[] }[];
+  /** Lead-time decomposition + DORA-lite headlines (issue #44): per repo, the
+   *  median seconds spent in each delivery segment over PRs MERGED in the
+   *  window. Segments are computed pairwise — a row contributes to a segment
+   *  only when it has BOTH endpoint timestamps (`n` is per segment; medianSecs
+   *  is null at n=0, never fabricated). Segment order is fixed
+   *  (LEAD_TIME_SEGMENTS): created→first_green → enqueued → merged → qa_live →
+   *  prod_live. first_green_at/enqueued_at only exist on rows merged after the
+   *  poller started recording them (2026-06) — the UI labels thin segments
+   *  'collecting'. `totalP50Secs` = created→prod_live p50 over rows with both
+   *  (the DORA lead-time-for-changes headline). `prodDeploys` counts rows that
+   *  went prod-live IN the window (even when merged before it);
+   *  `deploysPerDay` = prodDeploys / window days (deployment frequency). */
+  leadTime: { repo: string;
+    segments: { id: LeadTimeSegmentId; medianSecs: number | null; n: number }[];
+    totalP50Secs: number | null; totalN: number;
+    prodDeploys: number; deploysPerDay: number }[];
   /** Workflow lint (issue #48, rule 1 — timeout calibration): per repo,
    *  findings from joining each derived job's `timeout-minutes` with its
    *  observed p99 duration (last 50 runs, ≥ LINT_MIN_RUNS samples; max across
@@ -100,6 +116,16 @@ export interface MetricsPayload {
    *  with zero findings are omitted (the UI's empty state reads 'no findings'). */
   lint: { repo: string; findings: LintFinding[] }[];
 }
+
+/** Lead-time segment ids, in pipeline order (issue #44). */
+export const LEAD_TIME_SEGMENTS = [
+  { id: 'toFirstGreen', from: 'createdAt', to: 'firstGreenAt' },
+  { id: 'greenToEnqueued', from: 'firstGreenAt', to: 'enqueuedAt' },
+  { id: 'queue', from: 'enqueuedAt', to: 'mergedAt' },
+  { id: 'qaDeploy', from: 'mergedAt', to: 'qaLiveAt' },
+  { id: 'awaitingProd', from: 'qaLiveAt', to: 'prodLiveAt' },
+] as const;
+export type LeadTimeSegmentId = (typeof LEAD_TIME_SEGMENTS)[number]['id'];
 
 /**
  * Resolve `GET /api/metrics` query params to a (window, bucket) pair.
@@ -337,6 +363,39 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
     };
   });
 
+  // 4b. Lead-time decomposition + DORA-lite headlines (issue #44). Current
+  // window only (no headline deltas). Segment medians run over rows MERGED in
+  // the window; deployment frequency counts prod-live EVENTS in the window
+  // (a manual prod deploy often ships merges older than the window — the read
+  // includes those rows so the count is honest).
+  const pairSecs = (from: string | null, to: string | null): number | null => {
+    if (from == null || to == null) return null;
+    const secs = (Date.parse(to) - Date.parse(from)) / 1000;
+    // negative pairs are clock artifacts (e.g. backfilled created_at after a
+    // re-open) — skip rather than poison the median; NaN = unparseable
+    return Number.isFinite(secs) && secs >= 0 ? secs : null;
+  };
+  const ltRows = keep(history.leadTimeRowsSince(since));
+  const leadTime = [...groupBy(ltRows, (r) => r.repo)]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([repo, rows]) => {
+      const mergedRows = rows.filter((r) => r.mergedAt >= since);
+      const segments = LEAD_TIME_SEGMENTS.map(({ id, from, to }) => {
+        const vals = mergedRows.map((r) => pairSecs(r[from], r[to]))
+          .filter((v): v is number => v != null);
+        return { id, medianSecs: vals.length ? p(vals, 0.5) : null, n: vals.length };
+      });
+      const totals = mergedRows.map((r) => pairSecs(r.createdAt, r.prodLiveAt))
+        .filter((v): v is number => v != null);
+      const prodDeploys = rows.filter((r) => r.prodLiveAt != null && r.prodLiveAt >= since).length;
+      return {
+        repo, segments,
+        totalP50Secs: totals.length ? p(totals, 0.5) : null, totalN: totals.length,
+        prodDeploys, deploysPerDay: prodDeploys / WINDOW_DAYS[window],
+      };
+    })
+    .filter((r) => r.prodDeploys > 0 || r.segments.some((s) => s.n > 0));
+
   // 5. Trends: state samples aggregated per bucket — the LAST sample in each
   // bucket is the bucket's closing value (rows arrive time-ordered per repo).
   const trends = [...groupBy(keep(history.stateSamplesSince(since)), (r) => r.repo)]
@@ -495,6 +554,6 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
     if (findings.length > 0) lint.push({ repo, findings });
   }
 
-  return { window, bucket, runnerWaits, queue, slowestJobs, velocity, trends, calibration,
-    flakiness, trainKillers, criticalPath, lint };
+  return { window, bucket, runnerWaits, queue, slowestJobs, velocity, leadTime, trends,
+    calibration, flakiness, trainKillers, criticalPath, lint };
 }

@@ -418,6 +418,11 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
   font-size: 11px; color: var(--muted); }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .legend-chip { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+/* Lead-time decomposition (issue #44): horizontal stacked-median bar */
+.leadtime-bar { display: flex; height: 26px; border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border); margin: 6px 0 2px; }
+.leadtime-seg { min-width: 3px; }
+.leadtime-collecting { color: var(--muted); font-style: italic; }
 
 .metric-table { border-collapse: collapse; font-size: 12px; width: 100%; }
 .metric-table th {

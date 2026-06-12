@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { HeadlineStat, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
+import type { HeadlineStat, LeadTimeSegmentId, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
 import {
   AreaSeries, BandSeries, MultiLine, ScatterPlot, SignedLine,
   type BandPoint, type ChartPoint, type LineSeries,
@@ -113,6 +113,76 @@ const TREND_SERIES = [
   { key: 'failed', color: 'var(--fail)' },
 ] as const;
 
+/** Lead-time segment display metadata (issue #44), pipeline order — mirrors
+ *  the server's LEAD_TIME_SEGMENTS ids. */
+const LEAD_TIME_SEGMENTS: { id: LeadTimeSegmentId; label: string; color: string }[] = [
+  { id: 'toFirstGreen', label: 'to first green', color: 'var(--accent)' },
+  { id: 'greenToEnqueued', label: 'green → enqueued', color: 'var(--amber)' },
+  { id: 'queue', label: 'queue', color: 'var(--purple)' },
+  { id: 'qaDeploy', label: 'QA deploy', color: 'var(--done)' },
+  { id: 'awaitingProd', label: 'awaiting prod', color: 'var(--fail)' },
+];
+
+/** Segments need at least this many merged-PR samples before the median is
+ *  trusted; below it the legend reads 'collecting'. */
+const LEAD_TIME_MIN_N = 5;
+
+/**
+ * Lead-time decomposition for one repo (issue #44): DORA-lite headline tiles
+ * plus one horizontal stacked bar whose segment widths are proportional to the
+ * per-stage medians (hover = value + sample count). Segments without a single
+ * complete timestamp pair are absent from the bar but listed in the legend.
+ */
+function LeadTimeRepo({ lt }: { lt: MetricsPayload['leadTime'][number] }) {
+  const meta = new Map(LEAD_TIME_SEGMENTS.map((s) => [s.id, s]));
+  const present = lt.segments.filter((s) => s.medianSecs != null);
+  const total = present.reduce((sum, s) => sum + s.medianSecs!, 0);
+  return (
+    <div className="metric-repo">
+      <h3>{lt.repo}</h3>
+      <div className="metric-row">
+        <MetricStat label="deploy frequency (prod)"
+          value={`${(Math.round(lt.deploysPerDay * 10) / 10).toString()}/day`}
+          delta={`${lt.prodDeploys} prod deploy${lt.prodDeploys === 1 ? '' : 's'} in window`} />
+        <MetricStat label="lead time created → prod (p50)"
+          value={lt.totalP50Secs != null ? formatDur(lt.totalP50Secs) : '–'}
+          delta={lt.totalN > 0 ? `n=${lt.totalN}` : 'no PR has both timestamps yet'} />
+      </div>
+      {present.length === 0 || total === 0 ? (
+        <div className="chart-placeholder">collecting data — segments populate as merged PRs pick up timestamps</div>
+      ) : (
+        <div className="leadtime-bar" data-testid={`leadtime-bar-${lt.repo}`}>
+          {present.map((s) => (
+            <div key={s.id} className="leadtime-seg"
+              style={{ width: `${(s.medianSecs! / total) * 100}%`, background: meta.get(s.id)!.color }}
+              title={`${meta.get(s.id)!.label}: ${formatDur(s.medianSecs!)} (n=${s.n})`} />
+          ))}
+        </div>
+      )}
+      <div className="chart-legend">
+        {lt.segments.map((s) => {
+          const m = meta.get(s.id)!;
+          return (
+            <span key={s.id} className="legend-item">
+              <i className="legend-chip" style={{ background: m.color }} aria-hidden="true" />
+              {m.label}
+              {s.medianSecs != null && <> {formatDur(s.medianSecs)} (n={s.n})</>}
+              {s.n < LEAD_TIME_MIN_N && <em className="leadtime-collecting"> collecting</em>}
+            </span>
+          );
+        })}
+      </div>
+      <p className="metric-note">
+        bar = median time per stage over PRs merged in the window (each stage
+        counts only PRs with both endpoint timestamps). merged → QA and QA →
+        prod use historical deploy data; first-green and enqueued timestamps
+        only record from new merges onward — those segments read
+        &lsquo;collecting&rsquo; until n ≥ {LEAD_TIME_MIN_N}
+      </p>
+    </div>
+  );
+}
+
 export function MetricsView({ now }: {
   /** Injectable clock (tests) — the window axis is derived from it. */
   now?: () => Date;
@@ -216,10 +286,16 @@ export function MetricsView({ now }: {
     cpByRepo.set(cp.repo, [...(cpByRepo.get(cp.repo) ?? []), cp]);
   }
   const lintRepos = payload.lint.filter((l) => l.findings.length);
+  // ?? []: tolerate a pre-upgrade server payload while the SPA is newer
+  const leadTimeRepos = payload.leadTime ?? [];
 
   return (
     <div className="metrics">
       {controls}
+
+      <Panel title="Lead time" empty={leadTimeRepos.length === 0}>
+        {leadTimeRepos.map((lt) => <LeadTimeRepo key={lt.repo} lt={lt} />)}
+      </Panel>
 
       <Panel title="Trends" empty={trendRepos.length === 0}>
         {trendRepos.map((t) => {

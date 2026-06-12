@@ -212,6 +212,10 @@ export interface ConfigPutError {
 export type MetricsWindow = '24h' | '3d' | '7d' | '14d' | '30d';
 export type MetricsBucket = 'hour' | 'day';
 
+/** Mirror of server LEAD_TIME_SEGMENTS ids (issue #44), pipeline order. */
+export type LeadTimeSegmentId =
+  'toFirstGreen' | 'greenToEnqueued' | 'queue' | 'qaDeploy' | 'awaitingProd';
+
 export interface HeadlineStat { value: number | null; prev: number | null }
 
 export interface MetricsPayload {
@@ -258,6 +262,16 @@ export interface MetricsPayload {
   criticalPath: { repo: string; event: string; endToEndP50Secs: number;
     path: { name: string; durationP50: number; waitP50: number }[];
     offPath: { name: string; slackSecs: number }[] }[];
+  /** Lead-time decomposition + DORA-lite headlines (issue #44). Segment
+   *  medians (seconds) over PRs MERGED in the window, computed pairwise — a
+   *  row counts toward a segment only when it has both endpoint timestamps
+   *  (medianSecs null at n=0; first_green/enqueued only populate from merges
+   *  after 2026-06, so those segments start 'collecting'). totalP50Secs =
+   *  created→prod p50; deploysPerDay = prod-live events in window / days. */
+  leadTime: { repo: string;
+    segments: { id: LeadTimeSegmentId; medianSecs: number | null; n: number }[];
+    totalP50Secs: number | null; totalN: number;
+    prodDeploys: number; deploysPerDay: number }[];
   /** Workflow lint (issue #48 rule 1 — timeout calibration). observed /
    *  configured are seconds; configured null = timeout-minutes unset (360m
    *  GitHub default). Repos with zero findings are omitted. */

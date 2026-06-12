@@ -294,8 +294,8 @@ describe('computeMetrics: empty history', () => {
   it('returns the full payload shape with empty sections', () => {
     expect(computeMetrics(h, '3d', 'hour', NOW)).toEqual({
       window: '3d', bucket: 'hour',
-      runnerWaits: [], queue: [], slowestJobs: [], velocity: [], trends: [], calibration: [],
-      flakiness: [], trainKillers: [], criticalPath: [], lint: [],
+      runnerWaits: [], queue: [], slowestJobs: [], velocity: [], leadTime: [], trends: [],
+      calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [],
     });
   });
 });
@@ -382,9 +382,113 @@ describe('computeMetrics: exclude filter (repo toggles)', () => {
       ...m.velocity.map((r) => r.repo),
       ...m.trends.map((r) => r.repo),
       ...m.calibration.map((r) => r.repo),
+      ...m.leadTime.map((r) => r.repo),
     ];
     expect(repos).toContain('acme/kept');
     expect(repos).not.toContain('acme/dropped');
+  });
+});
+
+describe('computeMetrics: lead-time decomposition (issue #44)', () => {
+  /** Full-pipeline row: created 09:00 → green 10:00 → enqueued 11:00 →
+   *  merged 11:20 → qa 11:30 → prod 18:00 (same day, inside the 24h window).
+   *  Pass null in `over` to drop a timestamp. */
+  type Over = Partial<Record<'createdAt' | 'firstGreenAt' | 'enqueuedAt'
+    | 'qaLiveAt' | 'prodLiveAt', string | null>>;
+  const fullRow = (number: number, over: Over = {}) => {
+    h.upsertMergedPr({ repo: REPO, number, title: 't', url: 'u',
+      mergedAt: '2026-06-11T11:20:00Z', mergeCommitSha: 'sha',
+      createdAt: over.createdAt !== undefined ? over.createdAt : '2026-06-11T09:00:00Z',
+      firstGreenAt: over.firstGreenAt !== undefined ? over.firstGreenAt : '2026-06-11T10:00:00Z',
+      enqueuedAt: over.enqueuedAt !== undefined ? over.enqueuedAt : '2026-06-11T11:00:00Z' });
+    const qa = over.qaLiveAt !== undefined ? over.qaLiveAt : '2026-06-11T11:30:00Z';
+    if (qa != null) h.markEnvLive(REPO, number, 'qa', qa);
+    const prod = over.prodLiveAt !== undefined ? over.prodLiveAt : '2026-06-11T18:00:00Z';
+    if (prod != null) h.markEnvLive(REPO, number, 'prod', prod);
+  };
+
+  const seg = (m: ReturnType<typeof computeMetrics>, id: string) =>
+    m.leadTime.find((r) => r.repo === REPO)!.segments.find((s) => s.id === id)!;
+
+  it('computes all five segment medians + total over full-pipeline rows', () => {
+    fullRow(1);
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    expect(seg(m, 'toFirstGreen')).toEqual({ id: 'toFirstGreen', medianSecs: 3600, n: 1 });
+    expect(seg(m, 'greenToEnqueued')).toEqual({ id: 'greenToEnqueued', medianSecs: 3600, n: 1 });
+    expect(seg(m, 'queue')).toEqual({ id: 'queue', medianSecs: 1200, n: 1 });
+    expect(seg(m, 'qaDeploy')).toEqual({ id: 'qaDeploy', medianSecs: 600, n: 1 });
+    expect(seg(m, 'awaitingProd')).toEqual({ id: 'awaitingProd', medianSecs: 6.5 * 3600, n: 1 });
+    const repo = m.leadTime.find((r) => r.repo === REPO)!;
+    expect(repo.totalP50Secs).toBe(9 * 3600); // created 09:00 → prod 18:00
+    expect(repo.totalN).toBe(1);
+    expect(repo.prodDeploys).toBe(1);
+    expect(repo.deploysPerDay).toBe(1); // 1 prod-live event / 1-day window
+    // segment order is the fixed pipeline order
+    expect(repo.segments.map((s) => s.id)).toEqual(
+      ['toFirstGreen', 'greenToEnqueued', 'queue', 'qaDeploy', 'awaitingProd']);
+  });
+
+  it('missing pairs: a row contributes only to segments whose BOTH ends exist', () => {
+    // historical row: merged→qa→prod known, first_green/enqueued null
+    h.upsertMergedPr({ repo: REPO, number: 2, title: 't', url: 'u',
+      mergedAt: '2026-06-11T11:20:00Z', mergeCommitSha: 'sha',
+      createdAt: '2026-06-11T09:00:00Z' });
+    h.markEnvLive(REPO, 2, 'qa', '2026-06-11T11:30:00Z');
+    h.markEnvLive(REPO, 2, 'prod', '2026-06-11T18:00:00Z');
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    expect(seg(m, 'toFirstGreen')).toEqual({ id: 'toFirstGreen', medianSecs: null, n: 0 });
+    expect(seg(m, 'greenToEnqueued')).toEqual({ id: 'greenToEnqueued', medianSecs: null, n: 0 });
+    expect(seg(m, 'queue')).toEqual({ id: 'queue', medianSecs: null, n: 0 });
+    expect(seg(m, 'qaDeploy')).toEqual({ id: 'qaDeploy', medianSecs: 600, n: 1 });
+    expect(seg(m, 'awaitingProd').n).toBe(1);
+    expect(m.leadTime.find((r) => r.repo === REPO)!.totalP50Secs).toBe(9 * 3600);
+  });
+
+  it('per-segment medians over multiple rows report per-segment n', () => {
+    fullRow(1);
+    fullRow(3, { firstGreenAt: null }); // no green → toFirstGreen/greenToEnqueued skip this row
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    expect(seg(m, 'toFirstGreen').n).toBe(1);
+    expect(seg(m, 'queue').n).toBe(2);
+    expect(seg(m, 'queue').medianSecs).toBe(1200);
+  });
+
+  it('rows merged before the window are excluded from segments but their in-window prod-live still counts toward deploysPerDay', () => {
+    h.upsertMergedPr({ repo: REPO, number: 4, title: 't', url: 'u',
+      mergedAt: '2026-06-01T12:00:00Z', mergeCommitSha: 'sha',
+      createdAt: '2026-06-01T09:00:00Z' });
+    h.markEnvLive(REPO, 4, 'qa', '2026-06-01T12:10:00Z');
+    h.markEnvLive(REPO, 4, 'prod', '2026-06-11T10:00:00Z'); // prod-live inside the 24h window
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    const repo = m.leadTime.find((r) => r.repo === REPO)!;
+    expect(repo.segments.every((s) => s.n === 0)).toBe(true); // merged outside window
+    expect(repo.prodDeploys).toBe(1);
+    expect(repo.deploysPerDay).toBe(1);
+    expect(repo.totalN).toBe(0);
+  });
+
+  it('rows not yet prod-live do not count toward deploysPerDay', () => {
+    fullRow(1);                                       // prod-live → counts
+    fullRow(5, { qaLiveAt: '2026-06-11T11:30:00Z', prodLiveAt: null }); // awaiting prod
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    const repo = m.leadTime.find((r) => r.repo === REPO)!;
+    expect(repo.prodDeploys).toBe(1);
+    expect(seg(m, 'qaDeploy').n).toBe(2);             // both rows have merged→qa
+    expect(seg(m, 'awaitingProd').n).toBe(1);         // only the shipped one
+    expect(repo.totalN).toBe(1);
+  });
+
+  it('negative pairs (clock artifacts) are skipped, not fabricated', () => {
+    fullRow(1, { firstGreenAt: '2026-06-11T08:00:00Z' }); // green before created → skip
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    expect(seg(m, 'toFirstGreen')).toEqual({ id: 'toFirstGreen', medianSecs: null, n: 0 });
+    expect(seg(m, 'greenToEnqueued').n).toBe(1); // green → enqueued is still a valid pair
+  });
+
+  it('repos with no in-window rows are omitted entirely', () => {
+    h.upsertMergedPr({ repo: 'acme/stale', number: 1, title: 't', url: 'u',
+      mergedAt: '2026-06-01T12:00:00Z', mergeCommitSha: null });
+    expect(computeMetrics(h, '24h', 'hour', NOW).leadTime).toEqual([]);
   });
 });
 

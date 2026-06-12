@@ -144,6 +144,61 @@ describe('merged PRs', () => {
   });
 });
 
+describe('lead-time timestamps on merged_prs (issue #44)', () => {
+  it('persists first_green_at + enqueued_at through upsert and reads them back', () => {
+    h.upsertMergedPr({ repo: REPO, number: 100, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha', createdAt: '2026-06-10T09:00:00Z',
+      firstGreenAt: '2026-06-10T10:00:00Z', enqueuedAt: '2026-06-10T11:30:00Z' });
+    const rec = h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0];
+    expect(rec.firstGreenAt).toBe('2026-06-10T10:00:00Z');
+    expect(rec.enqueuedAt).toBe('2026-06-10T11:30:00Z');
+  });
+
+  it('omitted fields read back null (old callers / unobserved transitions)', () => {
+    h.upsertMergedPr({ repo: REPO, number: 101, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: null });
+    const rec = h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0];
+    expect(rec.firstGreenAt).toBeNull();
+    expect(rec.enqueuedAt).toBeNull();
+  });
+
+  it('re-upsert with nulls keeps previously persisted values (COALESCE, like merge_commit_sha)', () => {
+    h.upsertMergedPr({ repo: REPO, number: 102, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: null,
+      firstGreenAt: '2026-06-10T10:00:00Z', enqueuedAt: '2026-06-10T11:30:00Z' });
+    // overlapping merged sweep re-ingests the PR after the in-memory maps were consumed
+    h.upsertMergedPr({ repo: REPO, number: 102, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: null });
+    const rec = h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0];
+    expect(rec.firstGreenAt).toBe('2026-06-10T10:00:00Z');
+    expect(rec.enqueuedAt).toBe('2026-06-10T11:30:00Z');
+  });
+
+  it('leadTimeRowsSince: rows merged in-window OR prod-live in-window', () => {
+    // merged + prod-live in window
+    h.upsertMergedPr({ repo: REPO, number: 1, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'a', createdAt: '2026-06-10T09:00:00Z',
+      firstGreenAt: '2026-06-10T10:00:00Z', enqueuedAt: '2026-06-10T11:00:00Z' });
+    h.markEnvLive(REPO, 1, 'qa', '2026-06-10T12:10:00Z');
+    h.markEnvLive(REPO, 1, 'prod', '2026-06-10T18:00:00Z');
+    // merged BEFORE the window but prod-live inside it (manual prod deploy)
+    h.upsertMergedPr({ repo: REPO, number: 2, title: 't', url: 'u',
+      mergedAt: '2026-06-01T12:00:00Z', mergeCommitSha: 'b' });
+    h.markEnvLive(REPO, 2, 'prod', '2026-06-10T18:00:00Z');
+    // merged before the window, never prod-live — excluded
+    h.upsertMergedPr({ repo: REPO, number: 3, title: 't', url: 'u',
+      mergedAt: '2026-06-01T11:00:00Z', mergeCommitSha: 'c' });
+    const rows = h.leadTimeRowsSince('2026-06-10T00:00:00Z');
+    expect(rows.map((r) => r.mergedAt).sort()).toEqual(
+      ['2026-06-01T12:00:00Z', '2026-06-10T12:00:00Z']);
+    const full = rows.find((r) => r.mergedAt === '2026-06-10T12:00:00Z')!;
+    expect(full).toEqual({ repo: REPO, createdAt: '2026-06-10T09:00:00Z',
+      firstGreenAt: '2026-06-10T10:00:00Z', enqueuedAt: '2026-06-10T11:00:00Z',
+      mergedAt: '2026-06-10T12:00:00Z', qaLiveAt: '2026-06-10T12:10:00Z',
+      prodLiveAt: '2026-06-10T18:00:00Z' });
+  });
+});
+
 describe('samples (raw last-20 SUCCESS durations)', () => {
   it('returns SUCCESS duration values, scoped by event, ignoring failures', () => {
     h.recordCheckDuration(REPO, 'CI', 'pull_request', '2026-06-10T10:00:00Z', '2026-06-10T10:02:00Z', 'SUCCESS'); // 120
@@ -474,11 +529,16 @@ describe('merged_prs created_at migration', () => {
       .find((r) => r.number === 1)!;
     expect(old.title).toBe('old row');
     expect(old.createdAt).toBeNull();
+    expect(old.firstGreenAt).toBeNull(); // issue #44 columns migrate the same way
+    expect(old.enqueuedAt).toBeNull();
     store.upsertMergedPr({ repo: REPO, number: 2, title: 'new row', url: 'u',
-      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'def', createdAt: '2026-06-09T12:00:00Z' });
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'def', createdAt: '2026-06-09T12:00:00Z',
+      firstGreenAt: '2026-06-09T13:00:00Z', enqueuedAt: '2026-06-10T11:00:00Z' });
     const fresh = store.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))
       .find((r) => r.number === 2)!;
     expect(fresh.createdAt).toBe('2026-06-09T12:00:00Z');
+    expect(fresh.firstGreenAt).toBe('2026-06-09T13:00:00Z');
+    expect(fresh.enqueuedAt).toBe('2026-06-10T11:00:00Z');
     store.close();
   });
 

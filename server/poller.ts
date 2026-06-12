@@ -288,6 +288,7 @@ export class Poller extends EventEmitter {
   private groupChecks = new Map<string, CheckRun[]>();    // group head oid → checks
   private recordedGroups = new Set<string>();             // oids whose completed run was recorded
   private queueEnqueuedAt = new Map<string, string>();    // PR key → enqueuedAt while queued
+  private firstGreenAt = new Map<string, string>();       // PR key → first ci→green transition (#44)
   private queueHealthSince = new Map<string, { state: QueueHealthState; since: string }>(); // repo → current health state + entry time (#39)
   private stageTracker = new Map<string, StageTrack>();   // PR key → current stage + first ETA
   private repoFileConfigs = new Map<string, RepoFileConfig>(); // repo → parsed .pr-dashboard.yml
@@ -449,11 +450,12 @@ export class Poller extends EventEmitter {
     if (config.exclude.includes(repo)) return;
     const key = `${repo}#${node.number}`;
     if (node.mergedAt) {
+      const leadTime = this.takeLeadTimeStamps(key); // before recordQueueWaitOnMerge consumes enqueuedAt
       this.recordQueueWaitOnMerge(key, repo, node.mergedAt);
       this.recordEtaAccuracyOnMerge(key, repo, node.mergedAt);
       history.upsertMergedPr({ repo, number: node.number, title: node.title, url: node.url,
         mergedAt: node.mergedAt, mergeCommitSha: node.mergeCommit?.oid ?? null,
-        createdAt: node.createdAt ?? null });
+        createdAt: node.createdAt ?? null, ...leadTime });
       this.prs.delete(key); // no longer an open PR snapshot
     } else {
       seenOpen.add(key);
@@ -542,6 +544,9 @@ export class Poller extends EventEmitter {
     }
     for (const key of this.queueEnqueuedAt.keys()) {
       if (!openKeys.has(key)) this.queueEnqueuedAt.delete(key);
+    }
+    for (const key of this.firstGreenAt.keys()) {
+      if (!openKeys.has(key)) this.firstGreenAt.delete(key);
     }
     // notifier debounce state lives per PR key — same lifecycle as `stages`
     this.deps.notifier?.prune(new Set([...openKeys, ...tracked]));
@@ -648,11 +653,12 @@ export class Poller extends EventEmitter {
         const key = `${repo}#${snap.number}`;
         this.prs.set(key, snap);
         if (snap.mergedAt) {
+          const leadTime = this.takeLeadTimeStamps(key); // before recordQueueWaitOnMerge consumes enqueuedAt
           this.recordQueueWaitOnMerge(key, repo, snap.mergedAt);
           this.recordEtaAccuracyOnMerge(key, repo, snap.mergedAt);
           history.upsertMergedPr({ repo, number: snap.number, title: snap.title, url: snap.url,
             mergedAt: snap.mergedAt, mergeCommitSha: snap.mergeCommitSha,
-            createdAt: snap.createdAt });
+            createdAt: snap.createdAt, ...leadTime });
           this.prs.delete(key);
         } else if (snap.queue) {
           // remember enqueuedAt while the PR sits in the queue — the merged detail
@@ -1604,6 +1610,15 @@ export class Poller extends EventEmitter {
     });
     if (!rawStage) return null;
     const stage = this.calibrateStage(pr.repo, rawStage);
+    // Lead time (issue #44): the PR "first went green" when it leaves ci for
+    // ready (armed|idle) — or straight into the queue, the common path for
+    // auto-merge-armed PRs whose enqueue races the poll cadence. Recorded once
+    // per PR (later ci round-trips — new pushes — don't move it); persisted
+    // onto merged_prs at merge time.
+    if (prevStage?.stage === 'ci' && (stage.stage === 'ready' || stage.stage === 'queue')
+        && !this.firstGreenAt.has(key)) {
+      this.firstGreenAt.set(key, now.toISOString());
+    }
     this.stages.set(key, stage);
     // Queued PRs: the merge-group build's checks (already fetched into
     // groupChecks by queueOnce). Covered members whose own snapshot carries no
@@ -1848,6 +1863,18 @@ export class Poller extends EventEmitter {
     if (prev.firstEta == null || !ETA_TRACKED_STAGES.has(prev.stageId)) return;
     this.deps.history.recordEtaAccuracy(repo, prev.stageId, prev.firstEta,
       (Date.parse(mergedAt) - prev.enteredAt) / 1000, mergedAt);
+  }
+
+  /**
+   * Lead-time timestamps to persist onto the merged_prs row (issue #44),
+   * captured BEFORE recordQueueWaitOnMerge consumes queueEnqueuedAt. The
+   * firstGreenAt entry is consumed here (the upsert's COALESCE keeps the first
+   * persisted value when overlapping merged sweeps re-ingest the same PR).
+   */
+  private takeLeadTimeStamps(key: string): { firstGreenAt: string | null; enqueuedAt: string | null } {
+    const firstGreenAt = this.firstGreenAt.get(key) ?? null;
+    this.firstGreenAt.delete(key);
+    return { firstGreenAt, enqueuedAt: this.queueEnqueuedAt.get(key) ?? null };
   }
 
   /** Record enqueue→merge wall-clock wait if this PR was last seen in the queue. */

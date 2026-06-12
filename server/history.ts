@@ -7,10 +7,27 @@ export interface MergedPrInput {
   mergedAt: string; mergeCommitSha: string | null;
   /** PR creation time (lifespan metric). Optional: pre-migration callers/rows lack it. */
   createdAt?: string | null;
+  /** Lead-time decomposition (issue #44): when the PR first went green
+   *  (ci → ready/queue transition observed by the poller). Optional: rows
+   *  merged before the feature shipped, and PRs whose transition was never
+   *  observed (merged between polls, process restart mid-CI), lack it. */
+  firstGreenAt?: string | null;
+  /** Lead-time decomposition (issue #44): the merge-queue enqueuedAt the
+   *  poller last observed while the PR sat in the queue. Optional like
+   *  firstGreenAt; null for PRs merged outside the queue. */
+  enqueuedAt?: string | null;
 }
 export interface MergedPrRecord extends MergedPrInput {
   createdAt: string | null;
+  firstGreenAt: string | null; enqueuedAt: string | null;
   qaLiveAt: string | null; prodLiveAt: string | null;
+}
+
+/** One merged_prs row projected for the lead-time decomposition (issue #44). */
+export interface LeadTimeRow {
+  repo: string;
+  createdAt: string | null; firstGreenAt: string | null; enqueuedAt: string | null;
+  mergedAt: string; qaLiveAt: string | null; prodLiveAt: string | null;
 }
 
 /** Per-repo dashboard-state counts captured by the poller (metrics trends panel). */
@@ -127,6 +144,8 @@ export class HistoryStore {
   private readonly stmtSelectGroupRunsSince: Database.Statement;
   private readonly stmtSelectMergedSince: Database.Statement;
   private readonly stmtSelectMergedTimestamps: Database.Statement;
+  // Lead-time decomposition (issue #44)
+  private readonly stmtSelectLeadTimeRows: Database.Statement;
   // Flake radar (#37) + train-killer leaderboard (#38)
   private readonly stmtSelectFlakeRows: Database.Statement;
   private readonly stmtInsertGroupFailure: Database.Statement;
@@ -149,6 +168,7 @@ export class HistoryStore {
         repo TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
         merged_at TEXT NOT NULL, merge_commit_sha TEXT,
         qa_live_at TEXT, prod_live_at TEXT, created_at TEXT,
+        first_green_at TEXT, enqueued_at TEXT,
         PRIMARY KEY (repo, number)
       );
       CREATE TABLE IF NOT EXISTS deploy_gaps (
@@ -197,6 +217,11 @@ export class HistoryStore {
     // the column from CREATE TABLE above; pre-existing DBs get it from this ALTER
     // (duplicate-column tolerated, everything else rethrown).
     addColumnIfMissing(this.db, 'merged_prs', 'created_at TEXT');
+    // Migration (issue #44): merged_prs gains first_green_at + enqueued_at —
+    // the lead-time decomposition's two new waypoints. Old rows stay null
+    // (segments are computed per-pair over rows that have both ends).
+    addColumnIfMissing(this.db, 'merged_prs', 'first_green_at TEXT');
+    addColumnIfMissing(this.db, 'merged_prs', 'enqueued_at TEXT');
     // Migration (issue #34): check_durations gains head_sha + run_attempt —
     // shared plumbing for flake radar / spot-reclaim ledger / attempt
     // waterfalls. Both nullable; the UNIQUE constraint is unchanged.
@@ -224,11 +249,14 @@ export class HistoryStore {
        WHERE repo=? AND event=? AND conclusion='SUCCESS' AND completed_at >= ?`
     );
     this.stmtUpsertPr = this.db.prepare(
-      `INSERT INTO merged_prs (repo, number, title, url, merged_at, merge_commit_sha, created_at)
-       VALUES (?,?,?,?,?,?,?)
+      `INSERT INTO merged_prs (repo, number, title, url, merged_at, merge_commit_sha, created_at,
+         first_green_at, enqueued_at)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT(repo, number) DO UPDATE SET title=excluded.title,
          merge_commit_sha=COALESCE(excluded.merge_commit_sha, merge_commit_sha),
-         created_at=COALESCE(excluded.created_at, created_at)`
+         created_at=COALESCE(excluded.created_at, created_at),
+         first_green_at=COALESCE(excluded.first_green_at, first_green_at),
+         enqueued_at=COALESCE(excluded.enqueued_at, enqueued_at)`
     );
     // Two separate statements — SQLite prepared statements cannot switch column names dynamically.
     this.stmtMarkQaLive = this.db.prepare(
@@ -338,6 +366,15 @@ export class HistoryStore {
     this.stmtSelectMergedTimestamps = this.db.prepare(
       'SELECT merged_at FROM merged_prs WHERE repo=? AND merged_at >= ? ORDER BY merged_at'
     );
+    // Lead-time decomposition (issue #44): rows merged in-window (segment
+    // medians) PLUS rows that went prod-live in-window even if merged earlier
+    // (deployment frequency counts prod-live EVENTS, and manual prod deploys
+    // often ship merges older than the window).
+    this.stmtSelectLeadTimeRows = this.db.prepare(
+      `SELECT repo, created_at, first_green_at, enqueued_at, merged_at, qa_live_at, prod_live_at
+       FROM merged_prs WHERE merged_at >= ? OR (prod_live_at IS NOT NULL AND prod_live_at >= ?)
+       ORDER BY repo, merged_at`
+    );
     // Flake detection (#37) needs every conclusion (not just SUCCESS) plus the
     // sha/attempt identity; rows without head_sha (pre-#34) can't participate.
     this.stmtSelectFlakeRows = this.db.prepare(
@@ -404,7 +441,7 @@ export class HistoryStore {
 
   upsertMergedPr(pr: MergedPrInput): void {
     this.stmtUpsertPr.run(pr.repo, pr.number, pr.title, pr.url, pr.mergedAt, pr.mergeCommitSha,
-      pr.createdAt ?? null);
+      pr.createdAt ?? null, pr.firstGreenAt ?? null, pr.enqueuedAt ?? null);
   }
 
   markEnvLive(repo: string, number: number, env: 'qa' | 'prod', at: string): void {
@@ -431,6 +468,8 @@ export class HistoryStore {
       url: r.url as string, mergedAt: r.merged_at as string,
       mergeCommitSha: (r.merge_commit_sha as string) ?? null,
       createdAt: (r.created_at as string) ?? null,
+      firstGreenAt: (r.first_green_at as string) ?? null,
+      enqueuedAt: (r.enqueued_at as string) ?? null,
       qaLiveAt: (r.qa_live_at as string) ?? null, prodLiveAt: (r.prod_live_at as string) ?? null,
     }));
   }
@@ -733,6 +772,23 @@ export class HistoryStore {
     const rows = this.stmtSelectMergedSince.all(since) as Record<string, unknown>[];
     return rows.map((r) => ({ repo: r.repo as string, mergedAt: r.merged_at as string,
       createdAt: (r.created_at as string) ?? null, qaLiveAt: (r.qa_live_at as string) ?? null }));
+  }
+
+  /** Lead-time decomposition rows (issue #44): merged_prs rows merged at/after
+   *  `since` OR prod-live at/after `since` (deploy-frequency rows can be merged
+   *  before the window). Ordered repo → merged_at; bucketing/segmenting happens
+   *  in metrics. */
+  leadTimeRowsSince(since: string): LeadTimeRow[] {
+    const rows = this.stmtSelectLeadTimeRows.all(since, since) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      repo: r.repo as string,
+      createdAt: (r.created_at as string) ?? null,
+      firstGreenAt: (r.first_green_at as string) ?? null,
+      enqueuedAt: (r.enqueued_at as string) ?? null,
+      mergedAt: r.merged_at as string,
+      qaLiveAt: (r.qa_live_at as string) ?? null,
+      prodLiveAt: (r.prod_live_at as string) ?? null,
+    }));
   }
 
   /** Every repo that has left any trace in history (durations, merged PRs,
