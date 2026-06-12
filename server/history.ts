@@ -17,6 +17,11 @@ export interface MergedPrRecord extends MergedPrInput {
 export interface StateSampleCounts { open: number; ci: number; queue: number; failed: number; }
 export interface StateSampleRow extends StateSampleCounts { repo: string; at: string; }
 
+/** One ETA-accuracy sample (predicted first stage ETA vs actual stage duration). */
+export interface EtaAccuracyRow {
+  repo: string; stage: string; predictedSecs: number; actualSecs: number; at: string;
+}
+
 /**
  * `ALTER TABLE … ADD COLUMN` that tolerates exactly one failure mode: the
  * column already existing (idempotent re-open of a migrated DB). Any other
@@ -59,6 +64,8 @@ export class HistoryStore {
   private readonly stmtSelectRunnerWaitsByEvent: Database.Statement;
   private readonly stmtInsertEtaAccuracy: Database.Statement;
   private readonly stmtSelectEtaAccuracy: Database.Statement;
+  private readonly stmtSelectEtaAccuracySince: Database.Statement;
+  private readonly stmtSelectEtaAccuracyRecent: Database.Statement;
   private readonly stmtGetMeta: Database.Statement;
   private readonly stmtSetMeta: Database.Statement;
   private readonly stmtDeleteMeta: Database.Statement;
@@ -121,6 +128,7 @@ export class HistoryStore {
       -- idx_runner_waits are prefixed by repo+name+event and can't serve them.
       CREATE INDEX IF NOT EXISTS idx_durations_completed ON check_durations(completed_at);
       CREATE INDEX IF NOT EXISTS idx_runner_waits_started ON runner_waits(started_at);
+      CREATE INDEX IF NOT EXISTS idx_eta_accuracy_observed ON eta_accuracy(observed_at);
     `);
 
     // Migration: merged_prs gains created_at (PR lifespan metric). Fresh DBs get
@@ -192,6 +200,16 @@ export class HistoryStore {
     );
     this.stmtSelectEtaAccuracy = this.db.prepare(
       'SELECT predicted_secs, actual_secs FROM eta_accuracy WHERE repo=? AND stage=? ORDER BY rowid DESC LIMIT 20'
+    );
+    this.stmtSelectEtaAccuracySince = this.db.prepare(
+      `SELECT repo, stage, predicted_secs, actual_secs, observed_at AS at
+       FROM eta_accuracy WHERE observed_at >= ? ORDER BY repo, stage, observed_at`
+    );
+    // predicted_secs > 0: predicted=0 rows are recordable but carry no usable
+    // actual/predicted ratio (division by zero) — they don't count toward n.
+    this.stmtSelectEtaAccuracyRecent = this.db.prepare(
+      `SELECT predicted_secs, actual_secs FROM eta_accuracy
+       WHERE repo=? AND stage=? AND predicted_secs > 0 ORDER BY rowid DESC LIMIT 30`
     );
     this.stmtGetMeta = this.db.prepare('SELECT value FROM meta WHERE key=?');
     this.stmtSetMeta = this.db.prepare(
@@ -376,6 +394,31 @@ export class HistoryStore {
       medianAbsErrSecs: median(rows.map((r) => Math.abs(r.predicted_secs - r.actual_secs))),
       n: rows.length,
     };
+  }
+
+  /** All eta-accuracy rows at/after `since`, ordered repo → stage → observed_at
+   *  (bucketing happens in metrics — the issue #35 calibration panel). */
+  etaAccuracySince(since: string): EtaAccuracyRow[] {
+    const rows = this.stmtSelectEtaAccuracySince.all(since) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      repo: r.repo as string, stage: r.stage as string,
+      predictedSecs: r.predicted_secs as number, actualSecs: r.actual_secs as number,
+      at: r.at as string,
+    }));
+  }
+
+  /**
+   * Conformal-lite calibration factor for (repo, stage): the 90th percentile of
+   * actual/predicted ratios over the last 30 usable accuracy rows. Null under
+   * 10 rows — too thin to widen displayed ranges from. Factor > 1 means ETAs
+   * run optimistic (stages take longer than first predicted).
+   */
+  calibrationFactor(repo: string, stage: string): number | null {
+    const rows = this.stmtSelectEtaAccuracyRecent.all(repo, stage) as
+      { predicted_secs: number; actual_secs: number }[];
+    if (rows.length < 10) return null;
+    const ratios = rows.map((r) => r.actual_secs / r.predicted_secs).sort((a, b) => a - b);
+    return percentile(ratios, 0.9);
   }
 
   getMeta(key: string): string | null {

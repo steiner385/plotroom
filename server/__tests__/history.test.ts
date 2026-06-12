@@ -270,6 +270,70 @@ describe('eta accuracy (Task F)', () => {
   });
 });
 
+describe('eta accuracy windowed read (issue #35 calibration panel)', () => {
+  it('returns rows at/after since with full fields, ordered repo → stage → observed_at', () => {
+    h.recordEtaAccuracy('octo/bridge', 'ci', 100, 150, '2026-06-10T10:30:00Z');
+    h.recordEtaAccuracy(REPO, 'queue', 600, 660, '2026-06-10T10:20:00Z');
+    h.recordEtaAccuracy(REPO, 'ci', 300, 360, '2026-06-10T10:10:00Z');
+    h.recordEtaAccuracy(REPO, 'ci', 200, 180, '2026-06-10T10:00:00Z');
+    h.recordEtaAccuracy(REPO, 'ci', 400, 420, '2026-06-09T10:00:00Z'); // outside the window
+    expect(h.etaAccuracySince('2026-06-10T00:00:00Z')).toEqual([
+      { repo: REPO, stage: 'ci', predictedSecs: 200, actualSecs: 180, at: '2026-06-10T10:00:00Z' },
+      { repo: REPO, stage: 'ci', predictedSecs: 300, actualSecs: 360, at: '2026-06-10T10:10:00Z' },
+      { repo: REPO, stage: 'queue', predictedSecs: 600, actualSecs: 660, at: '2026-06-10T10:20:00Z' },
+      { repo: 'octo/bridge', stage: 'ci', predictedSecs: 100, actualSecs: 150, at: '2026-06-10T10:30:00Z' },
+    ]);
+    expect(h.etaAccuracySince('2026-06-11T00:00:00Z')).toEqual([]);
+  });
+
+  it('the since-read hits the observed_at index (no full-table scan)', () => {
+    const plan = (h as unknown as { db: import('better-sqlite3').Database }).db
+      .prepare("EXPLAIN QUERY PLAN SELECT repo FROM eta_accuracy WHERE observed_at >= '2026'")
+      .all() as { detail: string }[];
+    expect(plan.map((r) => r.detail).join('; ')).toMatch(/USING INDEX idx_eta_accuracy_observed/);
+  });
+});
+
+describe('calibrationFactor (issue #35 conformal-lite ranges)', () => {
+  const at = (i: number) => `2026-06-10T${String(10 + Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00Z`;
+
+  it('null under 10 usable rows', () => {
+    expect(h.calibrationFactor(REPO, 'ci')).toBeNull();
+    for (let i = 0; i < 9; i++) h.recordEtaAccuracy(REPO, 'ci', 100, 120, at(i));
+    expect(h.calibrationFactor(REPO, 'ci')).toBeNull(); // n=9
+    h.recordEtaAccuracy(REPO, 'ci', 100, 120, at(9));
+    expect(h.calibrationFactor(REPO, 'ci')).toBeCloseTo(1.2, 10); // n=10
+  });
+
+  it('returns the 90th percentile of actual/predicted ratios over the last 30 rows', () => {
+    // ratios 1.01..1.30 — p90 over 30 sorted values = the 27th value = 1.27
+    for (let i = 0; i < 30; i++) h.recordEtaAccuracy(REPO, 'ci', 100, 101 + i, at(i));
+    expect(h.calibrationFactor(REPO, 'ci')).toBeCloseTo(1.27, 10);
+  });
+
+  it('older rows beyond the last 30 fall out of the window', () => {
+    // 10 ancient rows with huge ratios, then 30 recent mild ones — p90 must come from the recent 30
+    for (let i = 0; i < 10; i++) h.recordEtaAccuracy(REPO, 'queue', 100, 1000, at(i));
+    for (let i = 0; i < 30; i++) h.recordEtaAccuracy(REPO, 'queue', 100, 110, at(10 + i));
+    expect(h.calibrationFactor(REPO, 'queue')).toBeCloseTo(1.1, 10);
+  });
+
+  it('is scoped per (repo, stage)', () => {
+    for (let i = 0; i < 10; i++) h.recordEtaAccuracy(REPO, 'ci', 100, 150, at(i));
+    expect(h.calibrationFactor(REPO, 'queue')).toBeNull();
+    expect(h.calibrationFactor('other/repo', 'ci')).toBeNull();
+    expect(h.calibrationFactor(REPO, 'ci')).toBeCloseTo(1.5, 10);
+  });
+
+  it('rows with predicted=0 are excluded (no division by zero) and do not count toward n', () => {
+    for (let i = 0; i < 9; i++) h.recordEtaAccuracy(REPO, 'ci', 100, 120, at(i));
+    h.recordEtaAccuracy(REPO, 'ci', 0, 120, at(9)); // recordable (predicted ≥ 0) but unusable
+    expect(h.calibrationFactor(REPO, 'ci')).toBeNull(); // 9 usable, not 10
+    h.recordEtaAccuracy(REPO, 'ci', 100, 120, at(10));
+    expect(h.calibrationFactor(REPO, 'ci')).toBeCloseTo(1.2, 10);
+  });
+});
+
 describe('runner waits (W2)', () => {
   const at = (i: number) => `2026-06-10T10:${String(i).padStart(2, '0')}:00Z`;
 
