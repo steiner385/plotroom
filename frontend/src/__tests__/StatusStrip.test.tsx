@@ -27,8 +27,8 @@ describe('bucketPr', () => {
     expect(bucketPr(pr('awaiting-prod'))).toBe('deploy');
   });
 
-  it('classifies merged as deploy', () => {
-    expect(bucketPr(pr('merged'))).toBe('deploy');
+  it('classifies merged as idle — retention-window stage for repos with no deploy environments', () => {
+    expect(bucketPr(pr('merged'))).toBe('idle');
   });
 
   it('classifies parked/ci-failed as failed', () => {
@@ -69,17 +69,17 @@ describe('StatusStrip', () => {
 
   it('renders all five tiles with correct counts', () => {
     render(<StatusStrip prs={prs} activeFilter={null} onFilter={() => {}} />);
-    // running=2, queued=3, deploy=3, failed=1, idle=2
+    // running=2, queued=3, deploy=2 (qa-deploy + awaiting-prod only), failed=1,
+    // idle=3 (merged + parked/draft + ready)
     const buttons = screen.getAllByRole('button');
     expect(buttons).toHaveLength(5);
-    // running=2 and idle=2
-    const twos = screen.getAllByText('2');
-    expect(twos).toHaveLength(2);
-    // queued=3 and deploy=3
-    const threes = screen.getAllByText('3');
-    expect(threes).toHaveLength(2);
-    // failed=1
-    expect(screen.getByText('1')).toBeInTheDocument();
+    const countFor = (label: string) =>
+      screen.getByText(label).closest('button')!.querySelector('b')!.textContent;
+    expect(countFor('CI running')).toBe('2');
+    expect(countFor('In queue')).toBe('3');
+    expect(countFor('Awaiting prod')).toBe('2');
+    expect(countFor('Failed')).toBe('1');
+    expect(countFor('Ready / other')).toBe('3');
   });
 
   it('empty buckets still render but are disabled', () => {

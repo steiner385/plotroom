@@ -10,12 +10,15 @@ export function bucketPr(pr: PrView): Bucket {
     if (substate === 'group-failed') return 'failed';
     return 'queued';
   }
-  if (stage === 'qa-deploy' || stage === 'awaiting-prod' || stage === 'merged') return 'deploy';
+  // qa-deploy / awaiting-prod only exist for repos with deploy environments;
+  // bare 'merged' is the retention-window stage for repos WITHOUT deploys and
+  // must not inflate the deploy ("Awaiting prod") tile.
+  if (stage === 'qa-deploy' || stage === 'awaiting-prod') return 'deploy';
   if (stage === 'parked') {
     if (substate === 'ci-failed') return 'failed';
     return 'idle';
   }
-  // ready + any other parked substate
+  // ready + merged + any other parked substate
   return 'idle';
 }
 
@@ -26,7 +29,7 @@ const TILES: TileConfig[] = [
   { bucket: 'queued',  label: 'In queue',        cssClass: 'tile-queued' },
   { bucket: 'deploy',  label: 'Awaiting prod',   cssClass: 'tile-deploy' },
   { bucket: 'failed',  label: 'Failed',          cssClass: 'tile-failed' },
-  { bucket: 'idle',    label: 'Ready / parked',  cssClass: 'tile-idle'   },
+  { bucket: 'idle',    label: 'Ready / other',   cssClass: 'tile-idle'   },
 ];
 
 interface StatusStripProps {

@@ -118,6 +118,29 @@ describe('App', () => {
     expect(screen.queryByText('#20')).not.toBeInTheDocument();
   });
 
+  it('merged rows filter under the idle tile, not Awaiting prod', () => {
+    const ciPr: PrView = { ...prView(10), stage: { stage: 'ci', substate: null, percent: null,
+      etaSeconds: null, etaRangeSeconds: null, overdue: false } };
+    const mergedPr: PrView = { ...prView(30), stage: { stage: 'merged', substate: null, percent: null,
+      etaSeconds: null, etaRangeSeconds: null, overdue: false } };
+    // non-deploy repo: merged is the retention-window stage, not a deploy stage
+    mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [
+      { repo: 'octo/bridge', hasDeploy: false, accuracy: {}, prs: [ciPr, mergedPr], queue: null },
+    ] } }));
+    render(<App />);
+    const strip = screen.getByRole('group', { name: 'Status overview' });
+    const tiles = within(strip).getAllByRole('button');
+    const deployTile = tiles[2]!; // third tile = deploy (Awaiting prod)
+    const idleTile = tiles[4]!;   // fifth tile = idle (Ready / other)
+    // deploy bucket is empty (merged no longer counts) → tile disabled
+    expect(deployTile).toHaveAttribute('disabled');
+    // filtering by idle shows the merged row and hides the ci row
+    fireEvent.click(idleTile);
+    expect(screen.getByText('#30')).toBeInTheDocument();
+    expect(screen.queryByText('#10')).not.toBeInTheDocument();
+    expect(screen.getByText(/\(1 hidden\)/)).toBeInTheDocument();
+  });
+
   it('clicking active tile again clears the filter', () => {
     const queuePr: PrView = { ...prView(20), stage: { stage: 'queue', substate: null, percent: null,
       etaSeconds: null, etaRangeSeconds: null, overdue: false } };
