@@ -105,7 +105,7 @@ describe('GET /api/config', () => {
     expect(res.status).toBe(200);
     expect(res.body.resolved.owners).toEqual(['acme']);
     expect(res.body.resolved.tokenSource).toBe('gh'); // the MODE string, never a token value
-    expect(res.body.readOnlyKeys).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource']);
+    expect(res.body.readOnlyKeys).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'notifications']);
     expect(res.body.sources).toEqual({
       configPath: '/srv/prdash/config.json',
       perField: { owners: 'file', retentionDays: 'default' },

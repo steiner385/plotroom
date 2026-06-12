@@ -1,0 +1,207 @@
+import { execFile } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import type { StageResult } from './types';
+
+/**
+ * Notifier — the single detection source for alert-worthy PR transitions
+ * (issue #19). The poller feeds it every classify result (`observe`) plus the
+ * prod-ancestry "shipped" signal (`prodLive`); it derives notification events,
+ * debounces them, and fans out to two sinks:
+ *
+ *   - bus: `emit('notification', ev)` — re-emitted by the poller onto the SSE
+ *     stream as a named `notification` event (browser Web Notifications).
+ *   - command: an argv template run via execFile (NEVER a shell — a hostile PR
+ *     title can't inject), gated by `notifications.enabled`.
+ *
+ * Debounce: once per (PR, event type) while the condition holds — cleared when
+ * the condition clears, so a re-entered condition re-fires. `prod-live` can't
+ * clear, so it fires once per PR per process lifetime.
+ */
+
+export const NOTIFICATION_EVENT_TYPES = [
+  'ci-failed', 'group-failed', 'queue-blocked', 'ready', 'overdue', 'prod-live',
+] as const;
+export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
+
+/** The `notifications` config block (file-only — never PUT-writable). */
+export interface NotificationsConfig {
+  /** Master switch for the COMMAND sink. Event detection and SSE emission stay
+   *  on regardless — the browser sink has its own opt-in (bell + permission). */
+  enabled: boolean;
+  /** Argv template for the host command. `{title}`/`{body}` are substituted in
+   *  every ARGUMENT (argv[0], the executable, is never substituted). Run via
+   *  execFile — no shell, so placeholder content can't inject. */
+  command: string[];
+  /** Per-event-type toggles; a type set false fires NEITHER sink. */
+  events: Record<NotificationEventType, boolean>;
+}
+
+export const DEFAULT_NOTIFICATIONS: NotificationsConfig = {
+  enabled: false,
+  command: ['notify-send', '{title}', '{body}'],
+  events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
+    ready: false, overdue: false, 'prod-live': true },
+};
+
+/** One notification event — the SSE `notification` payload. */
+export interface NotificationEvent {
+  repo: string;
+  prNumber: number;
+  /** PR title. */
+  title: string;
+  type: NotificationEventType;
+  detail: string;
+}
+
+/** One classify result for a tracked PR, with the previous result for context. */
+export interface StageTransition {
+  repo: string;
+  prNumber: number;
+  title: string;
+  prev: StageResult | null;
+  next: StageResult;
+  /** The queue's conflicting-culprit PR number, when known (queue-blocked detail). */
+  queueCulprit?: number | null;
+}
+
+const LABELS: Record<NotificationEventType, string> = {
+  'ci-failed': 'CI failed',
+  'group-failed': 'merge-queue group failed',
+  'queue-blocked': 'queue blocked',
+  ready: 'ready to merge',
+  overdue: 'overdue',
+  'prod-live': 'live on prod',
+};
+
+/** Render an event to the {title}/{body} strings both sinks display. */
+export function renderNotification(ev: NotificationEvent): { title: string; body: string } {
+  return {
+    title: `${ev.repo}#${ev.prNumber} ${LABELS[ev.type]}`,
+    body: ev.detail ? `${ev.title} — ${ev.detail}` : ev.title,
+  };
+}
+
+type StageEventType = Exclude<NotificationEventType, 'prod-live'>;
+
+interface Condition {
+  /** Whether the condition holds for a classify result (drives debounce clearing). */
+  isActive: (s: StageResult) => boolean;
+  /** Extra entry gate evaluated only when the condition newly activates. */
+  enteredFrom?: (prev: StageResult | null) => boolean;
+}
+
+const CONDITIONS: Record<StageEventType, Condition> = {
+  'ci-failed': { isActive: (s) => s.stage === 'parked' && s.substate === 'ci-failed' },
+  'group-failed': { isActive: (s) => s.stage === 'queue' && s.substate === 'group-failed' },
+  // both UNMERGEABLE flavors: genuine conflict ('unmergeable') and cascade
+  // victim ('queue-blocked') — the detail string distinguishes them
+  'queue-blocked': { isActive: (s) => s.stage === 'queue'
+    && (s.substate === 'queue-blocked' || s.substate === 'unmergeable') },
+  ready: {
+    isActive: (s) => s.stage === 'ready' && (s.substate === 'armed' || s.substate === 'idle'),
+    // only the ci → ready edge is news ("checks just went green"); a PR first
+    // seen ready, or one wandering back from queue/parked, is not
+    enteredFrom: (prev) => prev?.stage === 'ci',
+  },
+  overdue: { isActive: (s) => s.overdue },
+};
+
+function detailFor(type: StageEventType, t: StageTransition): string {
+  switch (type) {
+    case 'ci-failed': return 'a required check failed';
+    case 'group-failed': return 'the merge-queue group build failed';
+    case 'queue-blocked':
+      if (t.next.substate === 'unmergeable') {
+        return 'conflicts with the base branch — facing ejection from the queue';
+      }
+      return t.queueCulprit != null && t.queueCulprit !== t.prNumber
+        ? `blocked in the merge queue behind conflicting PR #${t.queueCulprit}`
+        : 'blocked in the merge queue by a conflicting entry ahead';
+    case 'ready': return t.next.substate === 'armed'
+      ? 'CI green — auto-merge armed' : 'CI green — ready to merge';
+    case 'overdue': return `${t.next.stage} stage is running past its expected duration`;
+  }
+}
+
+/** execFile-shaped callable — injectable for tests. */
+export type ExecLike = (cmd: string, args: string[], cb: (err: Error | null) => void) => unknown;
+
+export interface NotifierDeps {
+  /** Live notifications config (a getter so hot-applied config swaps take effect). */
+  config: () => NotificationsConfig;
+  exec?: ExecLike;
+  log?: (msg: string) => void;
+}
+
+export class Notifier extends EventEmitter {
+  /** `${repo}#${prNumber}|${type}` of currently-active (already fired) conditions. */
+  private active = new Set<string>();
+  private commandFailureLogged = false;
+
+  constructor(private deps: NotifierDeps) {
+    super();
+  }
+
+  /** Feed one classify result; fires events for newly-entered conditions. */
+  observe(t: StageTransition): void {
+    for (const type of Object.keys(CONDITIONS) as StageEventType[]) {
+      const cond = CONDITIONS[type];
+      const key = `${t.repo}#${t.prNumber}|${type}`;
+      if (!cond.isActive(t.next)) {
+        this.active.delete(key); // condition cleared — eligible to re-fire on re-entry
+        continue;
+      }
+      if (this.active.has(key)) continue; // already fired for this activation
+      this.active.add(key);
+      if (cond.enteredFrom && !cond.enteredFrom(t.prev)) continue;
+      this.fire({ repo: t.repo, prNumber: t.prNumber, title: t.title, type,
+        detail: detailFor(type, t) });
+    }
+  }
+
+  /** The "shipped" signal: a merged PR's commit just became prod ancestry. */
+  prodLive(repo: string, prNumber: number, title: string): void {
+    const key = `${repo}#${prNumber}|prod-live`;
+    if (this.active.has(key)) return; // can't clear — once per PR per process
+    this.active.add(key);
+    this.fire({ repo, prNumber, title, type: 'prod-live', detail: 'deployed to production' });
+  }
+
+  /** Drop debounce state for PRs no longer tracked (keys are `repo#number`). */
+  prune(livePrKeys: ReadonlySet<string>): void {
+    for (const key of this.active) {
+      if (!livePrKeys.has(key.slice(0, key.lastIndexOf('|')))) this.active.delete(key);
+    }
+  }
+
+  private fire(ev: NotificationEvent): void {
+    if (this.deps.config().events[ev.type] === false) return; // type toggled off — neither sink
+    this.emit('notification', ev);
+    this.runCommand(ev);
+  }
+
+  private runCommand(ev: NotificationEvent): void {
+    const cfg = this.deps.config();
+    if (!cfg.enabled) return;
+    const [cmd, ...args] = cfg.command;
+    if (!cmd) return;
+    const { title, body } = renderNotification(ev);
+    // substitution in ARGUMENTS only — argv[0] selects the executable and must
+    // never be influenced by PR-controlled content
+    const argv = args.map((a) => a.replaceAll('{title}', title).replaceAll('{body}', body));
+    const exec = this.deps.exec ?? ((c, as, cb) => execFile(c, as, (err) => cb(err)));
+    try {
+      exec(cmd, argv, (err) => { if (err) this.logCommandFailureOnce(err); });
+    } catch (e) {
+      this.logCommandFailureOnce(e); // a sink failure must never crash a poll cycle
+    }
+  }
+
+  private logCommandFailureOnce(e: unknown): void {
+    if (this.commandFailureLogged) return;
+    this.commandFailureLogged = true;
+    const msg = e instanceof Error ? e.message : String(e);
+    (this.deps.log ?? console.warn)(
+      `[notifier] command failed (further failures suppressed): ${msg}`);
+  }
+}

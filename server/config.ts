@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { configPath, resolveUserPath } from './paths';
 import { buildViewerQuery } from './queries';
+import { DEFAULT_NOTIFICATIONS, NOTIFICATION_EVENT_TYPES, type NotificationsConfig } from './notifier';
 import type { RepoFileConfig } from './repo-config';
 
 export interface EnvConfig {
@@ -78,6 +79,9 @@ export interface AppConfig {
    *  In 'api' mode clones are never created; a pre-existing clone is used as a
    *  best-effort fallback when the compare API fails transport-wise. */
   ancestrySource: 'api' | 'clone';
+  /** Desktop/browser notifications for alert-worthy transitions (issue #19).
+   *  File-only — never PUT-writable (the command template execs on the host). */
+  notifications: NotificationsConfig;
   /** Hostname allowlist for IN-REPO (`.pr-dashboard.yml`-sourced) deploy URLs:
    *  exact match or `*.suffix` wildcard (subdomains only — list the apex
    *  separately). Unset → no filtering. Instance-config deploy entries are
@@ -102,6 +106,7 @@ export const DEFAULTS: AppConfig = {
   apiUrl: 'https://api.github.com/graphql',
   rateLimitFloor: 1000,
   ancestrySource: 'api',
+  notifications: DEFAULT_NOTIFICATIONS,
   webhooks: { enabled: false, path: '/api/webhooks/github' },
   deploy: {},
   repos: {},
@@ -288,7 +293,7 @@ export const SAFE_CONFIG_KEYS = ['owners', 'exclude', 'retentionDays', 'batchSiz
 export type SafeConfigKey = (typeof SAFE_CONFIG_KEYS)[number];
 
 /** Instance-config keys surfaced read-only in the UI (file-only for security). */
-export const READ_ONLY_CONFIG_KEYS = ['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource'] as const;
+export const READ_ONLY_CONFIG_KEYS = ['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'notifications'] as const;
 
 const INTERVAL_KEYS = ['sweepMs', 'hotMs', 'deployMs'] as const;
 
@@ -425,6 +430,8 @@ export function loadConfig(path?: string): AppConfig {
     deploy: { ...DEFAULTS.deploy, ...(user.deploy ?? {}) },
     repos: { ...DEFAULTS.repos, ...(user.repos ?? {}) },
     webhooks: { ...DEFAULTS.webhooks, ...(user.webhooks ?? {}) },
+    notifications: { ...DEFAULTS.notifications, ...(user.notifications ?? {}),
+      events: { ...DEFAULTS.notifications.events, ...(user.notifications?.events ?? {}) } },
     // internal, never honored from the file: derived from what the file actually set
     hotMsExplicit: user.intervals?.hotMs !== undefined,
   };
@@ -469,6 +476,26 @@ export function loadConfig(path?: string): AppConfig {
   } else if (w.enabled) {
     throw new Error('config: webhooks.enabled requires webhooks.secretPath '
       + '(written by `pnpm app:setup`, or point it at a file holding the shared secret)');
+  }
+  const n = merged.notifications;
+  if (typeof n.enabled !== 'boolean') {
+    throw new Error(`config: notifications.enabled must be a boolean (got ${JSON.stringify(n.enabled)})`);
+  }
+  if (!Array.isArray(n.command) || n.command.some((a) => typeof a !== 'string')) {
+    throw new Error('config: notifications.command must be an array of strings '
+      + '(argv template — {title}/{body} are substituted in arguments, never via a shell)');
+  }
+  if (n.enabled && n.command.length === 0) {
+    throw new Error('config: notifications.enabled requires a non-empty notifications.command');
+  }
+  for (const [k, v] of Object.entries(n.events)) {
+    if (!(NOTIFICATION_EVENT_TYPES as readonly string[]).includes(k)) {
+      throw new Error(`config: notifications.events.${k} is not a known event type `
+        + `(allowed: ${NOTIFICATION_EVENT_TYPES.join(', ')})`);
+    }
+    if (typeof v !== 'boolean') {
+      throw new Error(`config: notifications.events.${k} must be a boolean (got ${JSON.stringify(v)})`);
+    }
   }
   if (merged.deployUrlAllowlist !== undefined) {
     const list: unknown = merged.deployUrlAllowlist;

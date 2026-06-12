@@ -493,7 +493,7 @@ describe('resolveOwners', () => {
 describe('validateConfigPatch', () => {
   it('exports the safe subset and read-only key lists the API advertises', () => {
     expect(SAFE_CONFIG_KEYS).toEqual(['owners', 'exclude', 'retentionDays', 'batchSize', 'intervals']);
-    expect(READ_ONLY_CONFIG_KEYS).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource']);
+    expect(READ_ONLY_CONFIG_KEYS).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'notifications']);
   });
 
   it('accepts the full safe subset and normalizes it', () => {
@@ -671,5 +671,79 @@ describe('ancestrySource', () => {
     const v = validateConfigPatch({ ancestrySource: 'clone' });
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.offendingKeys).toContain('ancestrySource');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// notifications config block (issue #19)
+// ---------------------------------------------------------------------------
+
+describe('notifications config', () => {
+  it('defaults: disabled, notify-send template, alert types on / chatty types off', () => {
+    const cfg = loadConfig('/nonexistent/config.json');
+    expect(cfg.notifications).toEqual({
+      enabled: false,
+      command: ['notify-send', '{title}', '{body}'],
+      events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
+        ready: false, overdue: false, 'prod-live': true },
+    });
+  });
+
+  it('a partial events block merges over the defaults (unspecified types keep theirs)', () => {
+    const cfg = loadConfig(writeConfig({
+      notifications: { enabled: true, events: { ready: true } } }));
+    expect(cfg.notifications.enabled).toBe(true);
+    expect(cfg.notifications.command).toEqual(['notify-send', '{title}', '{body}']); // default kept
+    expect(cfg.notifications.events).toEqual({ 'ci-failed': true, 'group-failed': true,
+      'queue-blocked': true, ready: true, overdue: false, 'prod-live': true });
+  });
+
+  it('accepts a custom command array', () => {
+    const cfg = loadConfig(writeConfig({
+      notifications: { enabled: true, command: ['/usr/bin/my-hook', '--title', '{title}'] } }));
+    expect(cfg.notifications.command).toEqual(['/usr/bin/my-hook', '--title', '{title}']);
+  });
+
+  it('rejects a non-boolean enabled', () => {
+    expect(() => loadConfig(writeConfig({ notifications: { enabled: 'yes' } })))
+      .toThrow(/notifications\.enabled must be a boolean/);
+  });
+
+  it('rejects a non-array / non-string-array command', () => {
+    expect(() => loadConfig(writeConfig({ notifications: { command: 'notify-send {title}' } })))
+      .toThrow(/notifications\.command must be an array of strings/);
+    expect(() => loadConfig(writeConfig({ notifications: { command: ['notify-send', 42] } })))
+      .toThrow(/notifications\.command must be an array of strings/);
+  });
+
+  it('rejects enabled:true with an empty command', () => {
+    expect(() => loadConfig(writeConfig({ notifications: { enabled: true, command: [] } })))
+      .toThrow(/notifications\.enabled requires a non-empty notifications\.command/);
+  });
+
+  it('rejects unknown event types and non-boolean toggles', () => {
+    expect(() => loadConfig(writeConfig({ notifications: { events: { banana: true } } })))
+      .toThrow(/notifications\.events\.banana is not a known event type/);
+    expect(() => loadConfig(writeConfig({ notifications: { events: { ready: 1 } } })))
+      .toThrow(/notifications\.events\.ready must be a boolean/);
+  });
+
+  it('PIN — is file-only: PUT /api/config rejects the notifications key (deny-default)', () => {
+    const v = validateConfigPatch({ notifications: { enabled: true, command: ['evil'] } });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.offendingKeys).toContain('notifications');
+  });
+
+  it('configFileSources attributes notifications file-vs-default', () => {
+    expect(configFileSources(writeConfig({ notifications: { enabled: true } })).notifications).toBe('file');
+    expect(configFileSources(writeConfig({})).notifications).toBe('default');
+  });
+
+  it('writeConfigPatch leaves a hand-written notifications block untouched', () => {
+    const path = writeConfig({ owners: ['acme'],
+      notifications: { enabled: true, command: ['my-hook', '{title}'] } });
+    writeConfigPatch(path, { retentionDays: 14 });
+    const onDisk = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    expect(onDisk.notifications).toEqual({ enabled: true, command: ['my-hook', '{title}'] });
   });
 });
