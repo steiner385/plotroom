@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { HeadlineStat, LeadTimeSegmentId, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
+import type { HeadlineStat, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
+import { LEAD_TIME_SEGMENTS } from './leadtime';
 import {
   AreaSeries, BandSeries, MultiLine, ScatterPlot, SignedLine,
   type BandPoint, type ChartPoint, type LineSeries,
@@ -112,16 +113,6 @@ const TREND_SERIES = [
   { key: 'queue', color: 'var(--purple)' },
   { key: 'failed', color: 'var(--fail)' },
 ] as const;
-
-/** Lead-time segment display metadata (issue #44), pipeline order — mirrors
- *  the server's LEAD_TIME_SEGMENTS ids. */
-const LEAD_TIME_SEGMENTS: { id: LeadTimeSegmentId; label: string; color: string }[] = [
-  { id: 'toFirstGreen', label: 'to first green', color: 'var(--accent)' },
-  { id: 'greenToEnqueued', label: 'green → enqueued', color: 'var(--amber)' },
-  { id: 'queue', label: 'queue', color: 'var(--purple)' },
-  { id: 'qaDeploy', label: 'QA deploy', color: 'var(--done)' },
-  { id: 'awaitingProd', label: 'awaiting prod', color: 'var(--fail)' },
-];
 
 /** Segments need at least this many merged-PR samples before the median is
  *  trusted; below it the legend reads 'collecting'. */

@@ -69,11 +69,28 @@ export interface DurationRegressionView extends DurationRegressionInfo {
   event: string;
 }
 
+/** The merged_prs waterfall spine (issue #50): the six pipeline waypoints of a
+ *  merged PR, threaded verbatim from the merged record. Every field except
+ *  mergedAt is nullable — a missing waypoint means "never observed" (pre-#44
+ *  rows, merges between polls, PRs that skipped the queue) and the UI omits
+ *  the segment rather than fabricating one. */
+export interface PrTimeline {
+  createdAt: string | null;
+  firstGreenAt: string | null;
+  enqueuedAt: string | null;
+  mergedAt: string;
+  qaLiveAt: string | null;
+  prodLiveAt: string | null;
+}
+
 export interface PrView {
   repo: string; number: number; title: string; url: string;
   stage: StageResult;
   queueAheadCount: number | null;
   checks: CheckView[];
+  /** Per-PR "where did the time go" waterfall (issue #50) — merged PRs within
+   *  the retention window only; null for open PRs. */
+  timeline: PrTimeline | null;
   /** Queued PRs only: the merge-group build's checks (the run driving the queue
    *  stage ETA), so the UI can label it separately from head-commit PR checks.
    *  Null when not queued or the group rollup hasn't been fetched yet. */
@@ -1809,6 +1826,7 @@ export class Poller extends EventEmitter {
     return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
       queueAheadCount,
       checks: this.checkViews(pr, now, prefixes),
+      timeline: null,
       groupChecks, mergeEtaSim };
   }
 
@@ -1853,7 +1871,13 @@ export class Poller extends EventEmitter {
     this.deps.notifier?.observe({ repo: rec.repo, prNumber: rec.number, title: rec.title,
       prev: prevStage, next: stage });
     return { repo: rec.repo, number: rec.number, title: rec.title, url: rec.url, stage,
-      queueAheadCount: null, checks: [], groupChecks: null, mergeEtaSim: null };
+      queueAheadCount: null, checks: [],
+      // waterfall spine (issue #50): the merged record IS the source of truth —
+      // missing waypoints stay null, the UI omits those segments
+      timeline: { createdAt: rec.createdAt, firstGreenAt: rec.firstGreenAt,
+        enqueuedAt: rec.enqueuedAt, mergedAt: rec.mergedAt,
+        qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt },
+      groupChecks: null, mergeEtaSim: null };
   }
 
   private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {

@@ -45,11 +45,25 @@ export interface DurationRegressionInfo {
   /** ISO time of the recent window's first sample — the approximate onset. */
   sinceApprox: string;
 }
+/** Mirror of server poller.ts PrTimeline (issue #50): the merged_prs waterfall
+ *  spine. A null waypoint was never observed — the segment is omitted. */
+export interface PrTimeline {
+  createdAt: string | null;
+  firstGreenAt: string | null;
+  enqueuedAt: string | null;
+  mergedAt: string;
+  qaLiveAt: string | null;
+  prodLiveAt: string | null;
+}
+
 export interface PrView {
   repo: string; number: number; title: string; url: string;
   stage: StageResult;
   queueAheadCount: number | null;
   checks: CheckView[];
+  /** Per-PR waterfall spine (issue #50) — merged PRs only; null for open PRs.
+   *  Optional to tolerate pre-upgrade payloads. */
+  timeline?: PrTimeline | null;
   /** Queued PRs only: the merge-group build's checks (drives the queue stage ETA);
    *  null when not queued or the group rollup hasn't been fetched yet. */
   groupChecks: CheckView[] | null;

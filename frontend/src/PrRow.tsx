@@ -3,6 +3,7 @@ import type { PrView } from './types';
 import { formatDur, formatEta, stageLabel } from './format';
 import { MetroTrack } from './MetroTrack';
 import { CheckGantt } from './CheckGantt';
+import { Waterfall, waterfallSegments } from './Waterfall';
 
 /** Muted one-line status under the track: percent + active-check for ci,
  *  substate reason for parked, group/position info for queue.
@@ -99,6 +100,16 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
         <MetroTrack stage={s} hasDeploy={hasDeploy} />
         {sub && <div className="sub">{sub}</div>}
       </div>
+      {/* per-PR waterfall (issue #50): merged PRs carry the spine timeline —
+          rendered above any check panels; omitted when no segment has both
+          endpoint timestamps (Waterfall itself returns null then, but the
+          label must not render either). */}
+      {open && pr.timeline && waterfallSegments(pr.timeline).length > 0 && (
+        <div className="check-sections waterfall-section">
+          <div className="panel-label">where did the time go</div>
+          <Waterfall timeline={pr.timeline} />
+        </div>
+      )}
       {open && pr.groupChecks && pr.groupChecks.length > 0 ? (
         /* Queued PR: the merge-group build (the run driving the stage ETA) gets
            its own labeled section, head-commit PR checks render below it. */

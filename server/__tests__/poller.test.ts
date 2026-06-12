@@ -5057,3 +5057,46 @@ describe('Poller runner-starvation scan (issue #45)', () => {
     expect(p.poolHealth()).toEqual([]);
   });
 });
+
+// ---- per-PR waterfall timeline threading (issue #50) ----
+describe('PrView.timeline (issue #50)', () => {
+  it('merged PR views carry the merged_prs waterfall spine', () => {
+    history.upsertMergedPr({ repo: 'acme/widgets', number: 9001, title: 'feat: spine', url: 'u9001',
+      mergedAt: '2026-06-10T10:00:00Z', mergeCommitSha: 'sha9001',
+      createdAt: '2026-06-09T08:00:00Z', firstGreenAt: '2026-06-09T09:00:00Z',
+      enqueuedAt: '2026-06-09T09:30:00Z' });
+    history.markEnvLive('acme/widgets', 9001, 'qa', '2026-06-10T10:20:00Z');
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 9001)!;
+    expect(pr.timeline).toEqual({
+      createdAt: '2026-06-09T08:00:00Z', firstGreenAt: '2026-06-09T09:00:00Z',
+      enqueuedAt: '2026-06-09T09:30:00Z', mergedAt: '2026-06-10T10:00:00Z',
+      qaLiveAt: '2026-06-10T10:20:00Z', prodLiveAt: null,
+    });
+  });
+
+  it('missing spine waypoints stay null — never fabricated', () => {
+    history.upsertMergedPr({ repo: 'acme/widgets', number: 9002, title: 'feat: thin', url: 'u9002',
+      mergedAt: '2026-06-10T10:00:00Z', mergeCommitSha: null });
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 9002)!;
+    expect(pr.timeline).toEqual({
+      createdAt: null, firstGreenAt: null, enqueuedAt: null,
+      mergedAt: '2026-06-10T10:00:00Z', qaLiveAt: null, prodLiveAt: null,
+    });
+  });
+
+  it('open PR views carry timeline null', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs
+      .find((x) => x.number === 8962)!;
+    expect(pr.timeline).toBeNull();
+  });
+});

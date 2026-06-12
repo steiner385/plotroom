@@ -315,3 +315,49 @@ describe('PrRow merge ETA simulation (issue #40)', () => {
     expect(screen.getByText('~4m left')).toBeInTheDocument(); // ci stage ETA intact
   });
 });
+
+// ---- per-PR waterfall (issue #50) ----
+describe('PrRow waterfall (issue #50)', () => {
+  const TIMELINE = {
+    createdAt: '2026-06-10T08:00:00Z', firstGreenAt: '2026-06-10T09:00:00Z',
+    enqueuedAt: '2026-06-10T09:30:00Z', mergedAt: '2026-06-10T10:00:00Z',
+    qaLiveAt: '2026-06-10T10:20:00Z', prodLiveAt: null,
+  };
+  const mergedPr = (over: Partial<PrView> = {}): PrView => pr({
+    stage: { stage: 'awaiting-prod', substate: null, percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+    checks: [], timeline: TIMELINE, ...over,
+  });
+
+  it('expanding a merged PR with a timeline shows the waterfall panel', () => {
+    const { container } = render(<PrRow pr={mergedPr()} hasDeploy />);
+    expect(container.querySelector('.waterfall')).toBeNull(); // collapsed
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('where did the time go')).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-testid^="waterfall-seg-"]').length).toBe(4);
+  });
+
+  it('no waterfall without a timeline (open PRs, pre-upgrade payloads)', () => {
+    const { container } = render(<PrRow pr={pr({})} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(container.querySelector('.waterfall')).toBeNull();
+    expect(screen.queryByText('where did the time go')).toBeNull();
+  });
+
+  it('timeline with no complete segment pair leaves the row unexpandable content-empty', () => {
+    const { container } = render(<PrRow pr={mergedPr({
+      timeline: { createdAt: null, firstGreenAt: null, enqueuedAt: null,
+        mergedAt: '2026-06-10T10:00:00Z', qaLiveAt: null, prodLiveAt: null },
+    })} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(container.querySelector('.waterfall')).toBeNull();
+    expect(screen.queryByText('where did the time go')).toBeNull();
+  });
+
+  it('waterfall renders alongside check sections when checks exist too', () => {
+    const { container } = render(<PrRow pr={mergedPr({ checks: pr({}).checks })} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByText('where did the time go')).toBeInTheDocument();
+    expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
+    expect(container.querySelector('.waterfall')).not.toBeNull();
+  });
+});

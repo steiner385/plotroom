@@ -132,6 +132,8 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
   letter-spacing: 0.05em; padding: 8px 14px 0; font-weight: 600; }
 .check-sections .checks { border-top: none; }
 .check-sections { border-top: 1px solid var(--border); }
+/* per-PR waterfall (issue #50): 'where did the time go' expanded panel */
+.waterfall { padding: 4px 14px 8px; }
 .loading { color: var(--muted); }
 
 /* --- Status overview strip (V2) --- */
