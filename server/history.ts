@@ -37,6 +37,21 @@ export function addColumnIfMissing(db: Database.Database, table: string, columnD
   }
 }
 
+/**
+ * ETA-accuracy flap guard (issue #54): minimum actual stage duration before a
+ * predicted-vs-actual sample is scored. Stage flaps (classification bouncing
+ * ci→ready→ci within one poll cycle) score a full multi-hour first ETA against
+ * a seconds-long actual, poisoning calibration (live: predicted=8534s,
+ * actual=8.3s ×8 → KinDash ci medianErrorPct −99.6%). A sample only counts when
+ * actual ≥ max(60s, 5% of predicted) — the 60s floor drops one-poll-cycle
+ * artifacts, the 5% term scales the bar up for hours-long predictions.
+ * Trade-off: stages that genuinely complete in under 60s are never scored;
+ * acceptable because every ETA-tracked stage (ci/queue/qa-deploy) runs
+ * minutes-to-hours in practice.
+ */
+export const ETA_ACCURACY_MIN_ACTUAL_SECS = 60;
+export const ETA_ACCURACY_MIN_ACTUAL_FRACTION = 0.05;
+
 /** Minimum spacing between state samples for one repo (recordStateSample throttle). */
 const STATE_SAMPLE_MIN_MS = 15 * 60_000;
 /** State samples older than this are pruned whenever a new sample lands. */
@@ -376,10 +391,15 @@ export class HistoryStore {
     return rows.length >= 3 ? median(rows.map((r) => r.wait_secs)) : null;
   }
 
-  /** Predicted (first stage ETA) vs actual stage duration. Rejects bad inputs. */
+  /** Predicted (first stage ETA) vs actual stage duration. Rejects bad inputs
+   *  and stage-flap artifacts (actual below max(60s, 5% of predicted) — see
+   *  ETA_ACCURACY_MIN_ACTUAL_SECS, issue #54). */
   recordEtaAccuracy(repo: string, stage: string, predictedSecs: number, actualSecs: number,
     observedAt: string): boolean {
     if (!Number.isFinite(predictedSecs) || predictedSecs < 0 || !(actualSecs > 0)) return false;
+    const minActual = Math.max(ETA_ACCURACY_MIN_ACTUAL_SECS,
+      predictedSecs * ETA_ACCURACY_MIN_ACTUAL_FRACTION);
+    if (actualSecs < minActual) return false;
     this.stmtInsertEtaAccuracy.run(repo, stage, predictedSecs, actualSecs, observedAt);
     return true;
   }
