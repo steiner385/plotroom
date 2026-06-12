@@ -482,3 +482,20 @@ describe('state samples (metrics trends)', () => {
     expect(rows[0]!.at).toBe('2026-06-10T10:00:00Z');
   });
 });
+
+describe('distinctRepos (repo toggles)', () => {
+  it('is empty on a fresh store', () => {
+    expect(h.distinctRepos()).toEqual([]);
+  });
+
+  it('unions repos across check_durations, merged_prs, and state_samples — sorted, deduped', () => {
+    h.recordCheckDuration('acme/a', 'Build', 'pull_request',
+      '2026-06-10T10:00:00Z', '2026-06-10T10:05:00Z', 'SUCCESS');
+    h.upsertMergedPr({ repo: 'acme/b', number: 1, title: 't', url: 'u',
+      mergedAt: '2026-06-10T10:00:00Z', mergeCommitSha: null });
+    h.recordStateSample('octo/c', '2026-06-10T10:00:00Z', { open: 1, ci: 0, queue: 0, failed: 0 });
+    // 'acme/a' also appears in state_samples — must dedupe
+    h.recordStateSample('acme/a', '2026-06-10T10:00:00Z', { open: 1, ci: 0, queue: 0, failed: 0 });
+    expect(h.distinctRepos()).toEqual(['acme/a', 'acme/b', 'octo/c']);
+  });
+});
