@@ -34,6 +34,29 @@ export interface PrView {
   /** Queued PRs only: the merge-group build's checks (drives the queue stage ETA);
    *  null when not queued or the group rollup hasn't been fetched yet. */
   groupChecks: CheckView[] | null;
+  /** Multi-train merge ETA simulation (issue #40) — WAITING queue entries only;
+   *  null elsewhere (and on pre-upgrade payloads). */
+  mergeEtaSim: MergeEtaSimulation | null;
+}
+
+/** Mirror of server estimator/queue.ts MergeEtaSimulation (issue #40). */
+export interface MergeEtaSimulation {
+  p50Secs: number;
+  p90Secs: number;
+  /** Trains that must complete before this PR merges. */
+  trainsAhead: number;
+  /** True when the p90 budgets one extra train for a likely eject. */
+  assumesEjects: boolean;
+}
+
+/** Mirror of server estimator/queue-health.ts (issue #39). */
+export type QueueHealthState = 'healthy' | 'cap-backlog' | 'dispatch-stall';
+export interface QueueHealthView {
+  state: QueueHealthState;
+  /** Human remediation string ('dispatch-stall: … do NOT admin-merge', …). */
+  detail: string;
+  /** ISO time the queue entered this state. */
+  since: string;
 }
 export interface QueueGroupView {
   oid: string;
@@ -44,7 +67,7 @@ export interface QueueGroupView {
 }
 export interface RepoQueueView {
   groups: QueueGroupView[];
-  waiting: { prNumber: number; position: number }[];
+  waiting: { prNumber: number; position: number; sim?: MergeEtaSimulation | null }[];
   /** PR numbers of GENUINELY conflicting UNMERGEABLE entries (DIRTY against the
    *  base — needs a rebase) — excluded from group coverage and waiting. */
   unmergeable: number[];
@@ -55,6 +78,13 @@ export interface RepoQueueView {
    *  snapshot proves DIRTY); null without UNMERGEABLE entries. */
   unmergeableCulprit: number | null;
   batchSize: number;
+  /** Ops console (issue #39) — optional only to tolerate pre-upgrade payloads. */
+  health?: QueueHealthView;
+  depth?: number;
+  entriesWithWaitSecs?: { prNumber: number; position: number; waitSecs: number }[];
+  trainsPerHour?: number;
+  batchSuccessRatePct?: number | null;
+  ejects24h?: number;
 }
 export interface DashboardState {
   generatedAt: string; staleSince: string | null;
@@ -66,7 +96,8 @@ export interface DashboardState {
 // event and the file-only `notifications` config block (read-only in the UI).
 
 export type NotificationEventType =
-  | 'ci-failed' | 'group-failed' | 'queue-blocked' | 'ready' | 'overdue' | 'prod-live';
+  | 'ci-failed' | 'group-failed' | 'queue-blocked' | 'ready' | 'overdue' | 'prod-live'
+  | 'queue-stalled';
 
 export interface NotificationEvent {
   repo: string;

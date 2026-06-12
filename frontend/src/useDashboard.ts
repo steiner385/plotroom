@@ -14,6 +14,7 @@ const NOTIFY_LABELS: Record<NotificationEventType, string> = {
   ready: 'ready to merge',
   overdue: 'overdue',
   'prod-live': 'live on prod',
+  'queue-stalled': 'merge queue STALLED',
 };
 
 function notifySupported(): boolean {
@@ -63,7 +64,9 @@ export function useDashboard(): DashboardHook {
       if (!notifySupported() || Notification.permission !== 'granted') return;
       try {
         const ev = JSON.parse(e.data as string) as NotificationEvent;
-        new Notification(`${ev.repo}#${ev.prNumber} ${NOTIFY_LABELS[ev.type] ?? ev.type}`, {
+        // repo-level events (queue-stalled) carry prNumber 0 — never show "#0"
+        const subject = ev.type === 'queue-stalled' ? ev.repo : `${ev.repo}#${ev.prNumber}`;
+        new Notification(`${subject} ${NOTIFY_LABELS[ev.type] ?? ev.type}`, {
           body: ev.detail ? `${ev.title} — ${ev.detail}` : ev.title,
           // tag collapses repeats of the same (PR, event) if the server restarts
           tag: `${ev.repo}#${ev.prNumber}|${ev.type}`,

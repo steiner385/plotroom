@@ -12,7 +12,7 @@ const ALL_ON: NotificationsConfig = {
   enabled: true,
   command: ['notify-send', '{title}', '{body}'],
   events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-    ready: true, overdue: true, 'prod-live': true },
+    ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true },
 };
 
 type ExecCall = { cmd: string; args: string[]; cb: (err: Error | null) => void };
@@ -191,7 +191,7 @@ describe('Notifier events config filtering', () => {
   it('defaults: ready and overdue are off; ci-failed/group-failed/queue-blocked/prod-live are on', () => {
     expect(DEFAULT_NOTIFICATIONS.events).toEqual({
       'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
-      ready: false, overdue: false, 'prod-live': true,
+      ready: false, overdue: false, 'prod-live': true, 'queue-stalled': true,
     });
     const h = harness({ ...DEFAULT_NOTIFICATIONS, enabled: true });
     h.observe(stage('ci'), stage('ready', 'armed'));
@@ -299,5 +299,60 @@ describe('renderNotification', () => {
       title: 'fix: the thing', type: 'prod-live', detail: 'live on prod' });
     expect(r.title).toBe('acme/widgets#7 live on prod');
     expect(r.body).toBe('fix: the thing — live on prod');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #39: repo-level queue-stalled events
+// ---------------------------------------------------------------------------
+
+describe('Notifier queueHealth (queue-stalled)', () => {
+  it('fires once on entering dispatch-stall (debounced while it holds)', () => {
+    const h = harness();
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'dispatch-stall: queue recovery needed — do NOT admin-merge');
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'dispatch-stall: queue recovery needed — do NOT admin-merge');
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toMatchObject({ repo: 'acme/widgets', prNumber: 0,
+      type: 'queue-stalled' });
+    expect(h.events[0].detail).toContain('do NOT admin-merge');
+  });
+
+  it('re-fires after the stall clears and re-enters', () => {
+    const h = harness();
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'stalled');
+    h.notifier.queueHealth('acme/widgets', 'healthy', 'queue healthy');
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'stalled again');
+    expect(h.events.map((e) => e.type)).toEqual(['queue-stalled', 'queue-stalled']);
+  });
+
+  it('cap-backlog and healthy never fire', () => {
+    const h = harness();
+    h.notifier.queueHealth('acme/widgets', 'cap-backlog', 'backlog');
+    h.notifier.queueHealth('acme/widgets', 'healthy', 'fine');
+    expect(h.events).toHaveLength(0);
+  });
+
+  it('prune does not clear the stall debounce (repo-level key, no PR lifecycle)', () => {
+    const h = harness();
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'stalled');
+    h.notifier.prune(new Set()); // no live PRs at all
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'stalled');
+    expect(h.events).toHaveLength(1); // still debounced — no spurious re-fire
+  });
+
+  it('events config can disable queue-stalled', () => {
+    const h = harness({ ...ALL_ON, events: { ...ALL_ON.events, 'queue-stalled': false } });
+    h.notifier.queueHealth('acme/widgets', 'dispatch-stall', 'stalled');
+    expect(h.events).toHaveLength(0);
+    expect(h.execCalls).toHaveLength(0);
+  });
+
+  it('renderNotification titles the repo, never "repo#0"', () => {
+    const { title, body } = renderNotification({ repo: 'acme/widgets', prNumber: 0,
+      title: 'acme/widgets', type: 'queue-stalled',
+      detail: 'dispatch-stall: queue recovery needed — do NOT admin-merge' });
+    expect(title).toBe('acme/widgets merge queue STALLED');
+    expect(title).not.toContain('#0');
+    expect(body).toContain('do NOT admin-merge');
   });
 });

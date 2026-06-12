@@ -17,7 +17,7 @@ const makepr = (number: number, stage: PrView['stage']['stage'] = 'ci', substate
   repo: 'x', number, title: `pr ${number}`, url: `https://x/${number}`,
   stage: { stage, substate, percent: 10, etaSeconds: null, etaRangeSeconds: null, overdue: false },
   queueAheadCount: null,
-  checks: [], groupChecks: null,
+  checks: [], groupChecks: null, mergeEtaSim: null,
 });
 
 const STATE: DashboardState = {

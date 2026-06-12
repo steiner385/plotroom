@@ -19,6 +19,10 @@ export interface CheckRun {
    *  increment it; issue #34 — flake radar / attempt waterfalls). Null when
    *  the API omits the workflowRun (old data, no workflow). */
   runAttempt: number | null;
+  /** Workflow-run creation time (issue #39 — dispatch-stall detection on
+   *  merge-group builds). Optional: only the group-rollup query fetches it;
+   *  null/undefined everywhere else. */
+  runCreatedAt?: string | null;
   isRequired: boolean;
   url: string | null;
 }

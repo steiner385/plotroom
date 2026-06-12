@@ -12,7 +12,7 @@ const prView = (number: number): PrView => ({
   repo: 'x', number, title: `pr ${number}`, url: `https://x/${number}`,
   stage: { stage: 'ci', substate: null, percent: 10, etaSeconds: null, etaRangeSeconds: null, overdue: false },
   queueAheadCount: null,
-  checks: [], groupChecks: null,
+  checks: [], groupChecks: null, mergeEtaSim: null,
 });
 
 const STATE: DashboardState = {

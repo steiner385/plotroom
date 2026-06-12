@@ -19,6 +19,7 @@
  */
 
 import type { QueueEntry } from '../types';
+import { percentile } from '../math';
 
 export interface GroupProgress { oid: string; percent: number; etaSeconds: number | null; overdue: boolean; failed: boolean; }
 export interface QueueStageResult {
@@ -85,5 +86,82 @@ export function queueStage(opts: {
     aheadCount: ahead.length,
     failed: false,
     unmergeable: false,
+  };
+}
+
+// ---- multi-train merge ETA simulation (issue #40) --------------------------
+
+/** Eject probability above this adds one extra train at p90 ("assumes ≤1 eject"). */
+export const EJECT_BUMP_MIN_PROB = 0.15;
+
+/** Minimum (runs + ejects) samples before an observed eject probability is
+ *  trusted; below this the probability reads as 0 (no p90 bump). */
+export const EJECT_PROB_MIN_SAMPLES = 5;
+
+/**
+ * Observed 7-day eject probability: ejects / (runs + ejects). `runs` counts
+ * clean group_runs rows; `ejects` counts distinct ejected group shas
+ * (group_failures). Returns 0 under EJECT_PROB_MIN_SAMPLES total samples —
+ * one bad afternoon must not double every p90 forever.
+ */
+export function ejectProbability(runs: number, ejects: number): number {
+  const total = runs + ejects;
+  if (!(total >= EJECT_PROB_MIN_SAMPLES)) return 0;
+  return ejects / total;
+}
+
+export interface MergeEtaSimulation {
+  p50Secs: number;
+  p90Secs: number;
+  /** Trains that must complete before this PR merges: the currently-building
+   *  train ahead (when one exists) plus the future full batches ahead of mine. */
+  trainsAhead: number;
+  /** True when the p90 includes one extra train (ejectProb > EJECT_BUMP_MIN_PROB). */
+  assumesEjects: boolean;
+}
+
+/**
+ * Analytic multi-train merge ETA for a WAITING queue entry (issue #40) — no
+ * Monte Carlo. With dur50/dur90 = p50/p90 of the observed train-duration
+ * samples (group_runs, last 20):
+ *
+ *   trains    = ceil((queuedAhead + 1) / batchSize)        // future trains incl. mine
+ *   p50Secs   = currentTrainEta + trains × dur50
+ *   p90Secs   = currentTrainEta + (trains + bump) × dur90  // bump = 1 when ejectProb > 15%
+ *   trainsAhead = trains − 1 + (1 when a train is currently building)
+ *
+ * The bump models "one of the trains ahead gets ejected and re-runs" — the
+ * dominant tail risk in practice; deeper eject cascades are rare enough that
+ * a single extra train keeps the p90 honest without simulation.
+ *
+ * Returns null without duration samples (callers fall back to the existing
+ * single-number queueStage ETA).
+ */
+export function simulateMergeEta(opts: {
+  /** QUEUED entries ahead of me (building/MERGEABLE/UNMERGEABLE excluded). */
+  queuedAhead: number;
+  batchSize: number;
+  /** Observed whole-train durations (group_runs last 20), any order. */
+  durationSamples: number[];
+  /** 0..1 — already min-samples-gated (see ejectProbability). */
+  ejectProb: number;
+  /** Remaining ETA of the deepest currently-building train ahead; null when
+   *  no train is building ahead of me. */
+  currentTrainEtaSecs: number | null;
+}): MergeEtaSimulation | null {
+  const samples = opts.durationSamples.filter((d) => Number.isFinite(d) && d > 0);
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const dur50 = percentile(sorted, 0.5);
+  const dur90 = percentile(sorted, 0.9);
+  const batch = Math.max(1, opts.batchSize);
+  const trains = Math.ceil((Math.max(0, opts.queuedAhead) + 1) / batch);
+  const currentEta = Math.max(0, opts.currentTrainEtaSecs ?? 0);
+  const assumesEjects = opts.ejectProb > EJECT_BUMP_MIN_PROB;
+  return {
+    p50Secs: Math.round(currentEta + trains * dur50),
+    p90Secs: Math.round(currentEta + (trains + (assumesEjects ? 1 : 0)) * dur90),
+    trainsAhead: trains - 1 + (opts.currentTrainEtaSecs != null ? 1 : 0),
+    assumesEjects,
   };
 }

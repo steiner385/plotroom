@@ -75,6 +75,10 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
   const s = pr.stage;
   const parked = s.stage === 'parked';
   const eta = formatEta(s.etaSeconds, s.etaRangeSeconds, s.overdue);
+  // multi-train merge ETA (issue #40): waiting queue entries show the p50/p90
+  // pair instead of the single-number stage ETA (queueAheadCount stays in the
+  // sub line); everything else keeps the existing chip.
+  const sim = s.stage === 'queue' ? pr.mergeEtaSim ?? null : null;
   const sub = subLine(pr, queueCulprit);
   return (
     <div id={`pr-${pr.number}`} className={`pr-row ${parked ? `parked ${s.substate ?? ''}` : ''}`}>
@@ -83,7 +87,14 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
           <span className="pr-num">#{pr.number}</span>
           <a className="pr-title" href={pr.url} target="_blank" rel="noreferrer"
             onClick={(e) => e.stopPropagation()}>{pr.title}</a>
-          {eta && <span className={`eta ${s.overdue ? 'overdue' : ''}`}>{eta}</span>}
+          {sim ? (
+            <span className="eta eta-sim"
+              title={`merges in ~${formatDur(sim.p50Secs)} (p50) / ~${formatDur(sim.p90Secs)} (p90${sim.assumesEjects ? ', assumes ≤1 eject' : ''}); ${sim.trainsAhead} train${sim.trainsAhead === 1 ? '' : 's'} ahead`}>
+              ~{formatDur(sim.p50Secs)} / ~{formatDur(sim.p90Secs)} p90
+            </span>
+          ) : (
+            eta && <span className={`eta ${s.overdue ? 'overdue' : ''}`}>{eta}</span>
+          )}
         </div>
         <MetroTrack stage={s} hasDeploy={hasDeploy} />
         {sub && <div className="sub">{sub}</div>}

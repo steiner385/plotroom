@@ -397,3 +397,114 @@ describe('QueueTrain', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #39: ops header strip
+// ---------------------------------------------------------------------------
+
+describe('QueueTrain ops strip (issue #39)', () => {
+  const baseQueue: RepoQueueView = {
+    groups: [group({})], waiting: [], unmergeable: [], queueBlocked: [],
+    unmergeableCulprit: null, batchSize: 6,
+    health: { state: 'healthy', detail: 'queue healthy', since: '2026-06-12T10:00:00Z' },
+    depth: 3,
+    entriesWithWaitSecs: [
+      { prNumber: 8943, position: 1, waitSecs: 600 },
+      { prNumber: 8941, position: 2, waitSecs: 1800 },
+    ],
+    trainsPerHour: 1.5,
+    batchSuccessRatePct: 80,
+    ejects24h: 2,
+  };
+
+  it('healthy: green badge with no visible remediation text (tooltip only)', () => {
+    const { container } = render(<QueueTrain queue={baseQueue} />);
+    const badge = container.querySelector('.ops-health')!;
+    expect(badge).toHaveClass('healthy');
+    expect(badge).toHaveTextContent('healthy');
+    expect(badge).toHaveAttribute('title', 'queue healthy');
+    expect(container.querySelector('.ops-remediation')).toBeNull();
+  });
+
+  it('shows depth, trains/hr, batch success, ejects, and oldest wait', () => {
+    render(<QueueTrain queue={baseQueue} />);
+    expect(screen.getByText('depth 3')).toBeInTheDocument();
+    expect(screen.getByText('1.5 trains/hr')).toBeInTheDocument();
+    expect(screen.getByText('80% batch success')).toBeInTheDocument();
+    expect(screen.getByText('2 ejects 24h')).toBeInTheDocument();
+    expect(screen.getByText('oldest wait ~30m')).toBeInTheDocument();
+  });
+
+  it('cap-backlog: amber badge with the remediation visible AND in the tooltip', () => {
+    const detail = 'cap-backlog: demand exceeds runner cap — wait or raise cap';
+    const queue = { ...baseQueue,
+      health: { state: 'cap-backlog' as const, detail, since: '2026-06-12T10:00:00Z' } };
+    const { container } = render(<QueueTrain queue={queue} />);
+    const badge = container.querySelector('.ops-health')!;
+    expect(badge).toHaveClass('cap-backlog');
+    expect(badge).toHaveTextContent('cap backlog');
+    expect(badge).toHaveAttribute('title', detail);
+    expect(screen.getByText(detail)).toBeInTheDocument();
+  });
+
+  it('dispatch-stall: red badge with the do-NOT-admin-merge remediation visible', () => {
+    const detail = 'dispatch-stall: queue recovery needed — do NOT admin-merge';
+    const queue = { ...baseQueue,
+      health: { state: 'dispatch-stall' as const, detail, since: '2026-06-12T10:00:00Z' } };
+    const { container } = render(<QueueTrain queue={queue} />);
+    const badge = container.querySelector('.ops-health')!;
+    expect(badge).toHaveClass('dispatch-stall');
+    expect(badge).toHaveTextContent('DISPATCH STALL');
+    expect(screen.getByText(detail)).toBeInTheDocument();
+  });
+
+  it('pre-upgrade payload without health renders no ops strip (train unaffected)', () => {
+    const queue: RepoQueueView = { groups: [group({})], waiting: [], unmergeable: [],
+      queueBlocked: [], unmergeableCulprit: null, batchSize: 6 };
+    const { container } = render(<QueueTrain queue={queue} />);
+    expect(container.querySelector('.queue-ops')).toBeNull();
+    expect(container.querySelectorAll('.car.building')).toHaveLength(1);
+  });
+
+  it('omits ejects when zero and hides null success rate', () => {
+    const queue = { ...baseQueue, ejects24h: 0, batchSuccessRatePct: null };
+    render(<QueueTrain queue={queue} />);
+    expect(screen.queryByText(/ejects 24h/)).toBeNull();
+    expect(screen.queryByText(/batch success/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #40: multi-train ETA on waiting cars
+// ---------------------------------------------------------------------------
+
+describe('QueueTrain waiting-car merge ETA (issue #40)', () => {
+  it('next-batch car shows the front entry p50/p90 with the full tooltip', () => {
+    const queue: RepoQueueView = {
+      groups: [], unmergeable: [], queueBlocked: [], unmergeableCulprit: null, batchSize: 2,
+      waiting: [
+        { prNumber: 9006, position: 1,
+          sim: { p50Secs: 1320, p90Secs: 2460, trainsAhead: 2, assumesEjects: true } },
+        { prNumber: 9007, position: 2, sim: null },
+        { prNumber: 9008, position: 3,
+          sim: { p50Secs: 1920, p90Secs: 3360, trainsAhead: 3, assumesEjects: true } },
+      ],
+    };
+    render(<QueueTrain queue={queue} />);
+    const nextEta = screen.getByText('~22m / ~41m p90');
+    expect(nextEta).toBeInTheDocument();
+    expect(nextEta).toHaveAttribute('title',
+      'merges in ~22m (p50) / ~41m (p90, assumes ≤1 eject); 2 trains ahead');
+    // "then" car (beyond batchSize) shows the LAST entry's (worst-case) sim
+    expect(screen.getByText('~32m / ~56m p90')).toBeInTheDocument();
+  });
+
+  it('waiting entries without a sim render no ETA line (pre-upgrade/no samples)', () => {
+    const queue: RepoQueueView = {
+      groups: [], unmergeable: [], queueBlocked: [], unmergeableCulprit: null, batchSize: 6,
+      waiting: [{ prNumber: 9006, position: 1 }],
+    };
+    const { container } = render(<QueueTrain queue={queue} />);
+    expect(container.querySelector('.car.queued .car-progress')).toBeNull();
+  });
+});

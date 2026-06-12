@@ -18,6 +18,7 @@ const pr = (over: Partial<PrView>): PrView => ({
         waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null, flakeRatePct: null, likelyFlake: false },
   ],
   groupChecks: null,
+  mergeEtaSim: null,
   ...over,
 });
 
@@ -262,5 +263,55 @@ describe('PrRow', () => {
     // IN_PROGRESS check is present → use existing running-check line, not runner-wait summary
     expect(screen.getByText(/static-checks \/ TypeScript running/)).toBeInTheDocument();
     expect(screen.queryByText(/waiting for runners/)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #40: multi-train merge ETA chip on waiting queued PRs
+// ---------------------------------------------------------------------------
+
+describe('PrRow merge ETA simulation (issue #40)', () => {
+  const queuedWaiting = (over: Partial<PrView> = {}) => pr({
+    stage: { stage: 'queue', substate: null, percent: null,
+      etaSeconds: 1500, etaRangeSeconds: null, overdue: false },
+    queueAheadCount: 3,
+    mergeEtaSim: { p50Secs: 1320, p90Secs: 2460, trainsAhead: 2, assumesEjects: true },
+    ...over,
+  });
+
+  it('shows the p50/p90 pair instead of the single-number ETA, with the full tooltip', () => {
+    render(<PrRow pr={queuedWaiting()} hasDeploy={false} />);
+    const chip = screen.getByText('~22m / ~41m p90');
+    expect(chip).toHaveClass('eta-sim');
+    expect(chip).toHaveAttribute('title',
+      'merges in ~22m (p50) / ~41m (p90, assumes ≤1 eject); 2 trains ahead');
+    expect(screen.queryByText('~25m left')).toBeNull(); // single number replaced
+  });
+
+  it('keeps the "behind N" sub line (queueAheadCount stays)', () => {
+    render(<PrRow pr={queuedWaiting()} hasDeploy={false} />);
+    expect(screen.getByText(/behind 3/)).toBeInTheDocument();
+  });
+
+  it('no eject clause in the tooltip when assumesEjects is false', () => {
+    render(<PrRow pr={queuedWaiting({
+      mergeEtaSim: { p50Secs: 600, p90Secs: 900, trainsAhead: 1, assumesEjects: false },
+    })} hasDeploy={false} />);
+    expect(screen.getByText('~10m / ~15m p90')).toHaveAttribute('title',
+      'merges in ~10m (p50) / ~15m (p90); 1 train ahead');
+  });
+
+  it('falls back to the single-number ETA without a sim (queued, no samples yet)', () => {
+    render(<PrRow pr={queuedWaiting({ mergeEtaSim: null })} hasDeploy={false} />);
+    expect(screen.getByText('~25m left')).toBeInTheDocument();
+    expect(screen.queryByText(/p90/)).toBeNull();
+  });
+
+  it('never shows the sim chip outside the queue stage', () => {
+    render(<PrRow pr={pr({
+      mergeEtaSim: { p50Secs: 600, p90Secs: 900, trainsAhead: 1, assumesEjects: false },
+    })} hasDeploy={false} />);
+    expect(screen.queryByText(/p90/)).toBeNull();
+    expect(screen.getByText('~4m left')).toBeInTheDocument(); // ci stage ETA intact
   });
 });

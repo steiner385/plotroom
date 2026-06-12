@@ -129,6 +129,8 @@ export class HistoryStore {
   private readonly stmtSelectFlakeRows: Database.Statement;
   private readonly stmtInsertGroupFailure: Database.Statement;
   private readonly stmtSelectGroupFailuresSince: Database.Statement;
+  private readonly stmtCountGroupRuns: Database.Statement;
+  private readonly stmtCountGroupEjects: Database.Statement;
 
   constructor(path: string) {
     this.db = new Database(path);
@@ -240,6 +242,12 @@ export class HistoryStore {
     );
     this.stmtSelectGroupRuns = this.db.prepare(
       'SELECT duration_secs FROM group_runs WHERE repo=? ORDER BY completed_at DESC LIMIT 20'
+    );
+    this.stmtCountGroupRuns = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM group_runs WHERE repo=? AND completed_at >= ?'
+    );
+    this.stmtCountGroupEjects = this.db.prepare(
+      'SELECT COUNT(DISTINCT group_sha) AS n FROM group_failures WHERE repo=? AND observed_at >= ?'
     );
     this.stmtInsertQueueWait = this.db.prepare(
       'INSERT INTO queue_waits (repo, wait_secs, observed_at) VALUES (?,?,?)'
@@ -423,6 +431,25 @@ export class HistoryStore {
   medianGroupRun(repo: string): number | null {
     const rows = this.stmtSelectGroupRuns.all(repo) as { duration_secs: number }[];
     return rows.length ? median(rows.map((r) => r.duration_secs)) : null;
+  }
+
+  /** Raw last-20 whole-group run durations for a repo, newest first —
+   *  the duration sample set for the merge ETA simulation (issue #40). */
+  groupRunSamples(repo: string): number[] {
+    const rows = this.stmtSelectGroupRuns.all(repo) as { duration_secs: number }[];
+    return rows.map((r) => r.duration_secs);
+  }
+
+  /** Count of clean whole-group runs at/after `since` (queue ops: trains/hour,
+   *  batch success rate — issue #39). */
+  countGroupRuns(repo: string, since: string): number {
+    return (this.stmtCountGroupRuns.get(repo, since) as { n: number }).n;
+  }
+
+  /** Count of DISTINCT ejected group shas at/after `since` — a group with
+   *  several failing checks is ONE eject (issues #39/#40). */
+  countGroupEjects(repo: string, since: string): number {
+    return (this.stmtCountGroupEjects.get(repo, since) as { n: number }).n;
   }
 
   /** Record a merge-group culprit check (issue #38) — once per

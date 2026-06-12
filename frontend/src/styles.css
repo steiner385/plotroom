@@ -154,6 +154,20 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .tile-idle     { --tile-c: var(--muted);   background: var(--muted); }
 .hidden-count  { font-weight: 400; color: var(--muted); font-size: 12px; }
 
+/* --- Queue ops strip (issue #39) --- */
+.queue-ops {
+  display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+  font-size: 11px; color: var(--muted); margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.ops-health { font-weight: 700; }
+.ops-health.healthy { color: var(--done); }
+.ops-health.cap-backlog { color: var(--amber); }
+.ops-health.dispatch-stall { color: var(--fail); }
+.ops-remediation { font-weight: 600; color: var(--text); }
+.queue-section { margin-bottom: 10px; }
+.queue-section .queue-train { margin-bottom: 0; }
+
 /* --- Queue train (V5) --- */
 .queue-train {
   display: flex; gap: 6px; align-items: stretch;

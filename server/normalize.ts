@@ -66,7 +66,11 @@ function aggregateFamily(members: CheckRun[]): CheckRun {
     ? 'COMPLETED'
     : started.length ? 'IN_PROGRESS' : survivor.status;
   const conclusion = allCompleted ? worstConclusion(pool.map((c) => c.conclusion)) : null;
-  return { ...survivor, startedAt, completedAt, status, conclusion, shardCount: members.length };
+  // earliest workflow-run creation across members — the stall classifier (#39)
+  // ages the RUN, so the family must not inherit a late shard's re-run time
+  const createds = members.map((c) => c.runCreatedAt).filter((s): s is string => s != null);
+  const runCreatedAt = createds.length ? createds.reduce((a, b) => (a < b ? a : b)) : null;
+  return { ...survivor, startedAt, completedAt, status, conclusion, runCreatedAt, shardCount: members.length };
 }
 
 /**
