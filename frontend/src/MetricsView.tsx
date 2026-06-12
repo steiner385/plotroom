@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { HeadlineStat, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
 import {
-  AreaSeries, BandSeries, MultiLine,
+  AreaSeries, BandSeries, MultiLine, ScatterPlot, SignedLine,
   type BandPoint, type ChartPoint, type LineSeries,
 } from './charts';
 import { formatDur } from './format';
@@ -61,6 +61,17 @@ function deltaText(stat: HeadlineStat): string | null {
 
 const fmtHours = (h: number): string => formatDur(h * 3600);
 const fmtCount = (v: number): string => String(Math.round(v));
+const fmtPct = (v: number): string => `${Math.round(v)}%`;
+
+/**
+ * Calibration headline: signed median error → plain English. POSITIVE error
+ * means stages took longer than first promised (ETAs run optimistic).
+ */
+function calibrationHeadline(medianErrorPct: number, n: number): string {
+  const pct = Math.round(Math.abs(medianErrorPct));
+  if (pct === 0) return `p50 ETAs on target (n=${n})`;
+  return `p50 ETAs run ${pct}% ${medianErrorPct > 0 ? 'optimistic' : 'pessimistic'} (n=${n})`;
+}
 
 function Panel({ title, empty, children }: {
   title: string; empty: boolean; children: ReactNode;
@@ -192,6 +203,11 @@ export function MetricsView({ now }: {
   const jobRepos = payload.slowestJobs.filter((r) => r.jobs.length);
   const velocityRepos = payload.velocity.filter((v) =>
     v.mergedPerBucket.length || v.mergeToQaBuckets.length || v.avgLifespanBuckets.length);
+  const calByRepo = new Map<string, typeof payload.calibration>();
+  for (const c of payload.calibration) {
+    if (!c.buckets.length && !c.points.length) continue;
+    calByRepo.set(c.repo, [...(calByRepo.get(c.repo) ?? []), c]);
+  }
 
   return (
     <div className="metrics">
@@ -335,6 +351,32 @@ export function MetricsView({ now }: {
               <AreaSeries points={align(axis, v.avgLifespanBuckets, (b) => b.meanHours)} kind={kind}
                 format={fmtHours} label={`${v.repo} average PR lifespan per ${noun}`} />
             </ChartBlock>
+          </div>
+        ))}
+      </Panel>
+
+      <Panel title="ETA calibration" empty={calByRepo.size === 0}>
+        {[...calByRepo.entries()].map(([repo, stages]) => (
+          <div key={repo} className="metric-repo">
+            <h3>{repo}</h3>
+            {stages.map((c) => (
+              <div key={c.stage} className="metric-calibration-stage">
+                <div className="metric-row">
+                  <MetricStat label={`${c.stage} stage`}
+                    value={calibrationHeadline(c.medianErrorPct, c.n)}
+                    delta={`p90 |error| ${Math.round(c.p90AbsErrorPct)}%`} />
+                </div>
+                <ChartBlock label={`${c.stage} median ETA error per ${noun} (+ = ran over)`}>
+                  <SignedLine points={align(axis, c.buckets, (b) => b.medianErrorPct)}
+                    kind={kind} format={fmtPct}
+                    label={`${repo} ${c.stage} median ETA error per ${noun}`} />
+                </ChartBlock>
+                <ChartBlock label={`${c.stage} predicted vs actual`}>
+                  <ScatterPlot points={c.points} format={formatDur}
+                    label={`${repo} ${c.stage} predicted vs actual ETA`} />
+                </ChartBlock>
+              </div>
+            ))}
           </div>
         ))}
       </Panel>

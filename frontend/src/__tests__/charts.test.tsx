@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
 import {
-  AreaSeries, BandSeries, MultiLine, axisTicks, formatBucketLabel, formatBucketTooltip,
+  AreaSeries, BandSeries, MultiLine, SignedLine, ScatterPlot,
+  axisTicks, formatBucketLabel, formatBucketTooltip,
   type ChartPoint, type BandPoint,
 } from '../charts';
 
@@ -219,6 +220,102 @@ describe('MultiLine', () => {
 
   it('contains no animation elements', () => {
     const { container } = render(<MultiLine series={series} kind="hour" />);
+    expect(container.querySelector('animate, animateTransform, animateMotion')).toBeNull();
+  });
+});
+
+describe('SignedLine (calibration error trend)', () => {
+  it('renders negative values with an emphasized solid zero gridline', () => {
+    const { container } = render(
+      <SignedLine points={pts([10, -20, 30])} kind="hour" />);
+    const zero = container.querySelector('[data-zero-gridline]')!;
+    expect(zero).toBeTruthy();
+    expect(zero.getAttribute('stroke-dasharray')).toBeNull(); // solid = emphasized
+    // negative point sits BELOW the zero line (larger svg y)
+    const zeroY = Number(zero.getAttribute('y1'));
+    const ys = [...container.querySelectorAll('polyline')]
+      .flatMap((p) => p.getAttribute('points')!.split(' ').map((xy) => Number(xy.split(',')[1])));
+    expect(Math.max(...ys)).toBeGreaterThan(zeroY); // the −20 vertex
+    expect(Math.min(...ys)).toBeLessThan(zeroY);    // the +30 vertex
+  });
+
+  it('labels the extremes and zero with the supplied format', () => {
+    const { container } = render(
+      <SignedLine points={pts([10, -20, 30])} kind="hour" format={(v) => `${v}%`} />);
+    const texts = [...container.querySelectorAll('text')].map((t) => t.textContent);
+    expect(texts).toContain('30%');
+    expect(texts).toContain('-20%');
+    expect(texts).toContain('0%');
+  });
+
+  it('all-positive series still draws the zero baseline', () => {
+    const { container } = render(<SignedLine points={pts([5, 10, 15])} kind="hour" />);
+    expect(container.querySelector('[data-zero-gridline]')).toBeTruthy();
+  });
+
+  it('carries per-bucket tooltips and breaks at null gaps', () => {
+    const { container } = render(
+      <SignedLine points={pts([10, null, -5, 8])} kind="hour" format={(v) => `${v}%`} />);
+    const titles = [...container.querySelectorAll('title')].map((t) => t.textContent);
+    expect(titles.some((t) => t?.includes('-5%'))).toBe(true);
+    expect(titles).toHaveLength(3); // null bucket gets no tooltip
+  });
+
+  it('renders the sparse placeholder below 3 populated buckets', () => {
+    const { container, getByText } = render(
+      <SignedLine points={pts([10, -20, null])} kind="hour" />);
+    expect(container.querySelector('svg')).toBeNull();
+    expect(getByText('collecting data — 2 samples so far')).toBeInTheDocument();
+  });
+});
+
+describe('ScatterPlot (predicted vs actual)', () => {
+  const POINTS = [
+    { predicted: 100, actual: 100 }, // on the diagonal
+    { predicted: 100, actual: 200 }, // above (took longer)
+    { predicted: 200, actual: 100 }, // below (finished early)
+  ];
+
+  /** y of the diagonal at a given x (linear interpolation of its endpoints). */
+  function diagonalYAt(diag: Element, cx: number): number {
+    const [x1, y1, x2, y2] = ['x1', 'y1', 'x2', 'y2'].map((a) => Number(diag.getAttribute(a)));
+    return y1! + ((cx - x1!) * (y2! - y1!)) / (x2! - x1!);
+  }
+
+  it('renders one circle per point and the perfect-calibration diagonal', () => {
+    const { container } = render(<ScatterPlot points={POINTS} />);
+    expect(container.querySelectorAll('circle')).toHaveLength(3);
+    expect(container.querySelector('[data-diagonal]')).toBeTruthy();
+  });
+
+  it('points above the diagonal are exactly those where actual > predicted', () => {
+    const { container } = render(<ScatterPlot points={POINTS} />);
+    const diag = container.querySelector('[data-diagonal]')!;
+    const circles = [...container.querySelectorAll('circle')];
+    const rel = circles.map((c) => {
+      const cy = Number(c.getAttribute('cy'));
+      const dy = diagonalYAt(diag, Number(c.getAttribute('cx')));
+      return cy < dy - 0.01 ? 'above' : cy > dy + 0.01 ? 'below' : 'on';
+    });
+    expect(rel).toEqual(['on', 'above', 'below']);
+  });
+
+  it('tooltips carry predicted → actual with the supplied format', () => {
+    const { container } = render(
+      <ScatterPlot points={POINTS} format={(v) => `${v}s`} />);
+    const titles = [...container.querySelectorAll('title')].map((t) => t.textContent);
+    expect(titles).toContain('predicted 100s → actual 200s');
+  });
+
+  it('renders the sparse placeholder below 3 points', () => {
+    const { container, getByText } = render(
+      <ScatterPlot points={POINTS.slice(0, 2)} />);
+    expect(container.querySelector('svg')).toBeNull();
+    expect(getByText('collecting data — 2 samples so far')).toBeInTheDocument();
+  });
+
+  it('contains no animation elements', () => {
+    const { container } = render(<ScatterPlot points={POINTS} />);
     expect(container.querySelector('animate, animateTransform, animateMotion')).toBeNull();
   });
 });

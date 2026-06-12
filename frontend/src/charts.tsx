@@ -259,6 +259,108 @@ export function BandSeries({ points, kind, height = 140, color = 'var(--accent)'
 }
 
 /**
+ * Signed series over time (values may be negative) — the calibration panel's
+ * median-ETA-error trend. The zero gridline is the semantic anchor ("perfectly
+ * calibrated") and renders emphasized (solid, full-strength stroke, marked
+ * `data-zero-gridline`); the extremes get the usual dashed treatment.
+ */
+export function SignedLine({ points, kind, height = 140, color = 'var(--accent)',
+  format = fmt, label }: {
+  points: ChartPoint[]; kind: BucketKind; height?: number; color?: string;
+  format?: (v: number) => string; label?: string;
+}) {
+  const values = points.map((p) => p.value);
+  const present = values.filter((v): v is number => v != null);
+  if (present.length < 3) return <Placeholder n={present.length} />;
+  const yMax = Math.max(...present, 0);
+  const yMin = Math.min(...present, 0);
+  const span = (yMax - yMin) || 1;
+  const geom: Geom = {
+    x: (i) => points.length <= 1 ? PAD_L + (VB_W - PAD_L - PAD_R) / 2
+      : PAD_L + (i * (VB_W - PAD_L - PAD_R)) / (points.length - 1),
+    y: (v) => height - PAD_B - ((v - yMin) / span) * (height - PAD_T - PAD_B),
+    h: height,
+  };
+  const gridline = (v: number, zero = false) => (
+    <g key={`y${v}${zero ? 'z' : ''}`}>
+      <line x1={PAD_L} x2={VB_W - PAD_R} y1={geom.y(v)} y2={geom.y(v)}
+        stroke={zero ? 'var(--muted)' : 'var(--border)'}
+        strokeDasharray={zero ? undefined : '3 4'}
+        {...(zero ? { 'data-zero-gridline': 'true' } : {})} />
+      <text x={PAD_L - 7} y={geom.y(v) + FONT / 2 - 1} textAnchor="end" fontSize={FONT}
+        fill="var(--muted)">{format(v)}</text>
+    </g>
+  );
+  const ticks = axisTicks(points.map((p) => p.bucket), kind);
+  return (
+    <div className="chart-frame">
+      <svg className="chart-svg" width="100%" viewBox={`0 0 ${VB_W} ${height}`}
+        role="img" aria-label={label}>
+        {yMax > 0 && gridline(yMax)}
+        {yMin < 0 && gridline(yMin)}
+        {gridline(0, true)}
+        {ticks.map((t) => (
+          <text key={`x${t.index}`} x={geom.x(t.index)} y={geom.h - 6}
+            textAnchor={t.index === 0 ? 'start' : t.index === points.length - 1 ? 'end' : 'middle'}
+            fontSize={FONT} fill="var(--muted)">{t.text}</text>
+        ))}
+        {lineShapes(values, geom, color, 's')}
+        {tooltipTargets(points.map((p) => p.bucket), geom, kind, (i) =>
+          points[i]!.value == null ? null
+            : `${formatBucketTooltip(points[i]!.bucket, kind)}: ${format(points[i]!.value!)}`)}
+      </svg>
+      <div className="chart-caption">0 = on target · above 0 = ran past the ETA</div>
+    </div>
+  );
+}
+
+export interface ScatterPoint { predicted: number; actual: number }
+
+/**
+ * Compact predicted-vs-actual scatter (calibration panel). Both axes share one
+ * scale, so the diagonal (`data-diagonal`) is the perfect-calibration line —
+ * points ABOVE it took longer than promised, points below finished early.
+ */
+export function ScatterPlot({ points, format = fmt, label, height = 200 }: {
+  points: ScatterPoint[]; format?: (v: number) => string; label?: string; height?: number;
+}) {
+  if (points.length < 3) return <Placeholder n={points.length} />;
+  const W = 380;
+  const padT = 8; const padR = 12;
+  const max = Math.max(...points.flatMap((p) => [p.predicted, p.actual]), 0) || 1;
+  const x = (v: number): number => PAD_L + (v / max) * (W - PAD_L - padR);
+  const y = (v: number): number => height - PAD_B - (v / max) * (height - padT - PAD_B);
+  const axisLabel = (v: number) => (
+    <g key={`a${v}`}>
+      <text x={PAD_L - 7} y={y(v) + FONT / 2 - 1} textAnchor="end" fontSize={FONT}
+        fill="var(--muted)">{format(v)}</text>
+      <text x={x(v)} y={height - 6} textAnchor={v === 0 ? 'start' : 'end'} fontSize={FONT}
+        fill="var(--muted)">{format(v)}</text>
+    </g>
+  );
+  return (
+    <div className="chart-frame">
+      <svg className="chart-svg chart-scatter" width={W} height={height}
+        viewBox={`0 0 ${W} ${height}`} role="img" aria-label={label}>
+        <line x1={PAD_L} x2={W - padR} y1={y(0)} y2={y(0)} stroke="var(--border)" />
+        <line x1={PAD_L} x2={PAD_L} y1={padT} y2={y(0)} stroke="var(--border)" />
+        {axisLabel(0)}
+        {axisLabel(max)}
+        <line data-diagonal="true" x1={x(0)} y1={y(0)} x2={x(max)} y2={y(max)}
+          stroke="var(--muted)" strokeDasharray="4 4" />
+        {points.map((p, i) => (
+          <circle key={`p${i}`} cx={x(p.predicted)} cy={y(p.actual)} r={3}
+            fill="var(--accent)" fillOpacity={0.55}>
+            <title>{`predicted ${format(p.predicted)} → actual ${format(p.actual)}`}</title>
+          </circle>
+        ))}
+      </svg>
+      <div className="chart-caption">x = predicted · y = actual · dashes = perfect · above = took longer</div>
+    </div>
+  );
+}
+
+/**
  * Several aligned series on one shared scale, with a color-chip legend —
  * the Trends panel's open/ci/queue/failed multi-line chart.
  */

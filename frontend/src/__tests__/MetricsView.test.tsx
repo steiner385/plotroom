@@ -109,10 +109,10 @@ beforeEach(() => {
 });
 
 const PANELS = ['Trends', 'Runner-wait health', 'Queue throughput',
-  'Slowest / most-variable jobs', 'Merge velocity + deploy lag'];
+  'Slowest / most-variable jobs', 'Merge velocity + deploy lag', 'ETA calibration'];
 
 describe('MetricsView', () => {
-  it('fetches window=3d bucket=hour by default and renders all five panels', async () => {
+  it('fetches window=3d bucket=hour by default and renders all six panels', async () => {
     const fetchFn = mockFetchOk();
     render(<MetricsView now={NOW} />);
     expect(screen.getByText('Loading metrics…')).toBeInTheDocument();
@@ -190,7 +190,7 @@ describe('MetricsView', () => {
     mockFetchOk(EMPTY);
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Trends' });
-    expect(screen.getAllByText('no data yet')).toHaveLength(5);
+    expect(screen.getAllByText('no data yet')).toHaveLength(6);
   });
 
   it('trends panel: one multi-line chart per repo with a legend and latest headline stats', async () => {
@@ -269,6 +269,57 @@ describe('MetricsView', () => {
     expect(table.querySelectorAll('svg.chart-svg-compact').length).toBeGreaterThanOrEqual(1);
     // second job has a single trend bucket → compact placeholder
     expect(within(table).getByText('collecting (1)')).toBeInTheDocument();
+  });
+
+
+  it('calibration panel: per-stage headline sentences with signed direction', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    const panel = heading.closest('section')! as HTMLElement;
+    // +18.4% median error → optimistic (stages take longer than promised)
+    expect(within(panel).getByText('p50 ETAs run 18% optimistic (n=42)')).toBeInTheDocument();
+    // −7.2% → pessimistic (stages finish earlier than promised)
+    expect(within(panel).getByText('p50 ETAs run 7% pessimistic (n=11)')).toBeInTheDocument();
+    expect(within(panel).getByText(/p90 \|error\| 55%/)).toBeInTheDocument();
+  });
+
+  it('calibration panel: error-trend line (zero gridline) and scatter render per stage', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    const panel = heading.closest('section')! as HTMLElement;
+    // ci has 3 buckets → real SignedLine with the emphasized zero gridline
+    const trend = within(panel).getByRole('img',
+      { name: 'acme/widgets ci median ETA error per hour' });
+    expect(trend.querySelector('[data-zero-gridline]')).toBeTruthy();
+    // ci has 4 scatter points → real ScatterPlot with the perfect-calibration diagonal
+    const scatter = within(panel).getByRole('img',
+      { name: 'acme/widgets ci predicted vs actual ETA' });
+    expect(scatter.querySelector('[data-diagonal]')).toBeTruthy();
+    expect(scatter.querySelectorAll('circle')).toHaveLength(4);
+  });
+
+  it('calibration panel: sparse stages fall back to collecting placeholders', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    const panel = heading.closest('section')! as HTMLElement;
+    // queue: 2 buckets and 2 points — both charts guard with placeholders
+    expect(within(panel).getAllByText('collecting data — 2 samples so far')).toHaveLength(2);
+    expect(within(panel).queryByRole('img',
+      { name: 'acme/widgets queue predicted vs actual ETA' })).toBeNull();
+  });
+
+  it('calibration panel: entries with no buckets and no points are omitted entirely', async () => {
+    mockFetchOk({ ...EMPTY, calibration: [
+      { repo: 'acme/widgets', stage: 'ci', n: 0, medianErrorPct: 0, p90AbsErrorPct: 0,
+        buckets: [], points: [] },
+    ] });
+    render(<MetricsView now={NOW} />);
+    const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    const panel = heading.closest('section')! as HTMLElement;
+    expect(within(panel).getByText('no data yet')).toBeInTheDocument();
   });
 
   it('runner-wait panel labels event tiers and renders full-width band charts', async () => {
