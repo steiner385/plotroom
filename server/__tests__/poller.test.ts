@@ -1671,16 +1671,6 @@ describe('Poller ETA accuracy tracking', () => {
       .toEqual({ medianAbsErrSecs: 300, n: 1 });
   });
 
-  it('DashboardState repo groups expose accuracy only for stages with data', async () => {
-    history.recordEtaAccuracy('acme/widgets', 'ci', 600, 700, '2026-06-10T10:00:00Z');
-    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
-      config: CONFIG, now: () => NOW });
-    await p.sweepOnce();
-    await p.detailOnce();
-    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
-    expect(repo.accuracy).toEqual({ ci: { medianAbsErrSecs: 100, n: 1 } });
-  });
-
   it('pruneCaches drops stage-tracker entries for vanished PRs', async () => {
     const sweepBox = { current: SWEEP_RESPONSE as Record<string, unknown> };
     const client = {

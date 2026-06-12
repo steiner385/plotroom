@@ -366,7 +366,8 @@ export class HistoryStore {
     return true;
   }
 
-  /** Median |predicted − actual| over the last 20 samples for (repo, stage). */
+  /** Median |predicted − actual| over the last 20 samples for (repo, stage).
+   *  No UI consumer since the Gantt bound bands; retained as the calibration dataset for a future metrics panel. */
   etaAccuracy(repo: string, stage: string): { medianAbsErrSecs: number; n: number } | null {
     const rows = this.stmtSelectEtaAccuracy.all(repo, stage) as
       { predicted_secs: number; actual_secs: number }[];

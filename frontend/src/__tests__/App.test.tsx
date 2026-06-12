@@ -18,8 +18,8 @@ const prView = (number: number): PrView => ({
 const STATE: DashboardState = {
   generatedAt: '2026-06-10T12:00:00Z', staleSince: null,
   repos: [
-    { repo: 'acme/widgets', hasDeploy: true, accuracy: {}, prs: [prView(1)], queue: null },
-    { repo: 'octo/bridge', hasDeploy: false, accuracy: {}, prs: [prView(2)], queue: null },
+    { repo: 'acme/widgets', hasDeploy: true, prs: [prView(1)], queue: null },
+    { repo: 'octo/bridge', hasDeploy: false, prs: [prView(2)], queue: null },
   ],
 };
 
@@ -70,22 +70,6 @@ describe('App', () => {
     expect(screen.getByText('disconnected — retrying…')).toBeInTheDocument();
   });
 
-  it('passes per-repo accuracy down to PR rows (visible in expanded panel)', () => {
-    const withChecks: PrView = { ...prView(1), checks: [
-      { name: 'fast-checks / ESLint', status: 'IN_PROGRESS', conclusion: null, isRequired: true, workflowName: null,
-        elapsedSeconds: 60, expectedSeconds: 180, url: null,
-        expectedLowSeconds: null, expectedHighSeconds: null,
-        waitKind: null, blockedOn: null, waitingSeconds: null, expectedRunnerWaitSeconds: null },
-    ] };
-    mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [
-      { repo: 'acme/widgets', hasDeploy: true,
-        accuracy: { ci: { medianAbsErrSecs: 90, n: 7 } }, prs: [withChecks], queue: null },
-    ] } }));
-    render(<App />);
-    fireEvent.click(screen.getByText('#1'));
-    expect(screen.getByText('ETA accuracy (ci): typically ±2m (n=7)')).toBeInTheDocument();
-  });
-
   it('StatusStrip filter hides non-matching rows and shows (n hidden) in section header', () => {
     // repo1: 1 ci PR; repo2: 1 ci PR — filter by "running" (ci): all visible, no hidden
     render(<App />);
@@ -103,8 +87,8 @@ describe('App', () => {
       etaSeconds: null, etaRangeSeconds: null, overdue: false } };
     // repo1 has only a ci PR; repo2 has only a queue PR
     mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [
-      { repo: 'acme/widgets', hasDeploy: true, accuracy: {}, prs: [ciPr], queue: null },
-      { repo: 'octo/bridge', hasDeploy: false, accuracy: {}, prs: [queuePr], queue: null },
+      { repo: 'acme/widgets', hasDeploy: true, prs: [ciPr], queue: null },
+      { repo: 'octo/bridge', hasDeploy: false, prs: [queuePr], queue: null },
     ] } }));
     render(<App />);
     const strip = screen.getByRole('group', { name: 'Status overview' });
@@ -125,7 +109,7 @@ describe('App', () => {
       etaSeconds: null, etaRangeSeconds: null, overdue: false } };
     // non-deploy repo: merged is the retention-window stage, not a deploy stage
     mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [
-      { repo: 'octo/bridge', hasDeploy: false, accuracy: {}, prs: [ciPr, mergedPr], queue: null },
+      { repo: 'octo/bridge', hasDeploy: false, prs: [ciPr, mergedPr], queue: null },
     ] } }));
     render(<App />);
     const strip = screen.getByRole('group', { name: 'Status overview' });
@@ -145,7 +129,7 @@ describe('App', () => {
     const queuePr: PrView = { ...prView(20), stage: { stage: 'queue', substate: null, percent: null,
       etaSeconds: null, etaRangeSeconds: null, overdue: false } };
     mockUseDashboard.mockReturnValue(hook({ state: { ...STATE, repos: [
-      { repo: 'acme/widgets', hasDeploy: true, accuracy: {}, prs: [prView(1), queuePr], queue: null },
+      { repo: 'acme/widgets', hasDeploy: true, prs: [prView(1), queuePr], queue: null },
     ] } }));
     render(<App />);
     const strip = screen.getByRole('group', { name: 'Status overview' });

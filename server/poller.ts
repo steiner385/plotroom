@@ -59,8 +59,6 @@ export function ingestCheckSet(history: HistoryStore, repo: string, checks: Chec
     history.recordRunnerWait(repo, s.name, s.event, s.waitSecs, s.startedAt);
   }
 }
-export interface StageAccuracy { medianAbsErrSecs: number; n: number; }
-
 /** Which config layer a per-repo setting value came from (GET /api/config). */
 export type SettingSource = 'override' | 'in-repo' | 'derived' | 'default';
 export interface RepoSettingsReport {
@@ -99,7 +97,7 @@ export interface RepoQueueView {
 export interface DashboardState {
   generatedAt: string;
   staleSince: string | null;
-  repos: { repo: string; hasDeploy: boolean; accuracy: Record<string, StageAccuracy>; prs: PrView[]; queue: RepoQueueView | null }[];
+  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null }[];
 }
 
 interface PollerDeps {
@@ -978,16 +976,10 @@ export class Poller extends EventEmitter {
     const deployMap = this.effectiveDeploy();
     const repos = [...byRepo.entries()]
       .map(([repo, prs]) => {
-        const accuracy: Record<string, StageAccuracy> = {};
-        for (const stage of ETA_TRACKED_STAGES) {
-          const a = history.etaAccuracy(repo, stage);
-          if (a) accuracy[stage] = a;
-        }
         const queue = this.buildQueueView(repo, repoGroupProgress.get(repo) ?? []);
         return {
           repo,
           hasDeploy: repo in deployMap,
-          accuracy,
           prs: prs.sort((a, b) =>
             (STAGE_ORDER[b.stage.stage] ?? 0) - (STAGE_ORDER[a.stage.stage] ?? 0) ||
             (b.stage.percent ?? -1) - (a.stage.percent ?? -1)),

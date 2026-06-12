@@ -203,18 +203,8 @@ describe('CheckGantt', () => {
     expect(screen.queryByText('advisory')).not.toBeInTheDocument();
   });
 
-  it('keeps the ETA-accuracy footer below the rows', () => {
-    render(<CheckGantt stage="ci" checks={[check({})]}
-      accuracy={{ medianAbsErrSecs: 120, n: 14 }} />);
-    const line = screen.getByText('ETA accuracy (ci): typically ±2m (n=14)');
-    expect(line.className).toContain('eta-accuracy');
-  });
-
-  it('omits the accuracy footer when no accuracy data is given', () => {
-    render(<CheckGantt stage="ci" checks={[check({})]} />);
-    expect(screen.queryByText(/ETA accuracy/)).not.toBeInTheDocument();
-  });
 });
+
 
 describe('CheckGantt — workflow grouping (Y2)', () => {
   const rollup = (over: Partial<CheckView>): CheckView =>
@@ -285,16 +275,6 @@ describe('CheckGantt — workflow grouping (Y2)', () => {
     const fills = container.querySelectorAll('.g-bar i') as NodeListOf<HTMLElement>;
     expect(fills[0]!.style.width).toBe('100%');
     expect(fills[1]!.style.width).toBe('50%');
-  });
-
-  it('keeps the accuracy footer once at the bottom in grouped mode', () => {
-    const { container } = render(<CheckGantt stage="queue" checks={[
-      rollup({ name: 'ci' }),
-      check({ name: 'ci-gate', workflowName: 'Auto-merge PRs', isRequired: false }),
-    ]} accuracy={{ medianAbsErrSecs: 120, n: 9 }} />);
-    const items = Array.from(container.querySelectorAll('li'));
-    expect(items.filter((li) => /ETA accuracy/.test(li.textContent ?? ''))).toHaveLength(1);
-    expect(items[items.length - 1]!.textContent).toContain('ETA accuracy (queue)');
   });
 });
 

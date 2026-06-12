@@ -29,7 +29,6 @@ export interface PrView {
    *  null when not queued or the group rollup hasn't been fetched yet. */
   groupChecks: CheckView[] | null;
 }
-export interface StageAccuracy { medianAbsErrSecs: number; n: number; }
 export interface QueueGroupView {
   oid: string;
   prNumbers: number[];
@@ -53,7 +52,7 @@ export interface RepoQueueView {
 }
 export interface DashboardState {
   generatedAt: string; staleSince: string | null;
-  repos: { repo: string; hasDeploy: boolean; accuracy: Record<string, StageAccuracy>; prs: PrView[]; queue: RepoQueueView | null }[];
+  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null }[];
 }
 
 // ---- Config API mirrors (GET/PUT /api/config) ----

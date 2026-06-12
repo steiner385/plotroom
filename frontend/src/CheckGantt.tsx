@@ -1,5 +1,5 @@
 import { Fragment } from 'react';
-import type { CheckView, StageAccuracy } from './types';
+import type { CheckView } from './types';
 import { formatDur } from './format';
 
 type RowKind = 'done' | 'running' | 'overdue' | 'failed' | 'queued' | 'skipped';
@@ -115,15 +115,15 @@ export function groupByWorkflow(checks: CheckView[]): WorkflowGroup[] {
 }
 
 /** Expanded-panel check list as horizontal Gantt bars (required, advisory below
- *  the divider) with the ETA-accuracy footer retained at the bottom.
+ *  the divider).
  *
  *  When checks span multiple workflows, rows group under a muted header per
  *  workflow (null last as 'other checks'); the required→advisory ordering is
  *  kept within the leading (rollup) workflow and foreign workflows render in
  *  the advisory zone under their own headers. One shared time scale spans the
  *  whole panel. A single-workflow panel renders exactly as before (no headers). */
-export function CheckGantt({ checks, stage, accuracy }: {
-  checks: CheckView[]; stage: string; accuracy?: StageAccuracy;
+export function CheckGantt({ checks, stage }: {
+  checks: CheckView[]; stage: string;
 }) {
   const scale = ganttScale(checks);
   const groups = groupByWorkflow(checks);
@@ -143,16 +143,6 @@ export function CheckGantt({ checks, stage, accuracy }: {
           </Fragment>
         );
       })}
-      {accuracy && (
-        <li className="eta-accuracy">
-          ETA accuracy ({stage}): typically {formatAbsErr(accuracy.medianAbsErrSecs)} (n={accuracy.n})
-        </li>
-      )}
     </ul>
   );
-}
-
-/** Sub-minute errors render in seconds (`±45s`) — `±0m` reads as "perfect". */
-export function formatAbsErr(secs: number): string {
-  return secs < 60 ? `±${Math.round(secs)}s` : `±${Math.round(secs / 60)}m`;
 }

@@ -9,7 +9,7 @@ import type { DashboardState } from '../poller';
 
 const STATE: DashboardState = {
   generatedAt: '2026-06-10T12:00:00Z', staleSince: null,
-  repos: [{ repo: 'acme/widgets', hasDeploy: true, accuracy: {}, prs: [], queue: null }],
+  repos: [{ repo: 'acme/widgets', hasDeploy: true, prs: [], queue: null }],
 };
 
 describe('api', () => {

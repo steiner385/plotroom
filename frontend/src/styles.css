@@ -128,7 +128,6 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .check-sections .checks { border-top: none; }
 .check-sections { border-top: 1px solid var(--border); }
 .loading { color: var(--muted); }
-.eta-accuracy { color: var(--muted); font-size: 11px; margin-top: 4px; }
 
 /* --- Status overview strip (V2) --- */
 .status-strip { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }

@@ -169,34 +169,6 @@ describe('PrRow', () => {
     expect(screen.getByText('queue blocked — conflict ahead')).toBeInTheDocument();
   });
 
-  it('shows a muted ETA-accuracy line for the current stage in the expanded panel', () => {
-    render(<PrRow pr={pr({})} hasDeploy
-      accuracy={{ ci: { medianAbsErrSecs: 120, n: 14 } }} />);
-    fireEvent.click(screen.getByText('#8962'));
-    const line = screen.getByText('ETA accuracy (ci): typically ±2m (n=14)');
-    expect(line.className).toContain('eta-accuracy');
-  });
-
-  it('renders sub-minute accuracy errors in seconds (±45s, never ±0m)', () => {
-    render(<PrRow pr={pr({})} hasDeploy
-      accuracy={{ ci: { medianAbsErrSecs: 45, n: 6 } }} />);
-    fireEvent.click(screen.getByText('#8962'));
-    expect(screen.getByText('ETA accuracy (ci): typically ±45s (n=6)')).toBeInTheDocument();
-  });
-
-  it('omits the accuracy line when there is no data for the current stage', () => {
-    render(<PrRow pr={pr({})} hasDeploy
-      accuracy={{ queue: { medianAbsErrSecs: 120, n: 3 } }} />);
-    fireEvent.click(screen.getByText('#8962'));
-    expect(screen.queryByText(/ETA accuracy/)).not.toBeInTheDocument();
-  });
-
-  it('omits the accuracy line when no accuracy prop is provided', () => {
-    render(<PrRow pr={pr({})} hasDeploy />);
-    fireEvent.click(screen.getByText('#8962'));
-    expect(screen.queryByText(/ETA accuracy/)).not.toBeInTheDocument();
-  });
-
   it('queued PR with groupChecks shows the merge-group section first, then PR checks (Y2)', () => {
     const groupCheck = { name: 'ci', status: 'IN_PROGRESS', conclusion: null, isRequired: true,
       workflowName: 'CI', elapsedSeconds: 300, expectedSeconds: 600, url: 'https://x/group',
@@ -205,7 +177,7 @@ describe('PrRow', () => {
     render(<PrRow pr={pr({
       stage: { stage: 'queue', substate: null, percent: 50, etaSeconds: 300, etaRangeSeconds: null, overdue: false },
       groupChecks: [groupCheck],
-    })} hasDeploy accuracy={{ queue: { medianAbsErrSecs: 60, n: 5 } }} />);
+    })} hasDeploy />);
     fireEvent.click(screen.getByText('#8962'));
     const labels = screen.getAllByText(/merge group build|PR checks \(head commit\)/);
     expect(labels.map((l) => l.textContent)).toEqual(['merge group build', 'PR checks (head commit)']);
@@ -216,10 +188,6 @@ describe('PrRow', () => {
     // group check rendered alongside the existing head-commit checks
     expect(screen.getByText('ci')).toBeInTheDocument();
     expect(screen.getByText('fast-checks / ESLint')).toBeInTheDocument();
-    // accuracy footer rendered exactly once, in the bottom (PR checks) section
-    expect(screen.getAllByText(/ETA accuracy/)).toHaveLength(1);
-    expect(prLabel.compareDocumentPosition(screen.getByText(/ETA accuracy/))
-      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('non-queued PRs render the single un-labeled panel (unchanged)', () => {

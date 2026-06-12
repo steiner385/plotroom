@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { PrView, StageAccuracy } from './types';
+import type { PrView } from './types';
 import { formatDur, formatEta, stageLabel } from './format';
 import { MetroTrack } from './MetroTrack';
 import { CheckGantt } from './CheckGantt';
@@ -64,8 +64,8 @@ function subLine(pr: PrView, queueCulprit: number | null): string | null {
   return stageLabel(s.stage, s.substate);
 }
 
-export function PrRow({ pr, hasDeploy, accuracy, queueCulprit = null }: {
-  pr: PrView; hasDeploy: boolean; accuracy?: Record<string, StageAccuracy>;
+export function PrRow({ pr, hasDeploy, queueCulprit = null }: {
+  pr: PrView; hasDeploy: boolean;
   /** Repo-level RepoQueueView.unmergeableCulprit (queue-blocked sub line). */
   queueCulprit?: number | null;
 }) {
@@ -88,21 +88,19 @@ export function PrRow({ pr, hasDeploy, accuracy, queueCulprit = null }: {
       </div>
       {open && pr.groupChecks && pr.groupChecks.length > 0 ? (
         /* Queued PR: the merge-group build (the run driving the stage ETA) gets
-           its own labeled section, head-commit PR checks render below it. The
-           ETA-accuracy footer appears once, on the bottom section. */
+           its own labeled section, head-commit PR checks render below it. */
         <div className="check-sections">
           <div className="panel-label">merge group build</div>
-          <CheckGantt checks={pr.groupChecks} stage={s.stage}
-            accuracy={pr.checks.length === 0 ? accuracy?.[s.stage] : undefined} />
+          <CheckGantt checks={pr.groupChecks} stage={s.stage} />
           {pr.checks.length > 0 && (
             <>
               <div className="panel-label">PR checks (head commit)</div>
-              <CheckGantt checks={pr.checks} stage={s.stage} accuracy={accuracy?.[s.stage]} />
+              <CheckGantt checks={pr.checks} stage={s.stage} />
             </>
           )}
         </div>
       ) : (open && pr.checks.length > 0 && (
-        <CheckGantt checks={pr.checks} stage={s.stage} accuracy={accuracy?.[s.stage]} />
+        <CheckGantt checks={pr.checks} stage={s.stage} />
       ))}
     </div>
   );

@@ -24,12 +24,12 @@ const STATE: DashboardState = {
   generatedAt: '2026-06-11T12:00:00Z', staleSince: null,
   repos: [
     {
-      repo: 'acme/widgets', hasDeploy: true, accuracy: {},
+      repo: 'acme/widgets', hasDeploy: true,
       prs: [makepr(1, 'ci'), makepr(2, 'queue')],
       queue: null,
     },
     {
-      repo: 'octo/bridge', hasDeploy: false, accuracy: {},
+      repo: 'octo/bridge', hasDeploy: false,
       prs: [makepr(3, 'parked', 'ci-failed')],
       queue: null,
     },
@@ -104,7 +104,7 @@ describe('Repo expand/collapse', () => {
       ...STATE,
       repos: [
         {
-          repo: 'acme/widgets', hasDeploy: true, accuracy: {},
+          repo: 'acme/widgets', hasDeploy: true,
           prs: [makepr(1, 'ci')],
           queue: { groups: [{ oid: 'g1', prNumbers: [1], percent: 50, etaSeconds: null, failed: false }], waiting: [], unmergeable: [], queueBlocked: [], unmergeableCulprit: null, batchSize: 1 },
         },
