@@ -1419,6 +1419,8 @@ export class Poller extends EventEmitter {
       const { warnings: _warnings, ...fields } = parsed;
       this.repoFileConfigs.set(repo, parsed);
       history.setMeta(`repoConfig:${repo}`, JSON.stringify(fields)); // last-known-good for restarts
+      const applied = history.applyCheckAliases(repo, parsed.aliases);
+      if (applied) console.log(`[repo-config] ${repo}: folded ${applied} check-name alias(es) into history`);
       const sig = JSON.stringify(fields);
       if (sig !== this.repoConfigSig.get(repo)) {
         this.repoConfigSig.set(repo, sig);
