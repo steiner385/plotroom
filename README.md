@@ -172,7 +172,7 @@ All fields are optional; the table shows default values.
 | `deploy.<repo>.environments[].shaKey` | `"commitSha"` | JSON key in the health response that contains the deployed commit SHA. |
 | `repos.<repo>` | `{}` | Per-repo behaviour overrides keyed by `"owner/repo"`. |
 | `repos.<repo>.requiredCheckPrefixes` | derived from `ci.yml` | Check name prefixes that force a check to be treated as required mid-run, before GitHub marks it `isRequired`. Explicit `[]` disables prefix matching entirely for this repo. |
-| `repos.<repo>.rollupJobId` | `"ci"` | The rollup job in `ci.yml` whose `needs:` closure defines required checks. Also used to scope prefix matching to the right workflow. |
+| `repos.<repo>.rollupJobId` | `"ci"` | The rollup job in `ci.yml` whose `needs:` closure defines required checks. Also used to scope prefix matching to the right workflow. **Must equal the branch-protection required check** (it's the gate the merge queue waits on); change both together when you rename the rollup job. |
 | `repos.<repo>.workflowPath` | `".github/workflows/ci.yml"` | Repo-relative path to the workflow YAML read for `needs:` derivation. |
 | `repos.<repo>.batchSize` | global `batchSize` | Merge-queue batch size for this repo. Overrides the global value. |
 | `costPerMinute` | unset | CI cost attribution: pool label → $ per runner-minute (`"default"` prices unlisted pools). Unset → the cost panels report minutes only. File-only (money figures come from the operator's file, never the browser). |
@@ -454,16 +454,22 @@ came from (`override` / `in-repo` / `derived` / `default`).
 ### Surviving workflow/job renames
 
 Reorganizing CI is a non-event for the dashboard if you treat `.pr-dashboard.yml`
-as config-as-code that travels in the same PR as the rename:
+as config-as-code that travels in the same PR as the rename. Everything below is
+a **top-level key** in the watched repo's `.pr-dashboard.yml` (at the repo root
+of its default branch — the same file shown under [Schema](#schema) above), so
+the dashboard never observes a mismatched state. A dashboard-instance override
+in `config.json` (`repos.<repo>.*`) would win over the in-repo file, but you
+rarely want that for a rename — keep the change with the repo.
 
 - **Rename a workflow file** (`ci.yml` → `main.yml`): nothing to do. If the
   configured/default path stops resolving, the dashboard **auto-discovers** which
   file under `.github/workflows/` now defines `rollupJobId` (one GraphQL tree
   read), adopts it, and remembers the path. Pinning `workflowPath` explicitly
   opts out of discovery (the declared path is honored verbatim).
-- **Rename the rollup job** (`ci` → something): set `rollupJobId` in the same PR —
-  it must match branch protection's required check anyway, so it's the one line
-  that has to move with the rename.
+- **Rename the rollup job** (`ci` → something): add a top-level `rollupJobId: <new>`
+  in the same PR. This is the one value that can't self-discover, because it
+  **must equal the branch-protection required check** (the gate the merge queue
+  waits on) — so you're changing the ruleset anyway, and this line moves with it.
 - **Rename any other check/job**: add an `aliases:` entry (`old-name: new-name`).
   The renamed check then keeps its learned history — ETAs, runner-pool mapping,
   flake/duration stats — instead of cold-starting. Without an alias the new name
@@ -471,6 +477,17 @@ as config-as-code that travels in the same PR as the rename:
   hours); the alias just removes that transient. Aliases are applied once and
   rewrite stored history under the new name (idempotent; reverse with the
   inverse alias).
+
+A worked example — `.pr-dashboard.yml` in the PR that renames the `ci` rollup
+job to `merge-gate`, the workflow file to `main.yml`, and the `static-checks`
+job to `checks`:
+
+```yaml
+rollupJobId: merge-gate     # was: ci (default) — must match branch protection
+# workflowPath omitted on purpose: auto-discovered after the file rename
+aliases:
+  static-checks: checks     # carry static-checks' ETA/pool/flake history forward
+```
 
 ### Trust note
 
