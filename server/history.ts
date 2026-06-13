@@ -179,6 +179,7 @@ export class HistoryStore {
   // Ground-truth job→pool mapping (jobs-API feature)
   private readonly stmtUpsertObservedPool: Database.Statement;
   private readonly stmtSelectObservedPool: Database.Statement;
+  private readonly stmtSelectObservedPoolSibling: Database.Statement;
   private readonly stmtSelectObservedPools: Database.Statement;
 
   constructor(path: string) {
@@ -508,6 +509,14 @@ export class HistoryStore {
     );
     this.stmtSelectObservedPool = this.db.prepare(
       'SELECT pool, github_hosted FROM observed_pools WHERE repo=? AND check_name=? AND event=?'
+    );
+    // Sibling lookup: a non-merge_group event borrowing another non-merge_group
+    // event's pool (push ↔ pull_request always hit the same runs-on branch;
+    // only merge_group can differ via a runs-on ternary). Newest first.
+    this.stmtSelectObservedPoolSibling = this.db.prepare(
+      `SELECT pool, github_hosted FROM observed_pools
+       WHERE repo=? AND check_name=? AND event != 'merge_group'
+       ORDER BY last_seen DESC LIMIT 1`
     );
     this.stmtSelectObservedPools = this.db.prepare(
       'SELECT repo, check_name, event, pool, github_hosted, last_seen FROM observed_pools'
@@ -1005,6 +1014,21 @@ export class HistoryStore {
    *  when no job has been observed for that key yet. */
   observedPool(repo: string, checkName: string, event: string): ObservedPool | null {
     const row = this.stmtSelectObservedPool.get(repo, checkName, event) as
+      { pool: string; github_hosted: number } | undefined;
+    return row ? { pool: row.pool, githubHosted: row.github_hosted !== 0 } : null;
+  }
+
+  /** Like {@link observedPool} but, on an exact miss for a non-merge_group
+   *  event, borrows a sibling non-merge_group event's pool for the same job
+   *  (push and pull_request share the runner; the learning loop only fetches
+   *  PR + merge_group runs, so push-event rows otherwise stay 'unknown').
+   *  merge_group misses are NOT borrowed — a runs-on ternary can put that
+   *  branch on a different pool. */
+  observedPoolWithFallback(repo: string, checkName: string, event: string): ObservedPool | null {
+    const exact = this.observedPool(repo, checkName, event);
+    if (exact) return exact;
+    if (event === 'merge_group') return null;
+    const row = this.stmtSelectObservedPoolSibling.get(repo, checkName) as
       { pool: string; github_hosted: number } | undefined;
     return row ? { pool: row.pool, githubHosted: row.github_hosted !== 0 } : null;
   }
