@@ -138,4 +138,44 @@ describe('resolveJobsResponse', () => {
     expect(resolveJobsResponse({ jobs: [{ name: 'j' }] }))
       .toEqual([{ name: 'j', pool: { pool: 'unknown', githubHosted: false } }]);
   });
+
+  describe('reusable-workflow caller inherits its children\' pool', () => {
+    it('caller with empty labels inherits the single child pool', () => {
+      // integration-tests (caller, no runs-on) + its shard children on kindash-arc
+      const out = resolveJobsResponse({ jobs: [
+        { name: 'integration-tests', labels: [], runner_group_name: null },
+        { name: 'integration-tests / test: integration (1/3)', labels: ['kindash-arc'], runner_group_name: 'default' },
+        { name: 'integration-tests / test: integration (2/3)', labels: ['kindash-arc'], runner_group_name: 'default' },
+      ] });
+      expect(out.find((j) => j.name === 'integration-tests')!.pool)
+        .toEqual({ pool: 'kindash-arc', githubHosted: false });
+    });
+
+    it('composites when children differ; githubHosted if any child is hosted', () => {
+      const out = resolveJobsResponse({ jobs: [
+        { name: 'fan', labels: [], runner_group_name: null },
+        { name: 'fan / a', labels: ['kindash-arc'], runner_group_name: 'default' },
+        { name: 'fan / b', labels: ['ubuntu-latest'], runner_group_name: 'GitHub Actions' },
+      ] });
+      const fan = out.find((j) => j.name === 'fan')!.pool;
+      expect(fan.pool).toBe('kindash-arc|ubuntu-latest');
+      expect(fan.githubHosted).toBe(true);
+    });
+
+    it('caller stays unknown when its children are skipped (no child rows)', () => {
+      const out = resolveJobsResponse({ jobs: [
+        { name: 'android-build', labels: [], runner_group_name: null },
+      ] });
+      expect(out[0]!.pool.pool).toBe('unknown');
+    });
+
+    it('does not let a directly-resolved job be overwritten by a same-prefix sibling', () => {
+      const out = resolveJobsResponse({ jobs: [
+        { name: 'build', labels: ['kindash-arc'], runner_group_name: 'default' },
+        { name: 'build / Production Build', labels: ['kindash-arc-spot'], runner_group_name: 'default' },
+      ] });
+      // 'build' already resolved (has its own labels) → not treated as a caller
+      expect(out.find((j) => j.name === 'build')!.pool.pool).toBe('kindash-arc');
+    });
+  });
 });
