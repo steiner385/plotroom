@@ -126,6 +126,8 @@ describe('resolveJobsResponse', () => {
     expect(out).toEqual([
       { name: 'db-migrations / DB Migrations', pool: { pool: 'kindash-arc', githubHosted: false } },
       { name: 'lint', pool: { pool: 'ubuntu-latest', githubHosted: true } },
+      // caller synthesized from the 'db-migrations / *' child
+      { name: 'db-migrations', pool: { pool: 'kindash-arc', githubHosted: false } },
     ]);
   });
 
@@ -167,6 +169,18 @@ describe('resolveJobsResponse', () => {
         { name: 'android-build', labels: [], runner_group_name: null },
       ] });
       expect(out[0]!.pool.pool).toBe('unknown');
+    });
+
+    it('SYNTHESIZES an absent caller from its children (integration-tests case)', () => {
+      // the jobs API often omits the caller entirely — only children appear,
+      // but history keys the check on the bare caller name.
+      const out = resolveJobsResponse({ jobs: [
+        { name: 'integration-tests / test: integration (1/3)', labels: ['kindash-arc'], runner_group_name: 'default' },
+        { name: 'integration-tests / test: integration (2/3)', labels: ['kindash-arc'], runner_group_name: 'default' },
+      ] });
+      const caller = out.find((j) => j.name === 'integration-tests');
+      expect(caller).toBeDefined();
+      expect(caller!.pool).toEqual({ pool: 'kindash-arc', githubHosted: false });
     });
 
     it('does not let a directly-resolved job be overwritten by a same-prefix sibling', () => {
