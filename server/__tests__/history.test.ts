@@ -503,6 +503,39 @@ describe('observed_pools (ground-truth job→pool mapping)', () => {
     expect(h.observedPool(REPO, 'unseen', 'pull_request')).toBeNull();
   });
 
+  describe('observedPoolWithFallback (sibling non-merge_group borrow)', () => {
+    it('push borrows the pull_request pool when push has no exact observation', () => {
+      h.recordObservedPool(REPO, 'fast-checks / ESLint', 'pull_request',
+        { pool: 'kindash-arc-spot', githubHosted: false });
+      // push was never fetched by the learning loop → exact miss → borrow PR's
+      expect(h.observedPool(REPO, 'fast-checks / ESLint', 'push')).toBeNull();
+      expect(h.observedPoolWithFallback(REPO, 'fast-checks / ESLint', 'push'))
+        .toEqual({ pool: 'kindash-arc-spot', githubHosted: false });
+    });
+
+    it('exact observation always wins over the sibling borrow', () => {
+      h.recordObservedPool(REPO, 'j', 'pull_request', { pool: 'arc', githubHosted: false });
+      h.recordObservedPool(REPO, 'j', 'push', { pool: 'special', githubHosted: false });
+      expect(h.observedPoolWithFallback(REPO, 'j', 'push')?.pool).toBe('special');
+    });
+
+    it('borrows the github-hosted flag too (push of an ubuntu-latest job)', () => {
+      h.recordObservedPool(REPO, 'Changed scope', 'pull_request',
+        { pool: 'ubuntu-latest', githubHosted: true });
+      expect(h.observedPoolWithFallback(REPO, 'Changed scope', 'push'))
+        .toEqual({ pool: 'ubuntu-latest', githubHosted: true });
+    });
+
+    it('merge_group does NOT borrow (runs-on ternary can differ)', () => {
+      h.recordObservedPool(REPO, 'k', 'pull_request', { pool: 'arc-spot', githubHosted: false });
+      expect(h.observedPoolWithFallback(REPO, 'k', 'merge_group')).toBeNull();
+    });
+
+    it('returns null when no observation exists for the job at all', () => {
+      expect(h.observedPoolWithFallback(REPO, 'never-seen', 'push')).toBeNull();
+    });
+  });
+
   it('keys on (repo, check_name, event) — same name, different event are distinct', () => {
     h.recordObservedPool(REPO, 'build', 'pull_request',
       { pool: 'kindash-arc', githubHosted: false });

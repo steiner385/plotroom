@@ -1479,7 +1479,7 @@ export class Poller extends EventEmitter {
    * only when NEITHER source knows the pool.
    */
   resolvePool(repo: string, canonicalCheckName: string, event: string): ObservedPool | null {
-    const observed = this.deps.history.observedPool(repo, canonicalCheckName, event);
+    const observed = this.deps.history.observedPoolWithFallback(repo, canonicalCheckName, event);
     if (observed) return observed;
     const derived = this.poolsFor(repo, canonicalCheckName);
     if (derived?.length) return { pool: derived.join('|'), githubHosted: false };
