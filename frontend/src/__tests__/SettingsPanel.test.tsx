@@ -127,6 +127,28 @@ describe('SettingsPanel', () => {
       .toBeInTheDocument();
   });
 
+  it('instance section: poolMeta absent → labelled not configured (cost explorer)', async () => {
+    render(<SettingsPanel open={true} onClose={() => {}} />);
+    expect(await screen.findByText(/not configured — pools show no instance type/))
+      .toBeInTheDocument();
+  });
+
+  it('instance section: poolMeta renders read-only with instance type and superseding rate', async () => {
+    const withMeta = { ...CONFIG, resolved: { ...CONFIG.resolved,
+      poolMeta: {
+        'kindash-runner': { instanceType: 'm7a.2xlarge spot', dollarsPerMinute: 0.006 },
+        'kindash-ondemand': { instanceType: 'm7a.2xlarge' },
+      } } };
+    fetchSpy.mockImplementation(async (url: unknown) =>
+      String(url) === '/api/repos'
+        ? mockFetchOk({ repos: [] })
+        : mockFetchOk(withMeta));
+    render(<SettingsPanel open={true} onClose={() => {}} />);
+    expect(await screen.findByText(
+      'kindash-runner: m7a.2xlarge spot, $0.006/min · kindash-ondemand: m7a.2xlarge'))
+      .toBeInTheDocument();
+  });
+
   it('renders per-repo read-only section with source tags', async () => {
     render(<SettingsPanel open={true} onClose={() => {}} />);
     expect((await screen.findAllByText('acme/widgets')).length).toBeGreaterThan(0);

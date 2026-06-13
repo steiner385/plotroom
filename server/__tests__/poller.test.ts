@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Poller, RetryThrottle, describeError, ingestCheckSet, ingestGroupFailures, maxPlausibleSuccessSecs, rerunInProgressFor, type DashboardState } from '../poller';
+import { Poller, RetryThrottle, describeError, ingestCheckSet, ingestGroupFailures, maxPlausibleSuccessSecs, rerunInProgressFor, computePrCost, type DashboardState } from '../poller';
 import { HistoryStore } from '../history';
 import { deriveCiGraph } from '../required-checks';
 import type { CheckRun } from '../types';
@@ -4056,7 +4056,7 @@ describe('telemetry plumbing (issue #34)', () => {
     ingestCheckSet(history, 'acme/widgets', [COMPLETED_CHECK], () => null,
       undefined, null, null, 'headsha123');
     expect(spy).toHaveBeenCalledWith('acme/widgets', 'Build', 'pull_request',
-      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'headsha123', 2);
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'headsha123', 2, 12);
     spy.mockRestore();
   });
 
@@ -4064,7 +4064,7 @@ describe('telemetry plumbing (issue #34)', () => {
     const spy = vi.spyOn(history, 'recordCheckDuration');
     ingestCheckSet(history, 'acme/widgets', [{ ...COMPLETED_CHECK, runAttempt: null }], () => null);
     expect(spy).toHaveBeenCalledWith('acme/widgets', 'Build', 'pull_request',
-      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', null, null);
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', null, null, 12);
     spy.mockRestore();
   });
 
@@ -4077,7 +4077,7 @@ describe('telemetry plumbing (issue #34)', () => {
     // CHECK_DONE is the completed check in DETAIL_RESPONSE; PR head = 'head8962';
     // its workflowRun fake carries no runAttempt → null
     expect(spy).toHaveBeenCalledWith('acme/widgets', 'fast-checks / ESLint', 'pull_request',
-      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'head8962', null);
+      '2026-06-10T11:50:00Z', '2026-06-10T11:53:00Z', 'SUCCESS', 'head8962', null, null);
     spy.mockRestore();
   });
 
@@ -5233,5 +5233,101 @@ jobs:
       .find((x) => x.number === 9003)!;
     expect(pr.touchesWorkflows).toBe(false);
     expect(pr.workflowImpact).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost explorer: PR-level CI cost + sha → PR-number join
+// ---------------------------------------------------------------------------
+
+describe('computePrCost (cost explorer)', () => {
+  const NOW_COST = new Date('2026-06-10T12:00:00Z');
+  const base: CheckRun = {
+    name: 'unit-tests', rawName: 'unit-tests', status: 'COMPLETED', conclusion: 'SUCCESS',
+    startedAt: '2026-06-10T11:00:00Z', completedAt: '2026-06-10T11:10:00Z',
+    event: 'pull_request', workflowName: 'CI', runNumber: 1, runAttempt: 1,
+    isRequired: true, url: null,
+  };
+  const spotPools = (name: string): string[] | null =>
+    name === 'mystery' ? null : ['spot'];
+
+  it('sums completed spans and counts running checks started → now', () => {
+    const running: CheckRun = { ...base, name: 'e2e', status: 'IN_PROGRESS',
+      conclusion: null, startedAt: '2026-06-10T11:55:00Z', completedAt: null };
+    const { costMinutes, costDollars } = computePrCost([base, running], 'CI',
+      spotPools, null, null, NOW_COST);
+    expect(costMinutes).toBeCloseTo(15); // 10 completed + 5 running
+    expect(costDollars).toBeNull();      // minutes-only mode
+  });
+
+  it('prices per check through its pool; unknown pools take the default rate', () => {
+    const mystery: CheckRun = { ...base, name: 'mystery' };
+    const { costDollars } = computePrCost([base, mystery], 'CI',
+      spotPools, { spot: 0.01, default: 0.02 }, null, NOW_COST);
+    expect(costDollars).toBeCloseTo(0.1 + 0.2); // 10m×0.01 + 10m×0.02
+  });
+
+  it('poolMeta dollarsPerMinute supersedes costPerMinute for the same label', () => {
+    const { costDollars } = computePrCost([base], 'CI',
+      spotPools, { spot: 0.01 }, { spot: { dollarsPerMinute: 0.005 } }, NOW_COST);
+    expect(costDollars).toBeCloseTo(0.05);
+  });
+
+  it('unpriced pools contribute minutes but no dollars (documented undercount)', () => {
+    const mystery: CheckRun = { ...base, name: 'mystery' };
+    const { costMinutes, costDollars } = computePrCost([base, mystery], 'CI',
+      spotPools, { spot: 0.01 }, null, NOW_COST);
+    expect(costMinutes).toBeCloseTo(20);
+    expect(costDollars).toBeCloseTo(0.1); // mystery → 'unknown', no default → $0 contribution
+  });
+
+  it('excludes foreign-workflow checks — their spans are CI-lifecycle wall-clock (issue #61)', () => {
+    const foreign: CheckRun = { ...base, name: 'ci-gate', workflowName: 'Auto-merge PRs',
+      startedAt: '2026-06-10T09:00:00Z', completedAt: '2026-06-10T11:30:00Z' };
+    const { costMinutes } = computePrCost([base, foreign], 'CI',
+      spotPools, null, null, NOW_COST);
+    expect(costMinutes).toBeCloseTo(10);
+  });
+
+  it('nulls when no check has started; negative/NaN spans are skipped', () => {
+    const unstarted: CheckRun = { ...base, status: 'QUEUED', conclusion: null,
+      startedAt: null, completedAt: null };
+    const negative: CheckRun = { ...base, name: 'skipped-placeholder',
+      startedAt: '2026-06-10T11:10:00Z', completedAt: '2026-06-10T11:00:00Z' };
+    expect(computePrCost([unstarted, negative], 'CI', spotPools, { default: 0.01 }, null, NOW_COST))
+      .toEqual({ costMinutes: null, costDollars: null });
+  });
+});
+
+describe('PR-level cost + prNumberForSha on the live poller (cost explorer)', () => {
+  it('open PrViews carry costMinutes (completed + running spans); dollars null without rates', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.getState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    // CHECK_DONE 11:50→11:53 (3m) + CHECK_RUNNING 11:55→now 12:00 (5m)
+    expect(pr.costMinutes).toBeCloseTo(8);
+    expect(pr.costDollars).toBeNull();
+  });
+
+  it('costDollars prices via config rates (default fallback covers unmapped pools)', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: { ...CONFIG, costPerMinute: { default: 0.01 } }, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce();
+    const pr = p.getState().repos[0]!.prs.find((x) => x.number === 8962)!;
+    expect(pr.costDollars).toBeCloseTo(0.08);
+  });
+
+  it('prNumberForSha joins a tracked open PR head; unknown shas and repos are null', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    await p.detailOnce(); // the head sha arrives with the detail snapshot
+    expect(p.prNumberForSha('acme/widgets', 'head8962')).toBe(8962);
+    expect(p.prNumberForSha('acme/widgets', 'someother')).toBeNull();
+    expect(p.prNumberForSha('acme/other', 'head8962')).toBeNull();
+    expect(p.prNumberForSha('acme/widgets', '')).toBeNull();
   });
 });

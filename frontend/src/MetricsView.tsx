@@ -309,6 +309,9 @@ export function MetricsView({ now }: {
     concByRepo.set(c.repo, [...(concByRepo.get(c.repo) ?? []), c]);
   }
   const costRepos = (payload.cost ?? []).filter((c) => c.pools.length > 0);
+  // Cost explorer sub-sections (?? [] tolerates a pre-upgrade server payload)
+  const costJobsByRepo = new Map((payload.costJobs ?? []).map((j) => [j.repo, j.jobs]));
+  const costRunsByRepo = new Map((payload.costRuns ?? []).map((r) => [r.repo, r.runs]));
 
   return (
     <div className="metrics">
@@ -470,6 +473,11 @@ export function MetricsView({ now }: {
             name: pl.pool, color: POOL_COLORS[i % POOL_COLORS.length]!,
             points: align(axis, pl.buckets, (b) => b.minutes),
           }));
+          const jobs = costJobsByRepo.get(c.repo) ?? [];
+          const runs = costRunsByRepo.get(c.repo) ?? [];
+          /** Instance type for a pool key, via the repo's pool rows ('–' unset). */
+          const instanceTypeOf = (cc: typeof c, pool: string): string =>
+            cc.pools.find((pl) => pl.pool === pool)?.instanceType ?? '–';
           return (
             <div key={c.repo} className="metric-repo">
               <h3>{c.repo}</h3>
@@ -484,11 +492,15 @@ export function MetricsView({ now }: {
                   value={fmtMinutes(c.retryMinutes)}
                   delta={c.retryDollars != null ? fmtDollars(c.retryDollars) : null} />
               </div>
+              <span className="metric-label">by pool</span>
               <ul className="cost-pools">
                 {c.pools.map((pl) => (
                   <li key={pl.pool} className="cost-pool" title={defTitle(DEFS.costPoolShare)}
                     data-testid={`cost-pool-${c.repo}-${pl.pool}`}>
                     <span className="metric-job-name">{pl.pool}</span>
+                    <span className="cost-pool-instance" title={defTitle(DEFS.costInstanceType)}>
+                      {pl.instanceType ?? '–'}
+                    </span>
                     <span className="cost-pool-track" aria-hidden="true">
                       <i className="cost-pool-bar"
                         style={{ width: `${maxPoolMinutes > 0 ? (pl.minutes / maxPoolMinutes) * 100 : 0}%` }} />
@@ -503,10 +515,79 @@ export function MetricsView({ now }: {
                 <MultiLine series={series} kind={kind} format={fmtMinutes}
                   label={`${c.repo} runner-minutes per ${noun} by pool`} />
               </ChartBlock>
+              {jobs.length > 0 && (
+                <div data-testid={`cost-jobs-${c.repo}`}>
+                  <span className="metric-label">by job (top {jobs.length} by minutes)</span>
+                  <table className="metric-table">
+                    <thead>
+                      <tr>
+                        <th>job</th><th>event</th>
+                        <th title={defTitle(DEFS.costPoolShare)}>pool</th>
+                        <th title={defTitle(DEFS.costInstanceType)}>instance</th>
+                        <th title={defTitle(DEFS.costJobMinutes)}>minutes</th>
+                        <th title={defTitle(DEFS.costJobMinutes)}>$</th>
+                        <th title={defTitle(DEFS.costJobSamples)}>n</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((j) => (
+                        <tr key={`${j.name}/${j.event}`}>
+                          <td className="metric-job-name">{j.name}</td>
+                          <td>{j.event}</td>
+                          <td>{j.pool}</td>
+                          <td>{instanceTypeOf(c, j.pool)}</td>
+                          <td>{fmtMinutes(j.minutes)}</td>
+                          <td>{j.dollars != null ? fmtDollars(j.dollars) : '–'}</td>
+                          <td>{j.samples}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div data-testid={`cost-runs-${c.repo}`}>
+                <span className="metric-label">
+                  by run{runs.length > 0 ? ` (top ${runs.length} by minutes)` : ''}
+                </span>
+                {runs.length > 0 ? (
+                  <table className="metric-table">
+                    <thead>
+                      <tr>
+                        <th title={defTitle(DEFS.costRunMinutes)}>run #</th>
+                        <th>event</th>
+                        <th title={defTitle(DEFS.costRunPr)}>PR</th>
+                        <th>sha</th>
+                        <th title={defTitle(DEFS.costRunJobs)}>jobs</th>
+                        <th title={defTitle(DEFS.costRunMinutes)}>minutes</th>
+                        <th title={defTitle(DEFS.costRunMinutes)}>$</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {runs.map((r) => (
+                        <tr key={`${r.event}/${r.headShaShort}/${r.runNumber}`}>
+                          <td>#{r.runNumber}</td>
+                          <td>{r.event}</td>
+                          <td>{r.prNumber != null
+                            ? <a href={`#pr-${r.prNumber}`}>#{r.prNumber}</a> : '–'}</td>
+                          <td className="metric-job-name">{r.headShaShort}</td>
+                          <td>{r.jobCount}</td>
+                          <td>{fmtMinutes(r.minutes)}</td>
+                          <td>{r.dollars != null ? fmtDollars(r.dollars) : '–'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p className="metric-note">
+                    collecting — run numbers record from new ingestion onward; this
+                    table fills as fresh workflow runs land
+                  </p>
+                )}
+              </div>
               <p className="metric-note">
                 {c.totalDollars != null
-                  ? 'dollars = minutes × costPerMinute (file-only config; pool → $/min, ‘default’ fallback) — unpriced pools stay out of the $ totals. '
-                  : 'minutes only — set costPerMinute in config.json (pool → $/min, ‘default’ fallback) to see $. '}
+                  ? 'dollars = minutes × pool rate (file-only config: poolMeta $/min supersedes costPerMinute per pool, ‘default’ backs the rest) — unpriced pools stay out of the $ totals. '
+                  : 'minutes only — set costPerMinute or poolMeta in config.json (pool → $/min, ‘default’ fallback) to see $. '}
                 retry burden = minutes on run_attempt &gt; 1 (re-runs after flakes,
                 spot reclaims, manual retries)
               </p>

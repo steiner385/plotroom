@@ -35,6 +35,40 @@ export interface RepoConfig {
   /** Merge-queue batch size for this repo (defaults to the global batchSize). */
   batchSize?: number;
 }
+/** One pool's cost-explorer metadata (file-only `poolMeta` map). */
+export interface PoolMetaEntry {
+  /** Display-only instance type for the pool ('m7a.2xlarge spot'). */
+  instanceType?: string;
+  /** $ per runner-minute — takes precedence over costPerMinute[pool]. */
+  dollarsPerMinute?: number;
+  /** Operator free-text (rendered as a tooltip where the pool appears). */
+  note?: string;
+}
+
+/**
+ * $/runner-minute for a pool label, across both rate sources. Precedence per
+ * label: poolMeta[pool].dollarsPerMinute > costPerMinute[pool]; then the same
+ * pair for the 'default' key. Null = unpriced (callers keep $ figures null).
+ */
+export function poolRate(pool: string,
+  costPerMinute: Record<string, number> | null,
+  poolMeta: Record<string, PoolMetaEntry> | null): number | null {
+  return poolMeta?.[pool]?.dollarsPerMinute
+    ?? costPerMinute?.[pool]
+    ?? poolMeta?.['default']?.dollarsPerMinute
+    ?? costPerMinute?.['default']
+    ?? null;
+}
+
+/** Whether ANY $/minute rate is configured (costPerMinute present, or any
+ *  poolMeta entry carries dollarsPerMinute) — when false, every dollar figure
+ *  must be null (minutes-only mode), never fabricated zeroes. */
+export function hasAnyRate(costPerMinute: Record<string, number> | null,
+  poolMeta: Record<string, PoolMetaEntry> | null): boolean {
+  return costPerMinute != null
+    || Object.values(poolMeta ?? {}).some((m) => m.dollarsPerMinute !== undefined);
+}
+
 /** GitHub App auth block (tokenSource 'app'). File-only — never PUT-writable. */
 export interface AppAuthConfig {
   /** Numeric GitHub App id (App settings → "App ID"). */
@@ -93,6 +127,12 @@ export interface AppConfig {
    *  CI cost panel reports minutes only. File-only — never PUT-writable
    *  (money figures must come from the operator's file, not the browser). */
   costPerMinute?: Record<string, number>;
+  /** Cost explorer: per-pool metadata — instance type (display), optional
+   *  $/runner-minute (SUPERSEDES the flat costPerMinute entry for the same
+   *  label), and a free-text note. The 'default' key participates in rate
+   *  fallback exactly like costPerMinute's. File-only — never PUT-writable
+   *  (money figures must come from the operator's file, not the browser). */
+  poolMeta?: Record<string, PoolMetaEntry>;
   deploy: Record<string, DeployConfig>;
   repos?: Record<string, RepoConfig>;
   intervals: { sweepMs: number; hotMs: number; deployMs: number };
@@ -307,7 +347,7 @@ export type SafeConfigKey = (typeof SAFE_CONFIG_KEYS)[number];
 /** Instance-config keys surfaced read-only in the UI (file-only for security).
  *  `notifications` is not listed: its `enabled` flag is PUT-writable (see the
  *  SAFE_CONFIG_KEYS carve-out); the rest of the block remains file-only. */
-export const READ_ONLY_CONFIG_KEYS = ['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'costPerMinute'] as const;
+export const READ_ONLY_CONFIG_KEYS = ['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'costPerMinute', 'poolMeta'] as const;
 
 const INTERVAL_KEYS = ['sweepMs', 'hotMs', 'deployMs'] as const;
 
@@ -581,6 +621,38 @@ export function loadConfig(path?: string): AppConfig {
       // non-finites are not money
       if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) {
         throw new Error(`config: costPerMinute["${pool}"] must be a finite number ≥ 0 `
+          + `(got ${JSON.stringify(rate)})`);
+      }
+    }
+  }
+  if (merged.poolMeta !== undefined) {
+    const pm: unknown = merged.poolMeta;
+    if (!pm || typeof pm !== 'object' || Array.isArray(pm)) {
+      throw new Error('config: poolMeta must be an object mapping pool labels to '
+        + `{ instanceType?, dollarsPerMinute?, note? } (got ${JSON.stringify(pm)})`);
+    }
+    const POOL_META_KEYS = new Set(['instanceType', 'dollarsPerMinute', 'note']);
+    for (const [pool, entry] of Object.entries(pm)) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`config: poolMeta["${pool}"] must be an object (got ${JSON.stringify(entry)})`);
+      }
+      const e = entry as Record<string, unknown>;
+      // unknown sub-keys are typos waiting to silently not price a pool — reject
+      const unknown = Object.keys(e).filter((k) => !POOL_META_KEYS.has(k));
+      if (unknown.length) {
+        throw new Error(`config: poolMeta["${pool}"] has unknown key(s) ${unknown.join(', ')} `
+          + '(allowed: instanceType, dollarsPerMinute, note)');
+      }
+      for (const k of ['instanceType', 'note'] as const) {
+        if (e[k] !== undefined && (typeof e[k] !== 'string' || !(e[k] as string).trim())) {
+          throw new Error(`config: poolMeta["${pool}"].${k} must be a non-empty string `
+            + `(got ${JSON.stringify(e[k])})`);
+        }
+      }
+      // zero is a legitimate statement (a free/self-owned pool), like costPerMinute
+      const rate = e.dollarsPerMinute;
+      if (rate !== undefined && (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0)) {
+        throw new Error(`config: poolMeta["${pool}"].dollarsPerMinute must be a finite number ≥ 0 `
           + `(got ${JSON.stringify(rate)})`);
       }
     }

@@ -297,6 +297,7 @@ describe('computeMetrics: empty history', () => {
       runnerWaits: [], queue: [], slowestJobs: [], velocity: [], leadTime: [], trends: [],
       calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [],
       regressions: [], runnerPools: [], reclaims: [], concurrency: [], cost: [],
+      costJobs: [], costRuns: [],
     });
   });
 });
@@ -1122,5 +1123,147 @@ describe('computeMetrics: CI cost attribution (issue #43)', () => {
     const m = computeMetrics(h, '24h', 'hour', NOW, [], () => 1, new Map(),
       new Map([[REPO, new Set(['ci-gate'])]]), [], poolsFor, [], null);
     expect(m.cost[0]!.totalMinutes).toBeCloseTo(5);
+  });
+});
+
+// ---- Cost explorer: per-job / per-run cost + poolMeta (instance type, rates) --
+
+describe('computeMetrics: cost explorer (per-job, per-run, poolMeta)', () => {
+  /** unit-tests/build → spot; e2e → composite ternary; mystery → unmappable. */
+  const poolsFor = (_repo: string, name: string): string[] | null =>
+    name.startsWith('e2e') ? ['spot', 'ondemand']
+      : name === 'mystery' ? null
+        : ['spot'];
+
+  const explorer = (opts: {
+    cpm?: Record<string, number> | null;
+    poolMeta?: Parameters<typeof computeMetrics>[12];
+    prNumberForSha?: (repo: string, sha: string) => number | null;
+  } = {}) =>
+    computeMetrics(h, '24h', 'hour', NOW, [], () => 1, new Map(), new Map(),
+      [], poolsFor, [], opts.cpm ?? null, opts.poolMeta ?? null,
+      opts.prNumberForSha ?? (() => null));
+
+  /** One job row with full run identity (sha + run number). */
+  const runJob = (name: string, startISO: string, secs: number,
+    sha: string | null, runNumber: number | null, event = 'pull_request',
+    attempt: number | null = 1): void => {
+    const start = new Date(startISO);
+    const end = new Date(start.getTime() + secs * 1000);
+    h.recordCheckDuration(REPO, name, event, start.toISOString(),
+      end.toISOString(), 'SUCCESS', sha, attempt, runNumber);
+  };
+
+  it('costJobs: groups by (name, event), sums minutes, counts samples, sorts by minutes desc', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 300, 'sha1', 1);
+    runJob('unit-tests', '2026-06-11T10:30:00Z', 300, 'sha2', 2);
+    runJob('unit-tests', '2026-06-11T10:40:00Z', 60, 'sha2', 3, 'merge_group');
+    runJob('build', '2026-06-11T11:00:00Z', 1200, 'sha1', 1);
+    const [cj] = explorer().costJobs;
+    expect(cj!.repo).toBe(REPO);
+    expect(cj!.jobs).toEqual([
+      { name: 'build', event: 'pull_request', minutes: 20, dollars: null,
+        pool: 'spot', samples: 1 },
+      { name: 'unit-tests', event: 'pull_request', minutes: 10, dollars: null,
+        pool: 'spot', samples: 2 },
+      { name: 'unit-tests', event: 'merge_group', minutes: 1, dollars: null,
+        pool: 'spot', samples: 1 },
+    ]);
+  });
+
+  it('costJobs: rate precedence poolMeta > costPerMinute > default; unpriced pool → null dollars', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 600, 'sha1', 1);  // spot, 10 min
+    runJob('e2e', '2026-06-11T10:10:00Z', 600, 'sha1', 1);          // spot|ondemand → default
+    runJob('mystery', '2026-06-11T10:20:00Z', 600, 'sha1', 1);      // unknown
+    const [cj] = explorer({
+      cpm: { spot: 0.01 },                                          // superseded for spot
+      poolMeta: { spot: { dollarsPerMinute: 0.005 } },              // wins
+    }).costJobs;
+    const by = new Map(cj!.jobs.map((j) => [j.name, j]));
+    expect(by.get('unit-tests')!.dollars).toBeCloseTo(0.05);        // poolMeta rate
+    expect(by.get('e2e')!.dollars).toBeNull();                      // no default anywhere
+    expect(by.get('mystery')!.dollars).toBeNull();
+  });
+
+  it('costJobs: caps at 15 jobs per repo', () => {
+    for (let i = 0; i < 20; i++) {
+      runJob(`job-${String(i).padStart(2, '0')}`, '2026-06-11T10:00:00Z', 60 + i, 'sha1', 1);
+    }
+    expect(explorer().costJobs[0]!.jobs).toHaveLength(15);
+    // top by minutes: job-19 (the longest) leads
+    expect(explorer().costJobs[0]!.jobs[0]!.name).toBe('job-19');
+  });
+
+  it('costRuns: groups by (event, sha, run number); jobCount = distinct names; retries add minutes', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 300, 'shaAAA1234', 41);
+    runJob('build', '2026-06-11T10:00:00Z', 600, 'shaAAA1234', 41);
+    runJob('unit-tests', '2026-06-11T10:20:00Z', 300, 'shaAAA1234', 41, 'pull_request', 2); // retry, same run
+    runJob('unit-tests', '2026-06-11T11:00:00Z', 60, 'shaBBB1234', 42);                     // another run
+    runJob('unit-tests', '2026-06-11T11:30:00Z', 60, 'shaAAA1234', 43, 'merge_group');      // same sha, group run
+    const [cr] = explorer().costRuns;
+    expect(cr!.repo).toBe(REPO);
+    expect(cr!.runs).toEqual([
+      { event: 'pull_request', runNumber: 41, headShaShort: 'shaAAA1', minutes: 20,
+        dollars: null, jobCount: 2, prNumber: null },
+      // minutes tie → newer run number first
+      { event: 'merge_group', runNumber: 43, headShaShort: 'shaAAA1', minutes: 1,
+        dollars: null, jobCount: 1, prNumber: null },
+      { event: 'pull_request', runNumber: 42, headShaShort: 'shaBBB1', minutes: 1,
+        dollars: null, jobCount: 1, prNumber: null },
+    ]);
+  });
+
+  it('costRuns: rows without run_number or head_sha cannot be attributed and are excluded (ramp)', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 300, 'sha1', null); // pre-migration shape
+    runJob('build', '2026-06-11T10:00:00Z', 300, null, 7);           // placeholder sha
+    runJob('e2e', '2026-06-11T10:00:00Z', 300, 'sha1', 7);           // attributable
+    const [cr] = explorer().costRuns;
+    expect(cr!.runs).toHaveLength(1);
+    expect(cr!.runs[0]!).toMatchObject({ runNumber: 7, jobCount: 1 });
+    // the job leaderboard still sees all three (works on day one)
+    expect(explorer().costJobs[0]!.jobs).toHaveLength(3);
+  });
+
+  it('costRuns: prices member jobs via their pools and joins the PR number by head sha', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 600, 'headsha99', 50); // spot 10m
+    runJob('mystery', '2026-06-11T10:00:00Z', 600, 'headsha99', 50);    // unknown 10m, unpriced
+    const [cr] = explorer({
+      cpm: { spot: 0.01 },
+      prNumberForSha: (repo, sha) => (repo === REPO && sha === 'headsha99' ? 8962 : null),
+    }).costRuns;
+    expect(cr!.runs[0]!).toMatchObject({
+      runNumber: 50, prNumber: 8962, minutes: 20, dollars: 0.1, jobCount: 2 });
+  });
+
+  it('costRuns: caps at 20 runs per repo, largest minutes first', () => {
+    for (let i = 0; i < 25; i++) {
+      runJob('unit-tests', '2026-06-11T10:00:00Z', 60 * (i + 1), `sha${i}xxxx`, 100 + i);
+    }
+    const runs = explorer().costRuns[0]!.runs;
+    expect(runs).toHaveLength(20);
+    expect(runs[0]!.runNumber).toBe(124); // the 25-minute run leads
+  });
+
+  it('cost pools carry instanceType from poolMeta (null when unset)', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 300, 'sha1', 1);
+    runJob('mystery', '2026-06-11T10:00:00Z', 300, 'sha1', 1);
+    const [c] = explorer({ poolMeta: { spot: { instanceType: 'm7a.2xlarge spot' } } }).cost;
+    expect(c!.pools.find((p) => p.pool === 'spot')!.instanceType).toBe('m7a.2xlarge spot');
+    expect(c!.pools.find((p) => p.pool === 'unknown')!.instanceType).toBeNull();
+  });
+
+  it('poolMeta rates alone (no costPerMinute) flip $ on — totals are no longer null', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 600, 'sha1', 1);
+    const [c] = explorer({ poolMeta: { default: { dollarsPerMinute: 0.02 } } }).cost;
+    expect(c!.totalDollars).toBeCloseTo(0.2);
+    expect(c!.pools[0]!.dollars).toBeCloseTo(0.2);
+  });
+
+  it('costJobs/costRuns are exclude-filtered and empty on empty history', () => {
+    runJob('unit-tests', '2026-06-11T10:00:00Z', 300, 'sha1', 1);
+    const m = computeMetrics(h, '24h', 'hour', NOW, [REPO], () => 1, new Map(), new Map(),
+      [], poolsFor, [], null);
+    expect(m.costJobs).toEqual([]);
+    expect(m.costRuns).toEqual([]);
   });
 });

@@ -408,3 +408,29 @@ describe('PrRow CI-change badge + impact card (issue #49)', () => {
     expect(screen.queryByTestId('workflow-impact')).toBeNull();
   });
 });
+
+describe('PrRow — PR-level CI cost line (cost explorer)', () => {
+  it('expanded panel shows minutes + dollars when both are present', () => {
+    render(<PrRow pr={pr({ costMinutes: 38, costDollars: 1.2 })} hasDeploy />);
+    expect(screen.queryByTestId('pr-cost')).toBeNull(); // collapsed
+    fireEvent.click(screen.getByText('#8962'));
+    const line = screen.getByTestId('pr-cost');
+    expect(line.textContent).toBe('CI cost this run: 38m (~$1.20)');
+    expect(line).toHaveAttribute('title', expect.stringContaining('CI cost this run'));
+  });
+
+  it('minutes-only when no rates are configured (costDollars null)', () => {
+    render(<PrRow pr={pr({ costMinutes: 90, costDollars: null })} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.getByTestId('pr-cost').textContent).toBe('CI cost this run: 1h 30m');
+  });
+
+  it('hidden when costMinutes is null (nothing started / merged PRs / pre-upgrade payloads)', () => {
+    render(<PrRow pr={pr({ costMinutes: null, costDollars: null })} hasDeploy />);
+    fireEvent.click(screen.getByText('#8962'));
+    expect(screen.queryByTestId('pr-cost')).toBeNull();
+    // pre-upgrade payload: the fields are absent entirely
+    render(<PrRow pr={pr({})} hasDeploy />);
+    expect(screen.queryByTestId('pr-cost')).toBeNull();
+  });
+});
