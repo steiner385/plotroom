@@ -366,6 +366,16 @@ multi-line body.
 - Delivery uses the same gates as every event: `enabled` must be true for the
   command/webhook sinks; the browser bell shows it regardless.
 
+## Actuals cron (cloud cost feed)
+
+`scripts/post-actuals.sh [days]` pulls daily cost from AWS Cost Explorer
+(filter configurable via `ACTUALS_FILTER_JSON`; defaults to EC2 compute) and
+POSTs it to `/api/cost/actuals`, powering the attribution-coverage view.
+Wire it as a systemd user timer with the templates in `deploy/`
+(`pr-dashboard-actuals.{service,timer}.template` — render `__APP_ROOT__`,
+enable with `systemctl --user enable --now pr-dashboard-actuals.timer`).
+Any other cost source works too — the endpoint just takes `{date, dollars}`.
+
 ## Kiosk mode (wall displays)
 
 Append `?kiosk=1` to the dashboard URL for a read-only, at-a-distance view

@@ -1,0 +1,9 @@
+[Unit]
+Description=Post daily cloud-cost actuals to pr-dashboard
+After=network-online.target pr-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__APP_ROOT__
+ExecStart=__APP_ROOT__/scripts/post-actuals.sh 3
