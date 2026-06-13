@@ -204,7 +204,8 @@ async function main() {
       poller.currentExclude(), (repo) => poller.settingsFor(repo).batchSize,
       poller.allDerivedGraphs(), poller.liveForeignNames(), poller.activeRegressions(),
       (repo, name) => poller.poolsFor(repo, name), poller.poolHealth(),
-      config.costPerMinute ?? null),
+      config.costPerMinute ?? null, config.poolMeta ?? null,
+      (repo, sha) => poller.prNumberForSha(repo, sha)),
     repos: () => poller.repoToggleList(),
     webhooks: webhookSecret != null ? {
       path: config.webhooks.path,

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { writeFileSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, repoSettings, effectiveRepoSettings, effectiveDeployMap, resolveOwners, validateConfigPatch, writeConfigPatch, configFileSources, _resetDeployAllowlistWarnings, SAFE_CONFIG_KEYS, READ_ONLY_CONFIG_KEYS, DEFAULTS, type AppConfig } from '../config';
+import { loadConfig, repoSettings, effectiveRepoSettings, effectiveDeployMap, resolveOwners, validateConfigPatch, writeConfigPatch, configFileSources, _resetDeployAllowlistWarnings, SAFE_CONFIG_KEYS, READ_ONLY_CONFIG_KEYS, DEFAULTS, poolRate, hasAnyRate, type AppConfig } from '../config';
 import { parseRepoConfig } from '../repo-config';
 import { APP_ROOT } from '../paths';
 
@@ -493,7 +493,7 @@ describe('resolveOwners', () => {
 describe('validateConfigPatch', () => {
   it('exports the safe subset and read-only key lists the API advertises', () => {
     expect(SAFE_CONFIG_KEYS).toEqual(['owners', 'exclude', 'retentionDays', 'batchSize', 'intervals', 'notifications']);
-    expect(READ_ONLY_CONFIG_KEYS).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'costPerMinute']);
+    expect(READ_ONLY_CONFIG_KEYS).toEqual(['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'costPerMinute', 'poolMeta']);
   });
 
   it('accepts the full safe subset and normalizes it', () => {
@@ -948,5 +948,87 @@ describe('costPerMinute config (issue #43)', () => {
     const v = validateConfigPatch({ costPerMinute: { default: 0.01 } });
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.offendingKeys).toContain('costPerMinute');
+  });
+});
+
+// ------------------------------------------------------------------------------
+// Cost explorer: poolMeta (file-only per-pool metadata) + rate resolution
+// ------------------------------------------------------------------------------
+
+describe('poolMeta config (cost explorer)', () => {
+  it('absent by default; read-only key list advertises it', () => {
+    const cfg = loadConfig('/nonexistent/config.json');
+    expect(cfg.poolMeta).toBeUndefined();
+    expect(READ_ONLY_CONFIG_KEYS).toContain('poolMeta');
+  });
+
+  it('loads a valid map (instanceType / dollarsPerMinute / note all optional)', () => {
+    const cfg = loadConfig(writeConfig({ poolMeta: {
+      'kindash-runner': { instanceType: 'm7a.2xlarge spot', dollarsPerMinute: 0.006 },
+      'kindash-ondemand': { instanceType: 'm7a.2xlarge', note: 'merge_group only' },
+      default: { dollarsPerMinute: 0.01 },
+    } }));
+    expect(cfg.poolMeta!['kindash-runner']).toEqual(
+      { instanceType: 'm7a.2xlarge spot', dollarsPerMinute: 0.006 });
+    expect(cfg.poolMeta!['kindash-ondemand']!.note).toBe('merge_group only');
+  });
+
+  it('zero dollarsPerMinute is legitimate (free/self-owned pool)', () => {
+    const cfg = loadConfig(writeConfig({ poolMeta: { rocky: { dollarsPerMinute: 0 } } }));
+    expect(cfg.poolMeta!.rocky!.dollarsPerMinute).toBe(0);
+  });
+
+  it('rejects non-object maps and non-object entries', () => {
+    expect(() => loadConfig(writeConfig({ poolMeta: ['a'] }))).toThrow(/poolMeta must be an object/);
+    expect(() => loadConfig(writeConfig({ poolMeta: { spot: 0.01 } })))
+      .toThrow(/poolMeta\["spot"\] must be an object/);
+  });
+
+  it('rejects unknown sub-keys (typos must not silently un-price a pool)', () => {
+    expect(() => loadConfig(writeConfig({ poolMeta: { spot: { dollarPerMinute: 0.01 } } })))
+      .toThrow(/unknown key\(s\) dollarPerMinute/);
+  });
+
+  it('rejects negative/non-finite rates and empty strings', () => {
+    expect(() => loadConfig(writeConfig({ poolMeta: { spot: { dollarsPerMinute: -1 } } })))
+      .toThrow(/dollarsPerMinute must be a finite number/);
+    expect(() => loadConfig(writeConfig({ poolMeta: { spot: { instanceType: '  ' } } })))
+      .toThrow(/instanceType must be a non-empty string/);
+  });
+
+  it('stays file-only: a PUT carrying poolMeta is rejected as an offending key', () => {
+    const v = validateConfigPatch({ poolMeta: { spot: { dollarsPerMinute: 1 } } });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.offendingKeys).toContain('poolMeta');
+  });
+});
+
+describe('poolRate / hasAnyRate (cost explorer rate precedence)', () => {
+  const CPM = { spot: 0.01, default: 0.02 };
+  const META = { spot: { dollarsPerMinute: 0.005 }, default: { dollarsPerMinute: 0.03 } };
+
+  it('poolMeta dollarsPerMinute SUPERSEDES the flat costPerMinute entry per label', () => {
+    expect(poolRate('spot', CPM, META)).toBe(0.005);
+  });
+
+  it('falls back to costPerMinute[pool] when poolMeta has no rate for the label', () => {
+    expect(poolRate('spot', CPM, { spot: { instanceType: 'm7a' } })).toBe(0.01);
+  });
+
+  it("default fallback follows the same precedence (poolMeta default > costPerMinute default)", () => {
+    expect(poolRate('unknown', CPM, META)).toBe(0.03);
+    expect(poolRate('unknown', CPM, null)).toBe(0.02);
+    expect(poolRate('unknown', { spot: 0.01 }, null)).toBeNull();
+  });
+
+  it('null with no rate sources at all', () => {
+    expect(poolRate('spot', null, null)).toBeNull();
+  });
+
+  it('hasAnyRate: true with costPerMinute OR any poolMeta dollarsPerMinute; false otherwise', () => {
+    expect(hasAnyRate(CPM, null)).toBe(true);
+    expect(hasAnyRate(null, META)).toBe(true);
+    expect(hasAnyRate(null, { spot: { instanceType: 'm7a' } })).toBe(false);
+    expect(hasAnyRate(null, null)).toBe(false);
   });
 });

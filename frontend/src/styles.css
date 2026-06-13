@@ -493,6 +493,12 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .cost-pool-bar { display: block; height: 100%; min-width: 2px; border-radius: 3px;
   background: var(--accent); }
 .cost-pool-value { color: var(--muted); white-space: nowrap; }
+/* Cost explorer: instance-type chip next to the pool name (from poolMeta) */
+.cost-pool-instance { width: 140px; flex-shrink: 0; color: var(--muted);
+  font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Cost explorer: PR-level cost line in the expanded panel */
+.pr-cost { padding: 4px 14px; font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums; }
 
 /* --- Workflow lint (#48): severity badges --- */
 .lint-badge { display: inline-block; padding: 1px 7px; border-radius: 9px;

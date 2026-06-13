@@ -4,7 +4,7 @@ import { formatDur, formatEta, stageLabel } from './format';
 import { MetroTrack } from './MetroTrack';
 import { CheckGantt } from './CheckGantt';
 import { Waterfall, waterfallSegments } from './Waterfall';
-import { subLineTitle } from './definitions';
+import { DEFS, defTitle, subLineTitle } from './definitions';
 
 /** Muted one-line status under the track: percent + active-check for ci,
  *  substate reason for parked, group/position info for queue.
@@ -112,6 +112,16 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
             recognized term in the line, from the shared SUBLINE_TERMS map */}
         {sub && <div className="sub" title={subLineTitle(sub)}>{sub}</div>}
       </div>
+      {/* PR-level CI cost (cost explorer): the current head's runner-minutes
+          (running checks count started→now), priced when rates are configured —
+          minutes-only otherwise. Hidden entirely when no check has started. */}
+      {open && pr.costMinutes != null && (
+        <div className="check-sections pr-cost" data-testid="pr-cost"
+          title={defTitle(DEFS.prCiCost)}>
+          CI cost this run: {formatDur(pr.costMinutes * 60)}
+          {pr.costDollars != null ? ` (~$${pr.costDollars.toFixed(2)})` : ''}
+        </div>
+      )}
       {/* workflow-change impact card (issue #49): derived-graph diff summary,
           above the gantt in the expanded panel. */}
       {open && pr.workflowImpact && pr.workflowImpact.summary.length > 0 && (

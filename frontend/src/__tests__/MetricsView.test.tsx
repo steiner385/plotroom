@@ -187,14 +187,34 @@ const PAYLOAD: MetricsPayload = {
       retryMinutes: 96, retryDollars: 1.44,
       mergesInWindow: 8, minutesPerMergedPr: 154.25,
       pools: [
-        { pool: 'kindash-runner', minutes: 1000, dollars: 8, buckets: [
-          { bucket: H(8), minutes: 400 }, { bucket: H(9), minutes: 350 },
-          { bucket: H(10), minutes: 250 }] },
-        { pool: 'kindash-runner|kindash-ondemand', minutes: 200, dollars: 10, buckets: [
-          { bucket: H(10), minutes: 200 }] },
-        { pool: 'unknown', minutes: 34, dollars: null, buckets: [
+        { pool: 'kindash-runner', minutes: 1000, dollars: 8, instanceType: 'm7a.2xlarge spot',
+          buckets: [
+            { bucket: H(8), minutes: 400 }, { bucket: H(9), minutes: 350 },
+            { bucket: H(10), minutes: 250 }] },
+        { pool: 'kindash-runner|kindash-ondemand', minutes: 200, dollars: 10, instanceType: null,
+          buckets: [
+            { bucket: H(10), minutes: 200 }] },
+        { pool: 'unknown', minutes: 34, dollars: null, instanceType: null, buckets: [
           { bucket: H(9), minutes: 34 }] },
       ] },
+  ],
+  costJobs: [
+    { repo: 'acme/widgets', jobs: [
+      { name: 'unit-tests (16 shards)', event: 'pull_request', minutes: 640, dollars: 5.12,
+        pool: 'kindash-runner', samples: 96 },
+      { name: 'e2e-tests', event: 'merge_group', minutes: 200, dollars: 10,
+        pool: 'kindash-runner|kindash-ondemand', samples: 12 },
+      { name: 'mystery', event: 'pull_request', minutes: 34, dollars: null,
+        pool: 'unknown', samples: 3 },
+    ] },
+  ],
+  costRuns: [
+    { repo: 'acme/widgets', runs: [
+      { event: 'pull_request', runNumber: 8123, headShaShort: 'abc1234', minutes: 95,
+        dollars: 0.76, jobCount: 14, prNumber: 8962 },
+      { event: 'merge_group', runNumber: 8124, headShaShort: 'def5678', minutes: 80,
+        dollars: 0.64, jobCount: 12, prNumber: null },
+    ] },
   ],
 };
 
@@ -644,13 +664,18 @@ describe('MetricsView — CI cost panel (issue #43)', () => {
         ...c, totalDollars: null, retryDollars: null,
         pools: c.pools.map((pl) => ({ ...pl, dollars: null })),
       })),
+      // the server nulls EVERY dollar figure in minutes-only mode
+      costJobs: PAYLOAD.costJobs!.map((c) => ({
+        ...c, jobs: c.jobs.map((j) => ({ ...j, dollars: null })) })),
+      costRuns: PAYLOAD.costRuns!.map((c) => ({
+        ...c, runs: c.runs.map((r) => ({ ...r, dollars: null })) })),
     };
     mockFetchOk(minutesOnly);
     render(<MetricsView now={NOW} />);
     const panel = await costPanel();
     expect(within(panel).getByText('1234m')).toBeInTheDocument();
     expect(within(panel).queryByText(/\$\d/)).not.toBeInTheDocument();
-    expect(within(panel).getByText(/set costPerMinute in config\.json/)).toBeInTheDocument();
+    expect(within(panel).getByText(/set costPerMinute or poolMeta in config\.json/)).toBeInTheDocument();
   });
 
   it("empty state reads 'no runner-minutes in window yet'", async () => {
@@ -658,6 +683,74 @@ describe('MetricsView — CI cost panel (issue #43)', () => {
     render(<MetricsView now={NOW} />);
     const panel = await costPanel();
     expect(within(panel).getByText('no runner-minutes in window yet')).toBeInTheDocument();
+  });
+
+  // ---- cost explorer sub-sections ----
+
+  it('pool rows show the poolMeta instance type ("–" when unset)', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await costPanel();
+    const runner = within(panel).getByTestId('cost-pool-acme/widgets-kindash-runner');
+    expect(within(runner).getByText('m7a.2xlarge spot')).toBeInTheDocument();
+    const unknown = within(panel).getByTestId('cost-pool-acme/widgets-unknown');
+    expect(within(unknown).getByText('–')).toBeInTheDocument();
+  });
+
+  it('by-job leaderboard: name, event, pool, instance, minutes, $ ("–" unpriced), n', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await costPanel();
+    const jobs = within(panel).getByTestId('cost-jobs-acme/widgets');
+    expect(within(jobs).getByText(/by job \(top 3 by minutes\)/)).toBeInTheDocument();
+    const rows = within(jobs).getAllByRole('row').slice(1); // skip header
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]!).getByText('unit-tests (16 shards)')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('640m')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('$5.12')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('96')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('m7a.2xlarge spot')).toBeInTheDocument(); // pool instance join
+    expect(within(rows[2]!).getByText('mystery')).toBeInTheDocument();
+    expect(within(rows[2]!).getAllByText('–').length).toBeGreaterThan(0); // unpriced $ and no instance
+  });
+
+  it('by-run table: run #, event, PR anchor link when known ("–" otherwise), sha, jobs, minutes, $', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const panel = await costPanel();
+    const runs = within(panel).getByTestId('cost-runs-acme/widgets');
+    const rows = within(runs).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]!).getByText('#8123')).toBeInTheDocument();
+    const prLink = within(rows[0]!).getByRole('link', { name: '#8962' });
+    expect(prLink).toHaveAttribute('href', '#pr-8962'); // jumps to the PR row anchor
+    expect(within(rows[0]!).getByText('abc1234')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('14')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('95m')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('$0.76')).toBeInTheDocument();
+    // run without a live PR head match: no link, an em-dash placeholder
+    expect(within(rows[1]!).queryByRole('link')).not.toBeInTheDocument();
+    expect(within(rows[1]!).getByText('–')).toBeInTheDocument();
+  });
+
+  it('by-run table ramps: no attributable runs yet → collecting note (run numbers are new)', async () => {
+    mockFetchOk({ ...PAYLOAD, costRuns: [{ repo: 'acme/widgets', runs: [] }] });
+    render(<MetricsView now={NOW} />);
+    const panel = await costPanel();
+    const runs = within(panel).getByTestId('cost-runs-acme/widgets');
+    expect(within(runs).getByText(/collecting — run numbers record from new ingestion onward/))
+      .toBeInTheDocument();
+  });
+
+  it('tolerates a pre-upgrade payload without costJobs/costRuns (sections degrade quietly)', async () => {
+    const pre = { ...PAYLOAD };
+    delete (pre as Partial<MetricsPayload>).costJobs;
+    delete (pre as Partial<MetricsPayload>).costRuns;
+    mockFetchOk(pre);
+    render(<MetricsView now={NOW} />);
+    const panel = await costPanel();
+    expect(within(panel).queryByTestId('cost-jobs-acme/widgets')).not.toBeInTheDocument();
+    expect(within(panel).getByTestId('cost-runs-acme/widgets')).toBeInTheDocument(); // collecting note
   });
 });
 

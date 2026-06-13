@@ -1,4 +1,5 @@
 import { FLAKE_MIN_RUNS, type HistoryStore } from './history';
+import { poolRate, hasAnyRate, type PoolMetaEntry } from './config';
 import type { DurationRegressionView, PoolHealthView } from './poller';
 import { percentile } from './math';
 import { activeForEvent, type CiGraphNode } from './required-checks';
@@ -175,7 +176,31 @@ export interface MetricsPayload {
     retryMinutes: number; retryDollars: number | null;
     mergesInWindow: number; minutesPerMergedPr: number | null;
     pools: { pool: string; minutes: number; dollars: number | null;
+      /** Display-only instance type from the file-only poolMeta config; null
+       *  when the pool has no entry (cost explorer). */
+      instanceType: string | null;
       buckets: { bucket: string; minutes: number }[] }[] }[];
+  /** Cost explorer — per-JOB leaderboard: the top COST_JOBS_CAP (15) jobs per
+   *  repo by window runner-minutes, grouped by (name, event) over the same
+   *  rows as `cost` (every conclusion; started-in-window). `pool` is the
+   *  job's runs-on pool key ('a|b' composite, 'unknown' = unmappable);
+   *  `dollars` prices the job's minutes via poolRate (poolMeta >
+   *  costPerMinute > 'default') — null when its pool is unpriced. `samples` =
+   *  job rows in the window. Repos with no rows are omitted (like `cost`). */
+  costJobs: { repo: string; jobs: { name: string; event: string; minutes: number;
+    dollars: number | null; pool: string; samples: number }[] }[];
+  /** Cost explorer — per-RUN table: the top COST_RUNS_CAP (20) workflow runs
+   *  per repo by window runner-minutes, grouped by (event, head_sha,
+   *  run_number). Only rows carrying BOTH head_sha and run_number participate
+   *  (run_number records from new ingestion onward — old rows can't be
+   *  attributed to a run). `dollars` sums each member job's priced minutes
+   *  (same undercount rule as pools); `jobCount` = distinct job names in the
+   *  group (a retried job counts once); `prNumber` is a best-effort live join
+   *  of the run's head sha onto a tracked open PR head / queued group head —
+   *  null when unknowable (historical heads). */
+  costRuns: { repo: string; runs: { event: string; runNumber: number;
+    headShaShort: string; minutes: number; dollars: number | null;
+    jobCount: number; prNumber: number | null }[] }[];
 }
 
 /** Lead-time segment ids, in pipeline order (issue #44). */
@@ -296,6 +321,10 @@ const OFF_PATH_CAP = 10;
  *  a thin tail reads as noise, not calibration evidence (issue #48). */
 export const LINT_MIN_RUNS = 5;
 
+/** Cost explorer — per-repo caps for the job leaderboard / run table. */
+export const COST_JOBS_CAP = 15;
+export const COST_RUNS_CAP = 20;
+
 /**
  * Sweep-line bucket peaks (issue #47): given job occupancy intervals, the
  * PEAK number of simultaneously-running jobs within each bucket of the
@@ -355,7 +384,9 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   activeRegressions: { repo: string; checks: DurationRegressionView[] }[] = [],
   poolsFor: (repo: string, name: string) => string[] | null = () => null,
   poolHealth: { repo: string; pools: PoolHealthView[] }[] = [],
-  costPerMinute: Record<string, number> | null = null): MetricsPayload {
+  costPerMinute: Record<string, number> | null = null,
+  poolMeta: Record<string, PoolMetaEntry> | null = null,
+  prNumberForSha: (repo: string, sha: string) => number | null = () => null): MetricsPayload {
   const dropped = new Set(exclude);
   const keep = <T extends { repo: string }>(rows: T[]): T[] =>
     dropped.size ? rows.filter((r) => !dropped.has(r.repo)) : rows;
@@ -789,47 +820,94 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   // durations are CI-lifecycle wall-clock spans, not runner occupancy.
   const minutesOf = (rows: { durationSecs: number }[]): number =>
     rows.reduce((s, r) => s + r.durationSecs, 0) / 60;
-  const rateFor = (pool: string): number | null =>
-    costPerMinute == null ? null : costPerMinute[pool] ?? costPerMinute['default'] ?? null;
+  // Rate resolution (cost explorer): poolMeta[pool].dollarsPerMinute supersedes
+  // the flat costPerMinute entry per label; the 'default' pair backs the rest.
+  // hasRates=false → minutes-only mode: EVERY dollar figure stays null.
+  const hasRates = hasAnyRate(costPerMinute, poolMeta);
+  const rateFor = (pool: string): number | null => poolRate(pool, costPerMinute, poolMeta);
   const costRows = keep(history.costRowsSince(since)).filter((r) =>
     Date.parse(r.startedAt) >= sinceMs && !foreignNames.get(r.repo)?.has(r.name));
-  const cost = [...groupBy(costRows, (r) => r.repo)]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([repo, rows]) => {
-      const byPool = groupBy(rows, (r) => poolKeyOf(repo, r.name));
-      const pools = [...byPool]
-        .map(([pool, rs]) => {
-          const minutes = minutesOf(rs);
-          const rate = rateFor(pool);
-          return {
-            pool, minutes,
-            dollars: rate != null ? minutes * rate : null,
-            buckets: [...groupBy(rs, (r) => key(r.startedAt))]
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([b, brs]) => ({ bucket: b, minutes: minutesOf(brs) })),
-          };
-        })
-        .sort((a, b) => b.minutes - a.minutes || a.pool.localeCompare(b.pool));
-      const totalMinutes = pools.reduce((s, pl) => s + pl.minutes, 0);
-      // priced pools only — null dollars contribute nothing, never fabricate
-      const totalDollars = costPerMinute == null ? null
-        : pools.reduce((s, pl) => s + (pl.dollars ?? 0), 0);
-      const retryRows = rows.filter((r) => r.runAttempt != null && r.runAttempt > 1);
-      const retryMinutes = minutesOf(retryRows);
-      const retryDollars = costPerMinute == null ? null
-        : [...groupBy(retryRows, (r) => poolKeyOf(repo, r.name))].reduce((s, [pool, rs]) => {
-          const rate = rateFor(pool);
-          return rate != null ? s + minutesOf(rs) * rate : s;
-        }, 0);
-      const mergesInWindow = (mergedByRepo.get(repo) ?? []).length;
-      return {
-        repo, totalMinutes, totalDollars, retryMinutes, retryDollars, mergesInWindow,
-        minutesPerMergedPr: mergesInWindow > 0 ? totalMinutes / mergesInWindow : null,
-        pools,
-      };
+  const cost: MetricsPayload['cost'] = [];
+  const costJobs: MetricsPayload['costJobs'] = [];
+  const costRuns: MetricsPayload['costRuns'] = [];
+  for (const [repo, rows] of [...groupBy(costRows, (r) => r.repo)]
+    .sort(([a], [b]) => a.localeCompare(b))) {
+    const byPool = groupBy(rows, (r) => poolKeyOf(repo, r.name));
+    const pools = [...byPool]
+      .map(([pool, rs]) => {
+        const minutes = minutesOf(rs);
+        const rate = rateFor(pool);
+        return {
+          pool, minutes,
+          dollars: rate != null ? minutes * rate : null,
+          instanceType: poolMeta?.[pool]?.instanceType ?? null,
+          buckets: [...groupBy(rs, (r) => key(r.startedAt))]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([b, brs]) => ({ bucket: b, minutes: minutesOf(brs) })),
+        };
+      })
+      .sort((a, b) => b.minutes - a.minutes || a.pool.localeCompare(b.pool));
+    const totalMinutes = pools.reduce((s, pl) => s + pl.minutes, 0);
+    // priced pools only — null dollars contribute nothing, never fabricate
+    const totalDollars = !hasRates ? null
+      : pools.reduce((s, pl) => s + (pl.dollars ?? 0), 0);
+    const retryRows = rows.filter((r) => r.runAttempt != null && r.runAttempt > 1);
+    const retryMinutes = minutesOf(retryRows);
+    const retryDollars = !hasRates ? null
+      : [...groupBy(retryRows, (r) => poolKeyOf(repo, r.name))].reduce((s, [pool, rs]) => {
+        const rate = rateFor(pool);
+        return rate != null ? s + minutesOf(rs) * rate : s;
+      }, 0);
+    const mergesInWindow = (mergedByRepo.get(repo) ?? []).length;
+    cost.push({
+      repo, totalMinutes, totalDollars, retryMinutes, retryDollars, mergesInWindow,
+      minutesPerMergedPr: mergesInWindow > 0 ? totalMinutes / mergesInWindow : null,
+      pools,
     });
+
+    // Per-JOB leaderboard (cost explorer): the same rows regrouped by
+    // (name, event) — works on day one (no new columns required).
+    const jobs = [...groupBy(rows, (r) => `${r.name}${SEP}${r.event}`)]
+      .map(([k, rs]) => {
+        const [name, event] = k.split(SEP) as [string, string];
+        const pool = poolKeyOf(repo, name);
+        const minutes = minutesOf(rs);
+        const rate = rateFor(pool);
+        return { name, event, minutes,
+          dollars: rate != null ? minutes * rate : null, pool, samples: rs.length };
+      })
+      .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name)
+        || a.event.localeCompare(b.event))
+      .slice(0, COST_JOBS_CAP);
+    costJobs.push({ repo, jobs });
+
+    // Per-RUN table (cost explorer): only rows with BOTH head_sha and
+    // run_number can be attributed to a workflow run — run_number records
+    // from new ingestion onward, so this section ramps with fresh history.
+    const runs = [...groupBy(rows.filter((r) => r.headSha != null && r.runNumber != null),
+      (r) => `${r.event}${SEP}${r.headSha!}${SEP}${r.runNumber!}`)]
+      .map(([k, rs]) => {
+        const [event, sha, runNumberStr] = k.split(SEP) as [string, string, string];
+        const minutes = minutesOf(rs);
+        // priced member jobs only — same undercount rule as the pool totals
+        const dollars = !hasRates ? null
+          : rs.reduce((s, r) => {
+            const rate = rateFor(poolKeyOf(repo, r.name));
+            return rate != null ? s + (r.durationSecs / 60) * rate : s;
+          }, 0);
+        return {
+          event, runNumber: Number(runNumberStr), headShaShort: sha.slice(0, 7),
+          minutes, dollars,
+          jobCount: new Set(rs.map((r) => r.name)).size,
+          prNumber: prNumberForSha(repo, sha),
+        };
+      })
+      .sort((a, b) => b.minutes - a.minutes || b.runNumber - a.runNumber)
+      .slice(0, COST_RUNS_CAP);
+    costRuns.push({ repo, runs });
+  }
 
   return { window, bucket, runnerWaits, queue, slowestJobs, velocity, leadTime, trends,
     calibration, flakiness, trainKillers, criticalPath, lint, regressions,
-    runnerPools, reclaims, concurrency, cost };
+    runnerPools, reclaims, concurrency, cost, costJobs, costRuns };
 }

@@ -1176,10 +1176,12 @@ describe('costRowsSince (issue #43 cost attribution)', () => {
     const rows = h.costRowsSince('2026-06-10T00:00:00Z');
     expect(rows).toHaveLength(2);
     expect(rows.find((r) => r.name === 'unit-tests')).toEqual({
-      repo: REPO, name: 'unit-tests', startedAt: '2026-06-10T10:00:00Z',
+      repo: REPO, name: 'unit-tests', event: 'pull_request', headSha: 'sha1',
+      runNumber: null, startedAt: '2026-06-10T10:00:00Z',
       durationSecs: 300, runAttempt: 1 });
     expect(rows.find((r) => r.name === 'e2e')).toEqual({
-      repo: REPO, name: 'e2e', startedAt: '2026-06-10T10:01:00Z',
+      repo: REPO, name: 'e2e', event: 'merge_group', headSha: 'sha1',
+      runNumber: null, startedAt: '2026-06-10T10:01:00Z',
       durationSecs: 90, runAttempt: 2 });
   });
 
@@ -1190,7 +1192,8 @@ describe('costRowsSince (issue #43 cost attribution)', () => {
     (h as unknown as { db: { exec(sql: string): void } }).db
       .exec("UPDATE check_durations SET started_at = NULL WHERE check_name = 'legacy'");
     const rows = h.costRowsSince('2026-06-10T00:00:00Z');
-    expect(rows).toEqual([{ repo: REPO, name: 'legacy',
+    expect(rows).toEqual([{ repo: REPO, name: 'legacy', event: 'pull_request',
+      headSha: null, runNumber: null,
       startedAt: '2026-06-10T10:00:00.000Z', durationSecs: 600, runAttempt: null }]);
   });
 
@@ -1224,5 +1227,53 @@ describe('runnerWaitStats (issue #48 wait-dominated lint)', () => {
         `2026-06-10T10:${String(i).padStart(2, '0')}:00Z`);
     }
     expect(h.runnerWaitStats(REPO, 'job', 'pull_request')!.n).toBe(20);
+  });
+});
+
+// ------------------------------------------------------------------------------
+// Cost explorer: run_number column (per-run cost grouping key)
+// ------------------------------------------------------------------------------
+
+describe('run_number plumbing (cost explorer)', () => {
+  it('recordCheckDuration persists run_number; costRowsSince returns it', () => {
+    h.recordCheckDuration(REPO, 'unit-tests', 'pull_request',
+      '2026-06-10T10:00:00Z', '2026-06-10T10:05:00Z', 'SUCCESS', 'sha1', 1, 4711);
+    const [row] = h.costRowsSince('2026-06-10T00:00:00Z');
+    expect(row).toMatchObject({ name: 'unit-tests', headSha: 'sha1', runNumber: 4711 });
+  });
+
+  it('runNumber defaults to NULL (old callers / unknown runs)', () => {
+    h.recordCheckDuration(REPO, 'unit-tests', 'pull_request',
+      '2026-06-10T10:00:00Z', '2026-06-10T10:05:00Z', 'SUCCESS', 'sha1', 1);
+    expect(h.costRowsSince('2026-06-10T00:00:00Z')[0]!.runNumber).toBeNull();
+  });
+
+  it('migration: a pre-existing DB without run_number gains the column on re-open (old rows NULL)', () => {
+    const { mkdtempSync, rmSync } = require('node:fs') as typeof import('node:fs');
+    const { tmpdir } = require('node:os') as typeof import('node:os');
+    const { join } = require('node:path') as typeof import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'prdash-hist-'));
+    try {
+      const path = join(dir, 'history.db');
+      const h1 = new HistoryStore(path);
+      // simulate a pre-migration row: drop the column, then insert without it
+      (h1 as unknown as { db: import('better-sqlite3').Database }).db.exec(`
+        ALTER TABLE check_durations DROP COLUMN run_number;
+        INSERT INTO check_durations (repo, check_name, event, duration_secs, completed_at, conclusion)
+        VALUES ('${REPO}', 'legacy', 'pull_request', 300, '2026-06-10T10:05:00Z', 'SUCCESS');
+      `);
+      h1.close();
+      const h2 = new HistoryStore(path); // re-open runs the ALTER migration
+      const rows = h2.costRowsSince('2026-06-10T00:00:00Z');
+      expect(rows[0]).toMatchObject({ name: 'legacy', runNumber: null });
+      // and new rows persist a value alongside the migrated old ones
+      h2.recordCheckDuration(REPO, 'fresh', 'pull_request',
+        '2026-06-10T11:00:00Z', '2026-06-10T11:05:00Z', 'SUCCESS', 'sha9', 1, 99);
+      expect(h2.costRowsSince('2026-06-10T00:00:00Z')
+        .find((r) => r.name === 'fresh')!.runNumber).toBe(99);
+      h2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -77,6 +77,13 @@ export interface PrView {
   /** Multi-train merge ETA simulation (issue #40) — WAITING queue entries only;
    *  null elsewhere (and on pre-upgrade payloads). */
   mergeEtaSim: MergeEtaSimulation | null;
+  /** PR-level CI cost (cost explorer): elapsed runner-minutes of the CURRENT
+   *  head's checks (running checks count started→now). Null when no check has
+   *  started / merged PRs; optional to tolerate pre-upgrade payloads. */
+  costMinutes?: number | null;
+  /** The priced subset of costMinutes in dollars (poolMeta > costPerMinute >
+   *  'default'); null in minutes-only mode. */
+  costDollars?: number | null;
 }
 
 /** Mirror of server estimator/queue.ts MergeEtaSimulation (issue #40). */
@@ -189,6 +196,10 @@ export interface AppConfig {
   /** CI cost attribution (issue #43): pool label → $ per runner-minute
    *  ('default' prices unlisted pools). File-only; absent = minutes only. */
   costPerMinute?: Record<string, number>;
+  /** Cost explorer: per-pool metadata — instance type (display) and an
+   *  optional $/min that SUPERSEDES costPerMinute for the same label.
+   *  File-only; read-only in the settings display. */
+  poolMeta?: Record<string, { instanceType?: string; dollarsPerMinute?: number; note?: string }>;
 }
 
 /** Which config layer a per-repo setting value came from. */
@@ -363,5 +374,20 @@ export interface MetricsPayload {
     retryMinutes: number; retryDollars: number | null;
     mergesInWindow: number; minutesPerMergedPr: number | null;
     pools: { pool: string; minutes: number; dollars: number | null;
+      /** Display instance type from the file-only poolMeta config (cost
+       *  explorer); null/absent when unset or on pre-upgrade payloads. */
+      instanceType?: string | null;
       buckets: { bucket: string; minutes: number }[] }[] }[];
+  /** Cost explorer — per-job leaderboard: top 15 jobs per repo by window
+   *  runner-minutes (every conclusion). dollars null when the job's pool is
+   *  unpriced. Optional to tolerate pre-upgrade payloads. */
+  costJobs?: { repo: string; jobs: { name: string; event: string; minutes: number;
+    dollars: number | null; pool: string; samples: number }[] }[];
+  /** Cost explorer — per-run table: top 20 workflow runs per repo by window
+   *  runner-minutes, grouped by (event, head sha, run number). Only rows with
+   *  a stored run_number participate — records from new ingestion onward.
+   *  prNumber = best-effort live head-sha join (anchor link); null unknown. */
+  costRuns?: { repo: string; runs: { event: string; runNumber: number;
+    headShaShort: string; minutes: number; dollars: number | null;
+    jobCount: number; prNumber: number | null }[] }[];
 }

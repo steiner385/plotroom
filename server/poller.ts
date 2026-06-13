@@ -5,7 +5,8 @@ import type { ClientRouter } from './client-router';
 import { FAILING_CONCLUSIONS, FLAKE_MIN_RUNS, type HistoryStore, type MergedPrRecord } from './history';
 import type { DeployWatcher } from './deploy-watcher';
 import { ApiAncestry, type AncestryAnswer } from './ancestry';
-import { effectiveRepoSettings, effectiveDeployMap, type AppConfig, type DeployConfig, type RepoSettings } from './config';
+import { effectiveRepoSettings, effectiveDeployMap, poolRate, hasAnyRate,
+  type AppConfig, type DeployConfig, type RepoSettings, type PoolMetaEntry } from './config';
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoFileConfig } from './repo-config';
 import type { WebhookRoute } from './webhooks';
 import type { Notifier, NotificationsConfig } from './notifier';
@@ -108,6 +109,15 @@ export interface PrView {
    *  null for building/covered/unmergeable entries, non-queued PRs, and repos
    *  without observed train durations (UI falls back to the single number). */
   mergeEtaSim: MergeEtaSimulation | null;
+  /** CI cost of the CURRENT head's check run (cost explorer): elapsed runner
+   *  minutes summed over the head's checks (running checks count started→now;
+   *  foreign-workflow spans excluded). Null when no check has started, and
+   *  for merged PRs (their head checks are no longer tracked). */
+  costMinutes: number | null;
+  /** The priced subset of costMinutes in dollars (poolRate per check:
+   *  poolMeta > costPerMinute > 'default'). Null in minutes-only mode (no
+   *  rates configured) or when costMinutes is null. */
+  costDollars: number | null;
 }
 
 /** Absolute plausibility cap (secs) for a SUCCESS duration sample when the
@@ -166,9 +176,10 @@ export function ingestCheckSet(history: HistoryStore, repo: string, checks: Chec
         if (secs > maxPlausibleSuccessSecs(timeout)) continue;
       }
       // headSha: the commit this check set was fetched for (PR head / group head /
-      // default-branch commit); runAttempt rides on each check (issue #34)
+      // default-branch commit); runAttempt + runNumber ride on each check
+      // (issue #34; run number = the cost explorer's per-run grouping key)
       history.recordCheckDuration(repo, c.name, c.event, c.startedAt, c.completedAt,
-        c.conclusion ?? 'UNKNOWN', headSha, c.runAttempt);
+        c.conclusion ?? 'UNKNOWN', headSha, c.runAttempt, c.runNumber);
     }
   }
   for (const s of extractRunnerWaits(checks, needsFor, activeFor, graphKeys, rollupWorkflowName)) {
@@ -176,6 +187,44 @@ export function ingestCheckSet(history: HistoryStore, repo: string, checks: Chec
     history.recordRunnerWait(repo, s.name, s.event, s.waitSecs, s.startedAt,
       pools?.length ? pools.join('|') : null);
   }
+}
+
+/**
+ * PR-level CI cost (cost explorer): runner occupancy of ONE check set — the
+ * current head's checks — as elapsed minutes (completed: started→completed;
+ * running: started→now) plus the priced subset in dollars. Foreign-workflow
+ * checks are excluded exactly like the metrics cost section (issue #61): their
+ * spans are CI-lifecycle wall-clock, not runner occupancy. Per check the rate
+ * resolves through its runs-on pool (poolFor candidates joined '|', unknown →
+ * 'unknown') with the poolRate precedence (poolMeta > costPerMinute > the
+ * 'default' pair); unpriced checks contribute minutes but no dollars (the
+ * same documented undercount as the metrics $ totals). Returns nulls when no
+ * check has started; dollars is null in minutes-only mode (no rates at all).
+ */
+export function computePrCost(checks: CheckRun[], rollupWorkflowName: string | null,
+  poolFor: (canonicalName: string) => string[] | null,
+  costPerMinute: Record<string, number> | null,
+  poolMeta: Record<string, PoolMetaEntry> | null,
+  now: Date): { costMinutes: number | null; costDollars: number | null } {
+  let sawSample = false;
+  let minutes = 0;
+  let dollars = 0;
+  for (const c of checks) {
+    if (!c.startedAt) continue;
+    if (!workflowScopeAllows(c.workflowName, rollupWorkflowName)) continue;
+    const endMs = c.completedAt ? Date.parse(c.completedAt) : now.getTime();
+    const secs = (endMs - Date.parse(c.startedAt)) / 1000;
+    if (!(secs > 0)) continue; // negative spans (SKIPPED placeholders) and NaN
+    sawSample = true;
+    const mins = secs / 60;
+    minutes += mins;
+    const pools = poolFor(c.name);
+    const rate = poolRate(pools?.length ? pools.join('|') : 'unknown', costPerMinute, poolMeta);
+    if (rate != null) dollars += mins * rate;
+  }
+  if (!sawSample) return { costMinutes: null, costDollars: null };
+  return { costMinutes: minutes,
+    costDollars: hasAnyRate(costPerMinute, poolMeta) ? dollars : null };
 }
 
 /** Flake-rate map key — check names contain spaces and ' / ', so a NUL it is. */
@@ -1316,6 +1365,22 @@ export class Poller extends EventEmitter {
   }
 
   /**
+   * Best-effort sha → PR-number join for the cost explorer's per-run table:
+   * matches the CURRENT head sha of a tracked open PR, or a queued PR's
+   * merge-group head oid (the sha merge_group runs report). Historical heads
+   * (older pushes, PRs merged/closed since) are unknowable from live state —
+   * null, and the UI shows the sha without a PR link.
+   */
+  prNumberForSha(repo: string, sha: string): number | null {
+    if (!sha) return null;
+    for (const pr of this.prs.values()) {
+      if (pr.repo !== repo) continue;
+      if (pr.headSha === sha || pr.queue?.groupHeadOid === sha) return pr.number;
+    }
+    return null;
+  }
+
+  /**
    * Whether the graph node `neededPrefix` can run for `event` — true unless its
    * `if:` provably gates it off that event (e.g. a merge_group-only job seen
    * from a pull_request check). True when the repo/node is unknown: the graph
@@ -1886,8 +1951,12 @@ export class Poller extends EventEmitter {
     const mergeEtaSim = stage.stage === 'queue'
       ? this.mergeEtaSimFor(pr.repo, this.queueEntries.get(pr.repo) ?? [], pr.number, groups)
       : null;
+    // PR-level CI cost (cost explorer): the current head's runner occupancy
+    const { costMinutes, costDollars } = computePrCost(pr.checks,
+      this.rollupWorkflowFor(pr.repo), (n) => this.poolsFor(pr.repo, n),
+      this.deps.config.costPerMinute ?? null, this.deps.config.poolMeta ?? null, now);
     return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
-      queueAheadCount,
+      queueAheadCount, costMinutes, costDollars,
       checks: this.checkViews(pr, now, prefixes),
       timeline: null,
       touchesWorkflows: pr.touchesWorkflows,
@@ -1946,7 +2015,7 @@ export class Poller extends EventEmitter {
         enqueuedAt: rec.enqueuedAt, mergedAt: rec.mergedAt,
         qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt },
       touchesWorkflows: false, workflowImpact: null,
-      groupChecks: null, mergeEtaSim: null };
+      groupChecks: null, mergeEtaSim: null, costMinutes: null, costDollars: null };
   }
 
   private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {

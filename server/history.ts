@@ -239,6 +239,12 @@ export class HistoryStore {
     // intervals for the concurrency demand curve. Old rows stay NULL; reads
     // derive started = completed − duration (identical for non-clamped rows).
     addColumnIfMissing(this.db, 'check_durations', 'started_at TEXT');
+    // Migration (cost explorer): check_durations gains run_number — the
+    // workflow-run number the check belonged to, so the cost explorer can
+    // group runner-minutes into whole workflow runs (event, head_sha,
+    // run_number). NULL on rows ingested before the column existed — those
+    // rows can't participate in the per-run grouping (per-job is unaffected).
+    addColumnIfMissing(this.db, 'check_durations', 'run_number INTEGER');
     // Migration (issue #45): runner_waits gains pool — the runs-on label
     // candidates of the job's derived-graph node at ingestion time.
     // Multi-candidate pools (runs-on ternaries) store the JOINED candidates
@@ -250,7 +256,7 @@ export class HistoryStore {
 
     // Prepare all statements after schema is guaranteed to exist.
     this.stmtInsertDuration = this.db.prepare(
-      'INSERT OR IGNORE INTO check_durations (repo, check_name, event, duration_secs, completed_at, conclusion, head_sha, run_attempt, started_at) VALUES (?,?,?,?,?,?,?,?,?)'
+      'INSERT OR IGNORE INTO check_durations (repo, check_name, event, duration_secs, completed_at, conclusion, head_sha, run_attempt, started_at, run_number) VALUES (?,?,?,?,?,?,?,?,?,?)'
     );
     this.stmtSelectDurations = this.db.prepare(
       `SELECT duration_secs FROM check_durations
@@ -442,7 +448,8 @@ export class HistoryStore {
     // Cost attribution (issue #43): every conclusion counts — a failed or
     // cancelled job occupied its runner for the whole span just the same.
     this.stmtSelectCostRows = this.db.prepare(
-      `SELECT repo, check_name, started_at, completed_at, duration_secs, run_attempt
+      `SELECT repo, check_name, event, head_sha, run_number, started_at, completed_at,
+              duration_secs, run_attempt
        FROM check_durations WHERE completed_at >= ?
        ORDER BY repo, completed_at`
     );
@@ -450,18 +457,21 @@ export class HistoryStore {
 
   /** `headSha`/`runAttempt` (issue #34): the PR/group head commit the check ran
    *  against and the workflow-run attempt; both nullable ('' sha — placeholder
-   *  snapshots — normalizes to NULL). On a UNIQUE collision the first row wins
-   *  (INSERT OR IGNORE), exactly as before. */
+   *  snapshots — normalizes to NULL). `runNumber` (cost explorer): the
+   *  workflow-run number — the per-run cost grouping key; nullable for old
+   *  callers/data. On a UNIQUE collision the first row wins (INSERT OR
+   *  IGNORE), exactly as before. */
   recordCheckDuration(repo: string, name: string, event: string,
     startedAt: string | null, completedAt: string | null, conclusion: string,
-    headSha: string | null = null, runAttempt: number | null = null): boolean {
+    headSha: string | null = null, runAttempt: number | null = null,
+    runNumber: number | null = null): boolean {
     if (!startedAt || !completedAt) return false;
     const secs = (Date.parse(completedAt) - Date.parse(startedAt)) / 1000;
     if (!(secs > 0)) return false; // rejects negative durations (SKIPPED placeholders) and NaN
     // started_at persisted verbatim (issue #47): exact job intervals for the
     // concurrency sweep — pre-#47 rows derive it as completed − duration.
     this.stmtInsertDuration.run(repo, name, event, secs, completedAt, conclusion,
-      headSha || null, runAttempt ?? null, startedAt);
+      headSha || null, runAttempt ?? null, startedAt, runNumber ?? null);
     return true;
   }
 
@@ -895,9 +905,13 @@ export class HistoryStore {
   /** Runner-minute rows for cost attribution (issue #43): every conclusion at/
    *  after `since` (completed_at filter), with the job's start time, duration
    *  and workflow-run attempt. Pre-#47 rows (NULL started_at) derive
-   *  started = completed − duration, exactly like checkIntervalsSince. */
+   *  started = completed − duration, exactly like checkIntervalsSince.
+   *  `event`/`headSha`/`runNumber` (cost explorer): the per-job and per-run
+   *  grouping identity — headSha/runNumber are null on rows ingested before
+   *  their columns existed (those rows skip the per-run grouping). */
   costRowsSince(since: string):
-    { repo: string; name: string; startedAt: string; durationSecs: number;
+    { repo: string; name: string; event: string; headSha: string | null;
+      runNumber: number | null; startedAt: string; durationSecs: number;
       runAttempt: number | null }[] {
     const rows = this.stmtSelectCostRows.all(since) as Record<string, unknown>[];
     return rows.map((r) => {
@@ -906,6 +920,8 @@ export class HistoryStore {
       const startedAt = (r.started_at as string | null)
         ?? new Date(Date.parse(completedAt) - durationSecs * 1000).toISOString();
       return { repo: r.repo as string, name: r.check_name as string,
+        event: r.event as string, headSha: (r.head_sha as string | null) ?? null,
+        runNumber: (r.run_number as number | null) ?? null,
         startedAt, durationSecs, runAttempt: (r.run_attempt as number | null) ?? null };
     });
   }
