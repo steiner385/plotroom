@@ -5862,3 +5862,14 @@ describe('queue OID de-conflation (merge_group vs push:main on the same commit)'
     expect(history.mainLaneHealth('acme/widgets').status).toBe('amber');
   });
 });
+
+describe('per-repo laneHealth on DashboardState', () => {
+  it('computes main-lane health from main_commits and attaches it to each repo', async () => {
+    // a single failing push:main commit → a lone fresh red is 'amber' (transient rule)
+    history.recordMainCommit('acme/widgets', 'sha1', NOW.toISOString(), 'FAILURE', NOW.toISOString());
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.laneHealth?.main).toBe('amber');
+  });
+});
