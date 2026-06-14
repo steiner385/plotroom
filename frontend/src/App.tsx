@@ -13,6 +13,16 @@ import type { PrView } from './types';
 
 type TabId = 'delivery' | 'pipeline' | 'metrics';
 
+// ---- tab ↔ URL hash (#pipeline / #delivery / #metrics) ----
+// Each tab is linkable, bookmarkable, and survives a reload; back/forward step
+// through tabs via the hashchange listener in App.
+const TAB_IDS: readonly TabId[] = ['pipeline', 'delivery', 'metrics'];
+const DEFAULT_TAB: TabId = 'pipeline';
+function tabFromHash(): TabId | null {
+  const h = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#/, '');
+  return (TAB_IDS as readonly string[]).includes(h) ? (h as TabId) : null;
+}
+
 // ---- localStorage helpers (private-mode safe) ----
 
 const LS_KEY = 'prdash.collapsed';
@@ -55,14 +65,16 @@ export function App() {
   const [activeFilter, setActiveFilter] = useState<Bucket | null>(null);
   const [collapsedRepos, setCollapsedRepos] = useState<Set<string>>(() => readCollapsedSet());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [tab, setTab] = useState<TabId>('pipeline');
+  // Initial tab comes from the URL hash so a deep link / reload lands on it.
+  const [tab, setTab] = useState<TabId>(() => tabFromHash() ?? DEFAULT_TAB);
   // Mount the Delivery spine lazily (first visit) and keep it mounted, like
   // MetricsView — Pipeline is the default tab so the spine isn't built up front.
-  const [deliveryVisited, setDeliveryVisited] = useState(false);
+  // Seed the visited flag when the deep link opens straight onto that tab.
+  const [deliveryVisited, setDeliveryVisited] = useState(() => tabFromHash() === 'delivery');
   // Mount MetricsView lazily (first visit) and keep it mounted afterwards, so
   // switching tabs doesn't refetch; the panel divs always exist in the DOM so
   // every aria-controls id resolves.
-  const [metricsVisited, setMetricsVisited] = useState(false);
+  const [metricsVisited, setMetricsVisited] = useState(() => tabFromHash() === 'metrics');
   const gearRef = useRef<HTMLButtonElement>(null);
   const handleSettingsClose = useCallback(() => setSettingsOpen(false), []);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -91,6 +103,35 @@ export function App() {
     setDeliveryVisited(true);
     setTab('delivery');
   }, [kiosk, cycleTick, repoCount]);
+
+  // Switch tabs and keep the lazy-mount flags in sync (single entry point so the
+  // hash listener and the buttons can't drift).
+  const selectTab = useCallback((next: TabId) => {
+    setTab(next);
+    if (next === 'delivery') setDeliveryVisited(true);
+    if (next === 'metrics') setMetricsVisited(true);
+  }, []);
+
+  // Reflect the active tab in the URL hash (history entry per switch, so
+  // back/forward steps through tabs). Skip in kiosk — it pins one view and uses
+  // query params, not anchors. pushState doesn't fire hashchange, so this never
+  // loops with the listener below. The first run is skipped so a bare URL stays
+  // the canonical default (no spurious #pipeline / history entry on load); a deep
+  // link already matches `tab`, so it writes nothing either.
+  const hashWritten = useRef(false);
+  useEffect(() => {
+    if (kiosk) return;
+    if (!hashWritten.current) { hashWritten.current = true; return; }
+    if (tabFromHash() !== tab) window.history.pushState(null, '', `#${tab}`);
+  }, [tab, kiosk]);
+
+  // Deep links, manual edits, and back/forward all arrive as hashchange.
+  useEffect(() => {
+    if (kiosk) return;
+    const onHash = () => selectTab(tabFromHash() ?? DEFAULT_TAB);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [kiosk, selectTab]);
 
   if (!state) return <main className="app"><p className="loading">Loading…</p></main>;
 
@@ -186,19 +227,19 @@ export function App() {
         <button type="button" role="tab" id="tab-pipeline"
           aria-selected={tab === 'pipeline'} aria-controls="tabpanel-pipeline"
           className={tab === 'pipeline' ? 'tab active' : 'tab'}
-          onClick={() => setTab('pipeline')}>
+          onClick={() => selectTab('pipeline')}>
           Pipeline
         </button>
         <button type="button" role="tab" id="tab-delivery"
           aria-selected={tab === 'delivery'} aria-controls="tabpanel-delivery"
           className={tab === 'delivery' ? 'tab active' : 'tab'}
-          onClick={() => { setTab('delivery'); setDeliveryVisited(true); }}>
+          onClick={() => selectTab('delivery')}>
           Delivery
         </button>
         <button type="button" role="tab" id="tab-metrics"
           aria-selected={tab === 'metrics'} aria-controls="tabpanel-metrics"
           className={tab === 'metrics' ? 'tab active' : 'tab'}
-          onClick={() => { setTab('metrics'); setMetricsVisited(true); }}>
+          onClick={() => selectTab('metrics')}>
           Metrics
         </button>
       </nav>

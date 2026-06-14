@@ -29,6 +29,9 @@ const hook = (overrides?: Partial<DashboardHook>): DashboardHook =>
 
 beforeEach(() => {
   mockUseDashboard.mockReturnValue(hook());
+  // Tabs write the URL hash; reset it between tests so one test's navigation
+  // can't seed another's initial tab. replaceState doesn't fire hashchange.
+  window.history.replaceState(null, '', window.location.pathname);
 });
 
 describe('App', () => {
@@ -215,6 +218,50 @@ describe('App tab bar', () => {
     expect(screen.getByRole('group', { name: 'Status overview' })).toBeInTheDocument();
     // metrics stays mounted (no refetch churn) but hidden
     expect(document.getElementById('tabpanel-metrics')).toHaveAttribute('hidden');
+  });
+
+  // ---- URL hash anchors (#pipeline / #delivery / #metrics) ----
+  it('writes the active tab to the URL hash on switch, default stays bare', () => {
+    render(<App />);
+    expect(window.location.hash).toBe('');                  // bare URL = default pipeline
+    fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));
+    expect(window.location.hash).toBe('#metrics');
+    fireEvent.click(screen.getByRole('tab', { name: /delivery/i }));
+    expect(window.location.hash).toBe('#delivery');
+  });
+
+  it('opens the tab named by the initial URL hash (deep link) and mounts it', () => {
+    window.history.replaceState(null, '', '#metrics');
+    render(<App />);
+    expect(screen.getByRole('tab', { name: 'Metrics' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('metrics-view-stub')).toBeInTheDocument();   // lazy-mount seeded
+  });
+
+  it('a deep link to #delivery mounts the spine up front', () => {
+    window.history.replaceState(null, '', '#delivery');
+    render(<App />);
+    expect(screen.getByRole('tab', { name: /delivery/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('spine-lane-pr-ci')).toBeInTheDocument();
+  });
+
+  it('an unknown hash falls back to the default Pipeline tab', () => {
+    window.history.replaceState(null, '', '#nonsense');
+    render(<App />);
+    expect(screen.getByRole('tab', { name: 'Pipeline' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('back/forward (hashchange) switches the active tab', () => {
+    render(<App />);
+    act(() => {
+      window.history.replaceState(null, '', '#metrics');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(screen.getByRole('tab', { name: 'Metrics' })).toHaveAttribute('aria-selected', 'true');
+    act(() => {
+      window.history.replaceState(null, '', window.location.pathname);   // back to bare
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(screen.getByRole('tab', { name: 'Pipeline' })).toHaveAttribute('aria-selected', 'true');
   });
 
   // ---- per-tab error boundary ----
