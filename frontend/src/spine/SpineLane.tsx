@@ -1,16 +1,26 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { Lane } from '../types';
 import { LANE_GLYPH, LANE_WORD } from './laneStatus';
 
-interface Props { lane: Lane; expanded: boolean; onToggle: () => void; }
+interface Props {
+  lane: Lane; expanded: boolean; onToggle: () => void;
+  /** Bumped when the global health header jumps to this lane — focuses the lane
+   *  button after render (own-component effect, so the parent's expand re-render
+   *  can't clobber the focus). */
+  focusNonce?: number;
+}
 
 function CostChip({ lane }: { lane: Lane }) {
   if (!lane.costChip) return null;
   return <span className="spine-cost" aria-hidden="true">${lane.costChip.dollars}·{lane.costChip.days}d</span>;
 }
 
-function SpineLaneInner({ lane, expanded, onToggle }: Props) {
+function SpineLaneInner({ lane, expanded, onToggle, focusNonce }: Props) {
   const panelId = `spine-panel-${lane.id}`;
+  const btnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (focusNonce != null) btnRef.current?.focus?.();
+  }, [focusNonce]);
   const glyph = <span className={`spine-glyph s-${lane.status}`} aria-hidden="true">{LANE_GLYPH[lane.status]}</span>;
   const word = LANE_WORD[lane.status];
   const body = (
@@ -29,7 +39,7 @@ function SpineLaneInner({ lane, expanded, onToggle }: Props) {
 
   return (
     <li className="spine-lane" data-testid={`spine-lane-${lane.id}`}>
-      <button type="button" className="spine-lane-btn" aria-expanded={expanded} aria-controls={panelId}
+      <button ref={btnRef} type="button" className="spine-lane-btn" aria-expanded={expanded} aria-controls={panelId}
         aria-label={`${lane.title} — ${word}: ${lane.summary}`} onClick={onToggle}>
         {body}
         <span className="spine-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>

@@ -42,18 +42,18 @@ describe('HealthHeader', () => {
     expect(rollup).toHaveClass('r-green');
   });
 
-  it('clicking the rollup jumps to the first lane needing attention', () => {
+  it('clicking the rollup jumps to the first lane needing attention, with its status', () => {
     const onJump = vi.fn();
     render(<HealthHeader state={redState()} onJumpToLane={onJump} />);
     fireEvent.click(screen.getByTestId('health-rollup'));
-    expect(onJump).toHaveBeenCalledWith('pr-ci');   // the red lane
+    expect(onJump).toHaveBeenCalledWith('pr-ci', 'red');   // the red lane + its status
   });
 
-  it('clicking a lane chip jumps to that lane', () => {
+  it('clicking a lane chip jumps to that lane, passing its status (for PR CI routing)', () => {
     const onJump = vi.fn();
     render(<HealthHeader state={greenState()} onJumpToLane={onJump} />);
     fireEvent.click(screen.getByTestId('health-lane-main'));
-    expect(onJump).toHaveBeenCalledWith('main');
+    expect(onJump).toHaveBeenCalledWith('main', expect.anything());
   });
 
   it('dims lanes with no data source (not-wired)', () => {

@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { scrollBehavior } from './motion';
 import type { HeadlineStat, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
 import { LEAD_TIME_SEGMENTS } from './leadtime';
 import {
@@ -82,12 +83,12 @@ function calibrationHeadline(medianErrorPct: number, n: number): string {
   return `p50 ETAs run ${pct}% ${medianErrorPct > 0 ? 'optimistic' : 'pessimistic'} (n=${n})`;
 }
 
-function Panel({ title, empty, emptyText = 'no data yet', children }: {
-  title: string; empty: boolean; emptyText?: string; children: ReactNode;
+function Panel({ id, title, empty, emptyText = 'no data yet', children }: {
+  id?: string; title: string; empty: boolean; emptyText?: string; children: ReactNode;
 }) {
   return (
-    <section className="metric-panel">
-      <h2>{title}</h2>
+    <section className="metric-panel" id={id}>
+      <h2 tabIndex={id ? -1 : undefined}>{title}</h2>
       {empty ? <p className="metric-empty">{emptyText}</p> : children}
     </section>
   );
@@ -185,9 +186,12 @@ function LeadTimeRepo({ lt }: { lt: MetricsPayload['leadTime'][number] }) {
   );
 }
 
-export function MetricsView({ now }: {
+export function MetricsView({ now, focusCostNonce }: {
   /** Injectable clock (tests) — the window axis is derived from it. */
   now?: () => Date;
+  /** Bumped by the global health header's Cost chip — scrolls the CI-cost panel
+   *  into view and moves focus to its heading. */
+  focusCostNonce?: number;
 } = {}) {
   const [window, setWindow] = useState<MetricsWindow>('3d');
   const [bucketPref, setBucketPref] = useState<MetricsBucket>('hour');
@@ -212,6 +216,24 @@ export function MetricsView({ now }: {
       });
     return () => { cancelled = true; };
   }, [window, bucket, refreshTick]);
+
+  // Cost chip in the global health header → bring the CI-cost panel into view.
+  // The panel only exists once the metrics payload has loaded (this view
+  // lazy-mounts and fetches on first tab visit), so this also depends on
+  // `payload`: a fresh click whose panel isn't rendered yet retries when the
+  // data arrives. `handledCostNonce` makes each click scroll exactly once,
+  // never again on a later background refresh.
+  const handledCostNonce = useRef(0);
+  useEffect(() => {
+    if (!focusCostNonce || focusCostNonce === handledCostNonce.current) return;
+    const el = document.getElementById('metrics-ci-cost');
+    if (!el) return;   // panel not rendered yet — re-runs when `payload` lands
+    handledCostNonce.current = focusCostNonce;
+    requestAnimationFrame(() => {
+      el.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' });
+      el.querySelector('h2')?.focus?.();
+    });
+  }, [focusCostNonce, payload]);
 
   const controls = (
     <div className="metrics-controls">
@@ -468,7 +490,8 @@ export function MetricsView({ now }: {
         ))}
       </Panel>
 
-      <Panel title="CI cost" empty={costRepos.length === 0 && costActualScopes.length === 0}
+      <Panel id="metrics-ci-cost" title="CI cost"
+        empty={costRepos.length === 0 && costActualScopes.length === 0}
         emptyText="no runner-minutes in window yet">
         {/* Cost empirical auto-rate (issue #100): when enabled and derivable,
             the fully-loaded $/min used for non-github-hosted pools — fleet

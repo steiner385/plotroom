@@ -10,8 +10,7 @@ import { MetricsView } from './MetricsView';
 import { DeliverySpine } from './spine/DeliverySpine';
 import { HealthHeader } from './HealthHeader';
 import { ErrorBoundary } from './ErrorBoundary';
-import { scrollBehavior } from './motion';
-import type { PrView } from './types';
+import type { PrView, LaneStatus } from './types';
 
 type TabId = 'delivery' | 'pipeline' | 'metrics';
 
@@ -114,15 +113,29 @@ export function App() {
     if (next === 'metrics') setMetricsVisited(true);
   }, []);
 
-  // Global health header → detail: open the Delivery tab and bring the lane into
-  // view once it's mounted (rAF, after the panel commits this render).
-  const jumpToLane = useCallback((laneId: string | null) => {
+  // Global health header → richest detail for each lane (decision: best-detail
+  // cross-tab routing). PR CI → Pipeline filtered; Cost → Metrics; the rest →
+  // their Delivery lane, auto-expanded + focused (handled by those components
+  // via the focus nonce, which retriggers on a repeat click of the same lane).
+  const focusNonce = useRef(0);
+  const [spineFocus, setSpineFocus] = useState<{ id: string; nonce: number } | null>(null);
+  const [costFocusNonce, setCostFocusNonce] = useState(0);
+  const goToLane = useCallback((laneId: string | null, status: LaneStatus | null) => {
+    if (laneId === 'pr-ci') {
+      // land on exactly the PRs that drove the chip's color
+      selectTab('pipeline');
+      setActiveFilter(status === 'red' ? 'failed' : status === 'green' ? 'running' : null);
+      return;
+    }
+    if (laneId === 'cost') {
+      selectTab('metrics');
+      setCostFocusNonce((focusNonce.current += 1));
+      return;
+    }
+    // merge-queue / main / deploy / scheduled / failures — and the all-green
+    // rollup (laneId null) which just opens the spine overview.
     selectTab('delivery');
-    if (!laneId) return;
-    requestAnimationFrame(() => {
-      document.getElementById(`spine-lane-${laneId}`)
-        ?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' });
-    });
+    if (laneId) setSpineFocus({ id: laneId, nonce: (focusNonce.current += 1) });
   }, [selectTab]);
 
   // Reflect the active tab in the URL hash (history entry per switch, so
@@ -237,7 +250,7 @@ export function App() {
         returnFocusRef={legendRef}
       />
       <ErrorBoundary>
-        <HealthHeader state={state} onJumpToLane={jumpToLane} />
+        <HealthHeader state={state} onJumpToLane={goToLane} />
       </ErrorBoundary>
       <nav className="tab-bar" role="tablist" aria-label="Dashboard views">
         <button type="button" role="tab" id="tab-pipeline"
@@ -266,7 +279,7 @@ export function App() {
       <div id="tabpanel-delivery" hidden={tab !== 'delivery'}
         {...(kiosk ? {} : { role: 'tabpanel', 'aria-labelledby': 'tab-delivery' })}>
         <ErrorBoundary>
-          {deliveryVisited && <DeliverySpine state={state} kiosk={kiosk} />}
+          {deliveryVisited && <DeliverySpine state={state} kiosk={kiosk} focus={spineFocus} />}
         </ErrorBoundary>
       </div>
       <div id="tabpanel-metrics" hidden={tab !== 'metrics'}
@@ -274,7 +287,7 @@ export function App() {
         {/* one boundary instance per tab: a render crash in one panel must
             not white-screen the other */}
         <ErrorBoundary>
-          {metricsVisited && <MetricsView />}
+          {metricsVisited && <MetricsView focusCostNonce={costFocusNonce} />}
         </ErrorBoundary>
       </div>
       <div id="tabpanel-pipeline" hidden={tab !== 'pipeline'}

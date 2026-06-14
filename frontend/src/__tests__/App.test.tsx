@@ -274,11 +274,26 @@ describe('App tab bar', () => {
     expect(rollup.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('clicking a health-header lane chip opens the Delivery tab and mounts its detail', () => {
+  it('a Delivery-owned lane chip opens Delivery and AUTO-EXPANDS that lane', () => {
     render(<App />);
-    fireEvent.click(screen.getByTestId('health-lane-pr-ci'));
+    fireEvent.click(screen.getByTestId('health-lane-main'));
     expect(screen.getByRole('tab', { name: /delivery/i })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByTestId('spine-lane-pr-ci')).toBeInTheDocument();
+    const laneBtn = within(screen.getByTestId('spine-lane-main')).getByRole('button');
+    expect(laneBtn).toHaveAttribute('aria-expanded', 'true');   // expanded, not just scrolled-to
+  });
+
+  it('the PR CI chip routes to the Pipeline tab (its richest per-PR detail)', () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));   // leave Pipeline first
+    fireEvent.click(screen.getByTestId('health-lane-pr-ci'));
+    expect(screen.getByRole('tab', { name: 'Pipeline' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('the Cost chip routes to the Metrics tab (the coverage view)', () => {
+    render(<App />);
+    fireEvent.click(screen.getByTestId('health-lane-cost'));
+    expect(screen.getByRole('tab', { name: 'Metrics' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('metrics-view-stub')).toBeInTheDocument();
   });
 
   // ---- per-tab error boundary ----

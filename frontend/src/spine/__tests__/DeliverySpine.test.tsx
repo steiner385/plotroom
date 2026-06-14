@@ -23,6 +23,15 @@ describe('DeliverySpine', () => {
     render(<DeliverySpine state={null} kiosk={false} />);
     expect(screen.getAllByTestId(/spine-lane-/).length).toBeGreaterThan(0);
   });
+  it('the focus prop auto-expands the requested lane (global header jump)', () => {
+    localStorage.removeItem('prdash.spine.expanded');
+    const laneBtn = () => within(screen.getByTestId('spine-lane-merge-queue')).getByRole('button');
+    const { rerender } = render(<DeliverySpine state={state({})} kiosk={false} focus={null} />);
+    expect(laneBtn()).toHaveAttribute('aria-expanded', 'false');       // collapsed to start
+    rerender(<DeliverySpine state={state({})} kiosk={false} focus={{ id: 'merge-queue', nonce: 1 }} />);
+    expect(laneBtn()).toHaveAttribute('aria-expanded', 'true');        // header jump expanded it
+    expect(laneBtn()).toHaveFocus();                                  // …and moved focus there
+  });
   it('PR CI and Merge queue lanes expand to their panels', () => {
     // state with a failed PR in CI so the PR CI lane is red and worth expanding
     const st = {

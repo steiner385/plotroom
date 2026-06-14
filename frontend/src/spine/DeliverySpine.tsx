@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { DashboardState, Lane } from '../types';
 import { SpineLane } from './SpineLane';
 import { rollup } from './laneStatus';
@@ -45,10 +45,34 @@ function buildLanes(state: DashboardState | null): Lane[] {
   }));
 }
 
-export function DeliverySpine({ state, kiosk }: { state: DashboardState | null; kiosk: boolean }) {
+export function DeliverySpine({ state, kiosk, focus }: {
+  state: DashboardState | null;
+  kiosk: boolean;
+  /** Bumped by the global health header: expand this lane, scroll to it, and
+   *  move focus there. `nonce` makes a repeat click on the same lane retrigger. */
+  focus?: { id: string; nonce: number } | null;
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(readExpanded);
   const lanes = useMemo(() => buildLanes(state), [state]);
   const roll = useMemo(() => rollup(lanes), [lanes]);
+
+  // Auto-expand + reveal a lane requested from the header (not in kiosk, where
+  // every lane is already open and the header isn't shown).
+  useEffect(() => {
+    if (!focus || kiosk) return;
+    setExpanded((prev) => {
+      if (prev.has(focus.id)) return prev;
+      const next = new Set(prev).add(focus.id);
+      try { localStorage.setItem(LS_KEY, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+    // Focus is handled by the target SpineLane (own-component effect, below);
+    // here we just bring it into view once expanded.
+    requestAnimationFrame(() => {
+      document.getElementById(`spine-lane-${focus.id}`)
+        ?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' });
+    });
+  }, [focus, kiosk]);
 
   const toggle = (id: string) => {
     if (kiosk) return;
@@ -79,7 +103,8 @@ export function DeliverySpine({ state, kiosk }: { state: DashboardState | null; 
       <ul className="spine-rail" role="list">
         {lanes.map((lane) => (
           <ErrorBoundary key={lane.id}>
-            <SpineLane lane={lane} expanded={kiosk || expanded.has(lane.id)} onToggle={() => toggle(lane.id)} />
+            <SpineLane lane={lane} expanded={kiosk || expanded.has(lane.id)} onToggle={() => toggle(lane.id)}
+              focusNonce={focus?.id === lane.id ? focus.nonce : undefined} />
           </ErrorBoundary>
         ))}
       </ul>
