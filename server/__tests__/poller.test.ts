@@ -5872,4 +5872,13 @@ describe('per-repo laneHealth on DashboardState', () => {
     const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
     expect(repo.laneHealth?.main).toBe('amber');
   });
+  it('laneHealth carries the main series + last-green metadata', async () => {
+    history.recordMainCommit('acme/widgets', 'g1', NOW.toISOString(), 'SUCCESS', NOW.toISOString());
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.laneHealth?.main).toBe('green');
+    expect(repo.laneHealth?.lastGreenSha).toBe('g1');
+    expect(repo.laneHealth?.mainSeries?.length).toBeGreaterThan(0);
+  });
 });

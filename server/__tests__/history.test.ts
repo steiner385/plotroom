@@ -1504,4 +1504,13 @@ describe('main_commits + mainLaneHealth', () => {
     h.recordMainCommit(REPO, 'c', '2026-06-10T10:00:00Z', 'SUCCESS', '2026-06-10T10:10:00Z');
     expect(h.mainLaneHealth(REPO, 36500).status).toBe('green');
   });
+  it('mainCommitSeries returns the bounded recent series oldest→newest with last-green metadata', () => {
+    h.recordMainCommit(REPO, 'a', '2026-06-10T10:00:00Z', 'SUCCESS', '2026-06-10T10:05:00Z');
+    h.recordMainCommit(REPO, 'b', '2026-06-10T11:00:00Z', 'FAILURE', '2026-06-10T11:05:00Z');
+    h.recordMainCommit(REPO, 'c', '2026-06-10T12:00:00Z', null, null);
+    const s = h.mainCommitSeries(REPO, 36500);
+    expect(s.points.map((p) => p.ok)).toEqual([true, false, null]);   // oldest→newest; null = no signal
+    expect(s.lastGreenSha).toBe('a');
+    expect(s.lastGreenAt).toBe('2026-06-10T10:00:00Z');
+  });
 });

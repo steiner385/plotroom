@@ -184,6 +184,7 @@ export class HistoryStore {
   // Delivery spine main lane (spec §4.1, §8.4): post-merge push:main verdicts
   private readonly stmtUpsertMainCommit: Database.Statement;
   private readonly stmtRecentMainCommits: Database.Statement;
+  private readonly stmtMainSeries: Database.Statement;
 
   constructor(path: string) {
     this.db = new Database(path);
@@ -558,6 +559,10 @@ export class HistoryStore {
       `SELECT commit_sha, merged_at, push_ci_conclusion, push_ci_completed_at
        FROM main_commits WHERE repo=? AND COALESCE(merged_at, observed_at) >= ?
        ORDER BY COALESCE(merged_at, observed_at) DESC LIMIT 20`);
+    this.stmtMainSeries = this.db.prepare(
+      `SELECT commit_sha, push_ci_conclusion, COALESCE(merged_at, observed_at) AS at
+       FROM main_commits WHERE repo=? AND COALESCE(merged_at, observed_at) >= ?
+       ORDER BY COALESCE(merged_at, observed_at) DESC LIMIT 20`);
   }
 
   /** `headSha`/`runAttempt` (issue #34): the PR/group head commit the check ran
@@ -753,6 +758,21 @@ export class HistoryStore {
     if (!fail(newest.push_ci_conclusion)) return { status: 'green', lastGreenSha: lastGreen };
     const secondRed = rows[1] != null && fail(rows[1].push_ci_conclusion);
     return { status: secondRed ? 'red' : 'amber', lastGreenSha: lastGreen };
+  }
+
+  /** Recent main-commit series for the lane's sparkline (oldest→newest), plus
+   *  last-green metadata. `ok`: true=SUCCESS, false=failing, null=no conclusion. */
+  mainCommitSeries(repo: string, retentionDays = 7, now: Date = new Date()):
+    { points: { ok: boolean | null }[]; lastGreenSha: string | null; lastGreenAt: string | null } {
+    const cutoff = new Date(now.getTime() - retentionDays * 86400_000).toISOString();
+    const rows = (this.stmtMainSeries.all(repo, cutoff) as
+      { commit_sha: string; push_ci_conclusion: string | null; at: string }[]);
+    const lastGreenRow = rows.find((r) => r.push_ci_conclusion === 'SUCCESS') ?? null;
+    const fail = (c: string | null) => c != null && FAILING_CONCLUSIONS.has(c);
+    const points = rows.slice().reverse().map((r) => ({
+      ok: r.push_ci_conclusion == null ? null : !fail(r.push_ci_conclusion),
+    }));
+    return { points, lastGreenSha: lastGreenRow?.commit_sha ?? null, lastGreenAt: lastGreenRow?.at ?? null };
   }
 
   /** Raw last-20 whole-group run durations for a repo, newest first —
