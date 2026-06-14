@@ -407,3 +407,28 @@ export interface MetricsPayload {
     coveragePct: number | null;
     recentCoveragePct: number | null; recentCoverageDate: string | null }[];
 }
+
+// ---- Delivery Spine (spec §2, §3.1, §4.2, §14) ----
+
+/** The single public status vocabulary for Delivery-spine lanes (spec §2). */
+export type LaneStatus = 'green' | 'amber' | 'red' | 'blind' | 'idle';
+
+/** The serializable lane facts the server may compute and ship over SSE
+ *  (spec §14: a positive allowlist — never tokens/errors/secrets). */
+export interface LaneView {
+  id: string;
+  title: string;
+  status: LaneStatus;
+  summary: string;            // ≤200 chars, truncated '…'
+  costChip?: { dollars: number; days: number } | null;
+  efficiencyChip?: string | null;
+  wiredness: 'wired' | 'not-wired';
+  gating: boolean;
+}
+
+/** A fully-realized lane: a LaneView plus the client-only render function for
+ *  its expanded panel (spec §3.1 — a render FUNCTION so it re-renders on SSE). */
+export interface Lane extends LaneView {
+  glyphPosition: 'dot' | 'crosscut';
+  renderExpanded: () => import('react').ReactNode;
+}
