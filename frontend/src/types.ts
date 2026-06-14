@@ -436,7 +436,9 @@ export interface MetricsPayload {
     days: { date: string; actualDollars: number; attributedDollars: number | null;
       coveragePct: number | null }[];
     totalActualDollars: number; totalAttributedDollars: number | null;
-    coveragePct: number | null;
+    /** Coverage is computed over COMPARABLE days only (tracked + fully billed);
+     *  `coverageSince` is the first such day. Not the naive total ratio. */
+    coveragePct: number | null; coverageSince: string | null;
     recentCoveragePct: number | null; recentCoverageDate: string | null }[];
   /** Cost empirical auto-rate (issue #100): the derived fully-loaded $/runner-
    *  minute applied to non-github-hosted pools when `costAutoRate` is enabled

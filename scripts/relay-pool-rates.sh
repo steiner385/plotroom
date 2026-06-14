@@ -5,8 +5,10 @@
 #   relay-pool-rates.sh [DAYS_BACK]    (default 30)
 #
 # How it works:
-#   1. CE: EC2-Compute UnblendedCost over the window, grouped by PURCHASE_TYPE
-#      → spot $ and on-demand $ (Reserved/Savings count as on-demand).
+#   1. CE: EC2-Compute UnblendedCost grouped by PURCHASE_TYPE → spot $ and
+#      on-demand $ (Reserved/Savings count as on-demand). The window starts at
+#      the LATER of (DAYS ago) and the first day with tracked job-minutes, so the
+#      $ numerator never spans pre-tracking days the minutes denominator lacks.
 #   2. Dashboard: per-pool runner-minutes over the same window (/api/metrics).
 #   3. Rate per capacity type = type $ ÷ that type's runner-minutes. Each pool is
 #      classified spot/on-demand by its name / poolMeta instanceType; GitHub-
@@ -40,8 +42,30 @@ DAYS="${1:-30}"
 URL="${PRDASH_URL:-http://127.0.0.1:4400}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${PRDASH_CONFIG:-$SCRIPT_DIR/../config.json}"
-START=$(date -u -d "$DAYS days ago" +%F)
+WINDOW_START=$(date -u -d "$DAYS days ago" +%F)
 END=$(date -u -d "tomorrow" +%F)
+
+METRICS=$(curl -sf "$URL/api/metrics?windowDays=$DAYS")
+
+# CRITICAL: pin the CE window to where tracked job-minutes actually exist. The
+# rate is (CE $ ÷ tracked minutes); if the $ numerator spans days the minutes
+# denominator doesn't (e.g. spend from before job-tracking began), every rate is
+# inflated and attribution runs over 100%. START = the LATER of (DAYS ago) and
+# the first tracked job-minute bucket, so numerator and denominator align.
+TRACK_START=$(printf '%s' "$METRICS" | python3 -c "
+import json, sys
+m = json.load(sys.stdin); ds = set()
+for repo in (m.get('cost') or []):
+    for p in repo.get('pools', []) or []:
+        for b in p.get('buckets', []) or []:
+            ds.add(b['bucket'])
+print(min(ds) if ds else '')
+")
+START="$WINDOW_START"
+if [ -n "$TRACK_START" ] && [[ "$TRACK_START" > "$WINDOW_START" ]]; then
+  START="$TRACK_START"
+  echo "tracked minutes start $TRACK_START — pricing CE from there, not $WINDOW_START"
+fi
 
 CE=$(aws ce get-cost-and-usage \
   --time-period "Start=$START,End=$END" \
@@ -49,8 +73,6 @@ CE=$(aws ce get-cost-and-usage \
   --group-by Type=DIMENSION,Key=PURCHASE_TYPE \
   --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Elastic Compute Cloud - Compute"]}}' \
   --output json)
-
-METRICS=$(curl -sf "$URL/api/metrics?windowDays=$DAYS")
 
 CE="$CE" METRICS="$METRICS" CONFIG="$CONFIG" DAYS="$DAYS" DRY_RUN="${DRY_RUN:-0}" python3 - <<'PY'
 import json, os, sys

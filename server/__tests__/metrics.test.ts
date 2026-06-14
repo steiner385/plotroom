@@ -1296,21 +1296,45 @@ describe('computeMetrics: cost actuals + attribution coverage (phase 2)', () => 
       end.toISOString(), 'SUCCESS', 'sha1', 1, 1);
   };
 
-  it('joins per-day actuals with per-day attributed dollars; coverage = attributed ÷ actual', () => {
+  it('joins per-day actuals with per-day attributed dollars; per-day coverage = attributed ÷ actual', () => {
     job('unit-tests', '2026-06-11T10:00:00Z', 600);   // spot, 10 min
     job('build', '2026-06-11T11:00:00Z', 1200);       // spot, 20 min
     h.upsertCostActual('fleet', '2026-06-11', 0.60, 'aws-ce');
     const [fleet] = actuals({ cpm: { spot: 0.01 } }); // 30 min × $0.01 = $0.30
     expect(fleet).toEqual({
       scope: 'fleet',
+      // the per-day row still carries its own coverage
       days: [{ date: '2026-06-11', actualDollars: 0.60,
         attributedDollars: expect.closeTo(0.30, 6), coveragePct: expect.closeTo(50, 6) }],
       totalActualDollars: 0.60,
       totalAttributedDollars: expect.closeTo(0.30, 6),
-      coveragePct: expect.closeTo(50, 6),
-      // the only billed day is NOW's day (today, still settling) → excluded
+      // ...but the only billed day is NOW's day (today, still settling), so it is
+      // NOT a comparable day → cumulative coverage and coverageSince are null,
+      // consistent with recentCoveragePct. (Avoids the mismatched-day-set ratio
+      // that made attributed look like it exceeded actual.)
+      coveragePct: null, coverageSince: null,
       recentCoveragePct: null, recentCoverageDate: null,
     });
+  });
+
+  it('excludes pre-tracking days from cumulative coverage but keeps them in the bill', () => {
+    // The exact screenshot bug: days billed BEFORE job-tracking began have real
+    // actual spend and zero attributed. Summing them into the ratio (or, in the
+    // mirror case, summing today's still-settling attributed) is what made
+    // attributed appear to exceed actual. Coverage must use comparable days only.
+    job('unit-tests', '2026-06-10T13:00:00Z', 600);            // 10 min × $0.01 = $0.10 (tracked)
+    h.upsertCostActual('fleet', '2026-06-05', 1.00, 'aws-ce'); // pre-tracking: bill, no jobs
+    h.upsertCostActual('fleet', '2026-06-10', 0.20, 'aws-ce'); // tracked + settled
+    h.upsertCostActual('fleet', '2026-06-11', 5.00, 'aws-ce'); // today, still settling
+    const [fleet] = computeMetrics(h, '30d', 'day', NOW, [], () => 1, new Map(), new Map(),
+      [], poolsFor, [], { spot: 0.01 }, null, () => null).costActuals;
+    // total bill keeps every day (6.20); attribution only the tracked day (0.10)
+    expect(fleet!.totalActualDollars).toBeCloseTo(6.20, 6);
+    expect(fleet!.totalAttributedDollars).toBeCloseTo(0.10, 6);
+    // coverage is the comparable day 06-10 ALONE: 0.10/0.20 = 50% — NOT the naive
+    // 0.10/6.20 = 1.6% that pre-tracking + today would produce.
+    expect(fleet!.coveragePct).toBeCloseTo(50, 6);
+    expect(fleet!.coverageSince).toBe('2026-06-10');
   });
 
   it('recentCoveragePct = coverage of the latest fully-billed day, skipping today', () => {

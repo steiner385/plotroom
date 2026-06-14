@@ -1018,14 +1018,17 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
     return heading.closest('section')! as HTMLElement;
   };
 
+  // NOW (below) is 2026-06-11, so 06-11 is "today" (excluded from coverage).
+  // coverage is computed over the comparable day 06-10 only → 71.6/123.45 = 58%.
   const ACTUALS: NonNullable<MetricsPayload['costActuals']> = [
     { scope: 'fleet',
       days: [
         { date: '2026-06-10', actualDollars: 123.45, attributedDollars: 71.6, coveragePct: 58 },
         { date: '2026-06-11', actualDollars: 100, attributedDollars: 40, coveragePct: 40 },
       ],
-      totalActualDollars: 223.45, totalAttributedDollars: 111.6, coveragePct: 49.94,
-        recentCoveragePct: 49.94, recentCoverageDate: '2026-06-11' },
+      totalActualDollars: 223.45, totalAttributedDollars: 111.6,
+        coveragePct: 58, coverageSince: '2026-06-10',
+        recentCoveragePct: 58, recentCoverageDate: '2026-06-10' },
   ];
 
   it('renders the actuals tiles, the coverage headline, and the per-day table', async () => {
@@ -1038,7 +1041,9 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
     expect(within(block).getByText('$111.60')).toBeInTheDocument();   // attributed
     expect(within(block).getByText('2 days imported')).toBeInTheDocument();
     const headline = within(panel).getByTestId('cost-coverage-fleet');
-    expect(headline.textContent).toContain('jobs explain 50% of fleet spend');
+    expect(headline.textContent).toContain('jobs explain 58% of fleet spend');
+    expect(headline.textContent).toContain('since 2026-06-10');     // comparable basis
+    expect(headline.textContent).toContain('$51.85');               // 123.45 − 71.60 remainder
     // per-day rows
     const rows = within(block).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(2);
@@ -1053,7 +1058,7 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
       { scope: 'fleet',
         days: [{ date: '2026-06-11', actualDollars: 100, attributedDollars: null, coveragePct: null }],
         totalActualDollars: 100, totalAttributedDollars: null, coveragePct: null,
-        recentCoveragePct: null, recentCoverageDate: null },
+        coverageSince: null, recentCoveragePct: null, recentCoverageDate: null },
     ];
     mockFetchOk({ ...PAYLOAD, costActuals: minutesOnly });
     render(<MetricsView now={NOW} />);
@@ -1068,9 +1073,9 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
   it('renders per-pool scopes alongside fleet (scope name in the heading and headline)', async () => {
     const scoped = [...ACTUALS,
       { scope: 'kindash-arc',
-        days: [{ date: '2026-06-11', actualDollars: 50, attributedDollars: 45, coveragePct: 90 }],
+        days: [{ date: '2026-06-10', actualDollars: 50, attributedDollars: 45, coveragePct: 90 }],
         totalActualDollars: 50, totalAttributedDollars: 45, coveragePct: 90,
-        recentCoveragePct: 90, recentCoverageDate: '2026-06-11' }];
+        coverageSince: '2026-06-10', recentCoveragePct: 90, recentCoverageDate: '2026-06-10' }];
     mockFetchOk({ ...PAYLOAD, costActuals: scoped });
     render(<MetricsView now={NOW} />);
     const panel = await costPanel();
@@ -1079,27 +1084,33 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
       .toContain('jobs explain 90% of kindash-arc spend');
   });
 
-  it('headlines the STABLE cumulative coverage, not the noisy most-recent day', async () => {
-    // cumulative (90%) and recent-day (30%) deliberately differ — the headline
-    // and tile must show the cumulative window figure, never the jumpy day value.
-    const diverging: NonNullable<MetricsPayload['costActuals']> = [
+  it('coverage is the comparable-day basis; over-100% reads as rate over-pricing, not a dollar', async () => {
+    // Over comparable days (06-09, 06-10; 06-11 is today and excluded) attributed
+    // ($240) exceeds actual ($200) → 120%. The headline must explain that as the
+    // per-minute rate over-pricing the fleet, NOT present coverage as a dollar.
+    const overPriced: NonNullable<MetricsPayload['costActuals']> = [
       { scope: 'fleet',
         days: [
-          { date: '2026-06-12', actualDollars: 100, attributedDollars: 150, coveragePct: 150 },
-          { date: '2026-06-13', actualDollars: 100, attributedDollars: 30, coveragePct: 30 },
+          { date: '2026-06-09', actualDollars: 100, attributedDollars: 150, coveragePct: 150 },
+          { date: '2026-06-10', actualDollars: 100, attributedDollars: 90, coveragePct: 90 },
+          { date: '2026-06-11', actualDollars: 50, attributedDollars: 5, coveragePct: 10 },
         ],
-        totalActualDollars: 200, totalAttributedDollars: 180, coveragePct: 90,
-        recentCoveragePct: 30, recentCoverageDate: '2026-06-13' },
+        totalActualDollars: 250, totalAttributedDollars: 245,
+        coveragePct: 120, coverageSince: '2026-06-09',
+        recentCoveragePct: 90, recentCoverageDate: '2026-06-10' },
     ];
-    mockFetchOk({ ...PAYLOAD, costActuals: diverging });
+    mockFetchOk({ ...PAYLOAD, costActuals: overPriced });
     render(<MetricsView now={NOW} />);
     const panel = await costPanel();
     const headline = within(panel).getByTestId('cost-coverage-fleet');
-    expect(headline.textContent).toContain('jobs explain 90% of fleet spend');   // cumulative
-    expect(headline.textContent).not.toContain('30%');                            // not the recent day
-    expect(headline.textContent).toContain('$20.00');                             // unexplained = 200 − 180
+    expect(headline.textContent).toContain('over the 2 tracked days since 2026-06-09');
+    expect(headline.textContent).toContain('jobs explain 120% of fleet spend');
+    expect(headline.textContent).toContain('attributed ($240.00) runs over actual ($200.00)');
+    expect(headline.textContent).toContain('too high');
+    // today (06-11) is excluded from the comparable sums
+    expect(headline.textContent).not.toContain('$245.00');
     const block = within(panel).getByTestId('cost-actuals-fleet');
-    expect(within(block).getByText('window cumulative')).toBeInTheDocument();
+    expect(within(block).getByText('tracked days since 2026-06-09')).toBeInTheDocument();
   });
 
   it('tolerates a pre-upgrade payload without costActuals (no actuals block, panel intact)', async () => {

@@ -505,20 +505,33 @@ export function MetricsView({ now }: {
                   value={a.totalAttributedDollars != null
                     ? fmtDollars(a.totalAttributedDollars) : '–'} />
                 <MetricStat label="coverage" def={DEFS.costActualsCoverage}
-                  value={a.coveragePct != null ? fmtPct(a.coveragePct)
-                    : a.recentCoveragePct != null ? fmtPct(a.recentCoveragePct) : '–'}
-                  delta="window cumulative" />
+                  value={a.coveragePct != null ? fmtPct(a.coveragePct) : '–'}
+                  delta={a.coverageSince ? `tracked days since ${a.coverageSince}`
+                    : 'no tracked days yet'} />
               </div>
-              {(a.coveragePct ?? a.recentCoveragePct) != null && (
-                <p className="metric-note cost-coverage-headline"
-                  title={defTitle(DEFS.costActualsCoverage)}
-                  data-testid={`cost-coverage-${a.scope}`}>
-                  jobs explain {fmtPct((a.coveragePct ?? a.recentCoveragePct)!)} of {a.scope} spend
-                  this window — the rest ({fmtDollars(a.totalActualDollars - (a.totalAttributedDollars ?? 0))})
-                  is idle runner capacity, node boot/teardown, and unpriced pools that no single job owns.
-                  Actual spend is the bill; coverage is how completely we can explain it
-                </p>
-              )}
+              {a.coveragePct != null && (() => {
+                // Re-derive the comparable window (tracked + fully billed) so the
+                // headline's dollar figures match the coverage % the server
+                // computed over the same days — never the mismatched full totals.
+                const todayUtc = (now ?? (() => new Date()))().toISOString().slice(0, 10);
+                const cmp = a.coverageSince
+                  ? a.days.filter((d) => d.date >= a.coverageSince! && d.date < todayUtc) : [];
+                const cmpActual = cmp.reduce((s, d) => s + d.actualDollars, 0);
+                const cmpAttr = cmp.reduce((s, d) => s + (d.attributedDollars ?? 0), 0);
+                const over = a.coveragePct > 100;
+                return (
+                  <p className="metric-note cost-coverage-headline"
+                    title={defTitle(DEFS.costActualsCoverage)}
+                    data-testid={`cost-coverage-${a.scope}`}>
+                    over the {cmp.length} tracked day{cmp.length === 1 ? '' : 's'} since {a.coverageSince},
+                    {' '}jobs explain {fmtPct(a.coveragePct)} of {a.scope} spend
+                    {over
+                      ? ` — attributed (${fmtDollars(cmpAttr)}) runs over actual (${fmtDollars(cmpActual)}), so the per-minute rate is pricing the fixed-capacity fleet too high (or recent days haven’t fully billed)`
+                      : ` — the rest (${fmtDollars(cmpActual - cmpAttr)}) is idle runner capacity, node boot/teardown, and unpriced pools that no single job owns`}.
+                    {' '}Actual spend is the bill; coverage is how completely we can explain it
+                  </p>
+                );
+              })()}
               <ChartBlock label="actual vs attributed $ per day">
                 <MultiLine series={series} kind="day" format={fmtDollars}
                   label={`${a.scope} actual vs attributed dollars per day`} />

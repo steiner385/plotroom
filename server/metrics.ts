@@ -214,18 +214,27 @@ export interface MetricsPayload {
    *  to their own pool scope and to every per-job/per-run/byPool dollar figure).
    *  ALWAYS day-keyed — actual bills are daily, so the hour/day
    *  bucket selector never applies here. `attributedDollars` is null in
-   *  minutes-only mode (no rates configured); `coveragePct` = attributed ÷
-   *  actual × 100, null when either side is missing (no rates, or actual = 0).
-   *  The headline totals sum the in-window days that carry an actual row; the
-   *  UNEXPLAINED remainder (coverage < 100%) is idle runner time, node boot/
-   *  teardown overhead, unpriced pools, and anything else on the bill that
-   *  isn't a tracked CI job. Scopes with no actual rows in-window are omitted;
-   *  'fleet' sorts first. */
+   *  minutes-only mode (no rates configured).
+   *
+   *  `totalActualDollars` / `totalAttributedDollars` are the FULL-window sums
+   *  (the real bill, and everything we modelled). But `coveragePct` is NOT
+   *  their naive ratio: it is computed over COMPARABLE days only — days that
+   *  both fall in the job-tracking era (`date >= coverageSince`) and are fully
+   *  billed (`date < today`). Days before tracking began have actual-but-zero
+   *  attributed and would crater the ratio; today's bill is still settling and
+   *  would spike it. Comparing the two mismatched day-sets is exactly what made
+   *  attributed appear to exceed actual. `coverageSince` is the first tracked
+   *  day (null in minutes-only mode); the frontend re-derives the comparable
+   *  window from it. The UNEXPLAINED remainder (coverage < 100%) is idle runner
+   *  time, node boot/teardown overhead, and unpriced pools; coverage > 100%
+   *  means the per-minute rate over-prices the fixed-capacity fleet (the relay
+   *  rate is hot, or recent days haven't fully billed yet). Scopes with no
+   *  actual rows in-window are omitted; 'fleet' sorts first. */
   costActuals: { scope: string;
     days: { date: string; actualDollars: number; attributedDollars: number | null;
       coveragePct: number | null }[];
     totalActualDollars: number; totalAttributedDollars: number | null;
-    coveragePct: number | null;
+    coveragePct: number | null; coverageSince: string | null;
     /** Coverage of the most recent fully-billed day (excludes today's still-
      *  settling partial). The cumulative `coveragePct` is dragged down during
      *  the attribution data-ramp — early in-window days have incomplete job
@@ -1073,6 +1082,15 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       }
     }
   }
+  // First day we have ANY tracked job for — coverage before this is meaningless
+  // (real bills, zero attributed). Derived from the job rows, so it exists even
+  // in minutes-only mode (it just isn't used until rates arrive).
+  let trackingStart: string | null = null;
+  for (const r of costRows) {
+    const d = dayOf(r.startedAt);
+    if (trackingStart == null || d < trackingStart) trackingStart = d;
+  }
+  const todayUtc = now.toISOString().slice(0, 10);
   const costActuals = [...groupBy(fleetActuals, (r) => r.scope)]
     .sort(([a], [b]) => (a === 'fleet' ? -1 : b === 'fleet' ? 1 : a.localeCompare(b)))
     .map(([scope, rows]) => {
@@ -1087,15 +1105,26 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       const totalActualDollars = days.reduce((s, d) => s + d.actualDollars, 0);
       const totalAttributedDollars = hasRates
         ? days.reduce((s, d) => s + (d.attributedDollars ?? 0), 0) : null;
+      // Cumulative coverage over COMPARABLE days only: tracked (>= trackingStart)
+      // AND fully billed (< today). This is the honest attributed÷actual — it
+      // excludes pre-tracking days (which crater it) and today's settling
+      // partial (which spikes it), the two effects that made attributed look
+      // like it exceeded actual.
+      const comparable = trackingStart == null ? []
+        : days.filter((d) => d.date >= trackingStart! && d.date < todayUtc);
+      const cmpActual = comparable.reduce((s, d) => s + d.actualDollars, 0);
+      const cmpAttributed = hasRates
+        ? comparable.reduce((s, d) => s + (d.attributedDollars ?? 0), 0) : null;
       // Most recent fully-billed day with a computable coverage, skipping the
       // current UTC day (Cost Explorer is still settling it). Truthful headline
       // that the attribution data-ramp can't distort.
-      const todayUtc = now.toISOString().slice(0, 10);
       const recent = [...days].reverse().find(
         (d) => d.date < todayUtc && d.coveragePct != null);
       return { scope, days, totalActualDollars, totalAttributedDollars,
-        coveragePct: totalAttributedDollars != null && totalActualDollars > 0
-          ? (totalAttributedDollars / totalActualDollars) * 100 : null,
+        coveragePct: cmpAttributed != null && cmpActual > 0
+          ? (cmpAttributed / cmpActual) * 100 : null,
+        coverageSince: cmpAttributed != null && comparable.length > 0
+          ? trackingStart : null,
         recentCoveragePct: recent?.coveragePct ?? null,
         recentCoverageDate: recent?.date ?? null };
     });
