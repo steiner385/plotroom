@@ -29,32 +29,38 @@ export interface ConfigApi {
 }
 
 /**
- * CSRF guard for mutating endpoints (PUT /api/config, POST /api/admin/restart).
- * The server binds 127.0.0.1, but a malicious page in the operator's browser
- * can still fire cross-site requests at loopback — browsers attach
- * Sec-Fetch-Site / Origin to those, so:
+ * CSRF guard factory for mutating endpoints (POST /api/cost/actuals,
+ * PUT /api/config, POST /api/admin/restart). A malicious page in the operator's
+ * browser can fire cross-site requests at the dashboard — browsers attach
+ * Sec-Fetch-Site / Origin, so:
  *   - Sec-Fetch-Site present and not same-origin/none → 403
- *   - Origin present and its host not 127.0.0.1/localhost (any port) → 403
+ *   - Origin present and its host NOT in `allowedHosts()` → 403
  *   - neither header present (curl/scripts) → allowed
- * The webhook path never uses this guard — it is signature-authenticated and
- * GitHub's delivery is cross-origin by nature.
+ * `allowedHosts()` is resolved per request (so hot-reload of bindHosts/
+ * allowedOriginHosts takes effect) and always includes 127.0.0.1/localhost plus
+ * any configured bind/origin hosts — this lets the UI served over a Tailscale
+ * IP/MagicDNS name make mutating requests to itself while still blocking a
+ * cross-origin page. The webhook path never uses this guard (it is
+ * signature-authenticated and GitHub's delivery is cross-origin by nature).
  */
-function sameOriginGuard(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const site = req.headers['sec-fetch-site'];
-  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') {
-    res.status(403).json({ error: `cross-site request blocked (sec-fetch-site: ${site})` });
-    return;
-  }
-  const origin = req.headers.origin;
-  if (typeof origin === 'string') {
-    let host: string | null;
-    try { host = new URL(origin).hostname; } catch { host = null; }
-    if (host !== '127.0.0.1' && host !== 'localhost') {
-      res.status(403).json({ error: `cross-origin request blocked (origin: ${origin})` });
+function makeSameOriginGuard(allowedHosts: () => Set<string>) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction): void => {
+    const site = req.headers['sec-fetch-site'];
+    if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') {
+      res.status(403).json({ error: `cross-site request blocked (sec-fetch-site: ${site})` });
       return;
     }
-  }
-  next();
+    const origin = req.headers.origin;
+    if (typeof origin === 'string') {
+      let host: string | null;
+      try { host = new URL(origin).hostname; } catch { host = null; }
+      if (host == null || !allowedHosts().has(host)) {
+        res.status(403).json({ error: `cross-origin request blocked (origin: ${origin})` });
+        return;
+      }
+    }
+    next();
+  };
 }
 
 /** One validated cost-actuals row (cost explorer phase 2). */
@@ -159,6 +165,15 @@ export function createApp(opts: {
   const app = express();
   app.disable('x-powered-by');
 
+  // Same-origin guard for mutating endpoints — accepts loopback plus any
+  // configured bind/origin hosts (e.g. a Tailscale IP/MagicDNS name) so the
+  // dashboard works when reached across the tailnet. Resolved per request.
+  const originGuard = makeSameOriginGuard(() => {
+    const cfg = opts.config?.get();
+    return new Set<string>(['127.0.0.1', 'localhost',
+      ...(cfg?.bindHosts ?? []), ...(cfg?.allowedOriginHosts ?? [])]);
+  });
+
   // Webhook receiver — mounted BEFORE express.json with a route-scoped raw-body
   // parser: signature verification needs the exact request bytes, and nothing
   // else in the app should pay the cost of buffering raw bodies.
@@ -214,7 +229,7 @@ export function createApp(opts: {
     // Same-origin guard like the other mutating endpoints: browsers can't
     // cross-site POST money figures at loopback, while header-less clients
     // (curl, an infra cron piping `aws ce get-cost-and-usage`) pass freely.
-    app.post('/api/cost/actuals', sameOriginGuard, (req, res) => {
+    app.post('/api/cost/actuals', originGuard, (req, res) => {
       const v = validateCostActualsBody(req.body);
       if (!v.ok) {
         res.status(400).json({ error: 'invalid cost actuals', errors: v.errors });
@@ -249,7 +264,7 @@ export function createApp(opts: {
       });
     });
 
-    app.put('/api/config', sameOriginGuard, (req, res) => {
+    app.put('/api/config', originGuard, (req, res) => {
       const v = validateConfigPatch(req.body);
       if (!v.ok) {
         res.status(400).json({
@@ -272,7 +287,7 @@ export function createApp(opts: {
   // (Restart=on-failure) revives the service. No shell execution involved.
   const exitFn = opts.restart?.exit ?? ((code: number) => process.exit(code));
   const restartDelayMs = opts.restart?.delayMs ?? 250;
-  app.post('/api/admin/restart', sameOriginGuard, (_req, res) => {
+  app.post('/api/admin/restart', originGuard, (_req, res) => {
     res.status(202).json({ restarting: true });
     setTimeout(() => exitFn(1), restartDelayMs).unref();
   });

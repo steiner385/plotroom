@@ -28,6 +28,21 @@ describe('loadConfig', () => {
     expect(cfg.apiUrl).toBe('https://api.github.com/graphql');
     expect(cfg.rateLimitFloor).toBe(1000);
     expect(cfg.batchSize).toBe(6);
+    expect(cfg.bindHosts).toEqual(['127.0.0.1']);   // loopback-only by default
+    expect(cfg.allowedOriginHosts).toEqual([]);
+  });
+
+  it('parses bindHosts/allowedOriginHosts and sanitizes bad values back to loopback', () => {
+    const cfg = loadConfig(writeConfig({
+      bindHosts: ['127.0.0.1', '100.102.11.121'],
+      allowedOriginHosts: ['dobby.tail0dd570.ts.net'],
+    }));
+    expect(cfg.bindHosts).toEqual(['127.0.0.1', '100.102.11.121']);
+    expect(cfg.allowedOriginHosts).toEqual(['dobby.tail0dd570.ts.net']);
+    // empty / non-array / non-string entries → fall back to loopback (never bind nothing)
+    expect(loadConfig(writeConfig({ bindHosts: [] })).bindHosts).toEqual(['127.0.0.1']);
+    expect(loadConfig(writeConfig({ bindHosts: 'nope' })).bindHosts).toEqual(['127.0.0.1']);
+    expect(loadConfig(writeConfig({ bindHosts: ['', 42, '100.64.0.1'] })).bindHosts).toEqual(['100.64.0.1']);
   });
 
   it('spec-example deploy entry: uppercase env name lowercased, cloneUrl/defaultBranch/shaKey defaulted', () => {

@@ -444,6 +444,24 @@ describe('same-origin guard (PUT /api/config, POST /api/admin/restart)', () => {
     expect(exit).not.toHaveBeenCalled();
   });
 
+  it('the same-origin guard accepts configured bind/origin hosts (Tailscale), rejects others', async () => {
+    const cfg = { bindHosts: ['127.0.0.1', '100.102.11.121'],
+      allowedOriginHosts: ['dobby.tail0dd570.ts.net'] } as unknown as AppConfig;
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      config: { get: () => cfg, writableTo: '/tmp/x.json', fileSources: () => ({}), repos: () => ({}), apply: () => {} } });
+    // a request from the Tailscale IP or MagicDNS name gets PAST the guard
+    // (invalid empty patch → 400, NOT a 403 cross-origin block)
+    const ip = await request(app).put('/api/config').set('origin', 'http://100.102.11.121:4400').send({});
+    expect(ip.status).not.toBe(403);
+    const dns = await request(app).put('/api/config').set('origin', 'http://dobby.tail0dd570.ts.net:4400').send({});
+    expect(dns.status).not.toBe(403);
+    // loopback still allowed; a foreign origin is still blocked
+    const local = await request(app).put('/api/config').set('origin', 'http://127.0.0.1:4400').send({});
+    expect(local.status).not.toBe(403);
+    const evil = await request(app).put('/api/config').set('origin', 'http://evil.example.com').send({});
+    expect(evil.status).toBe(403);
+  });
+
   it('the webhook path is exempt (signature-authenticated, not origin-gated)', async () => {
     const nudge = vi.fn();
     const app = createApp({ getState: () => STATE, bus: new EventEmitter(),

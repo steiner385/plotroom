@@ -105,6 +105,15 @@ export interface AppConfig {
   owners: string[];
   exclude: string[];
   port: number;
+  /** Interface addresses the server binds (one listener each). Default
+   *  `['127.0.0.1']` (loopback only). Add a Tailscale IP to reach the dashboard
+   *  from other tailnet devices; a non-loopback bind that fails (e.g. Tailscale
+   *  not up yet) is logged and skipped — loopback always comes up. File-only. */
+  bindHosts: string[];
+  /** Extra Origin hostnames the mutating-endpoint same-origin guard accepts in
+   *  addition to 127.0.0.1/localhost and `bindHosts` — e.g. a Tailscale MagicDNS
+   *  name (`host.tailnet.ts.net`) when the UI is reached by name, not IP. */
+  allowedOriginHosts: string[];
   retentionDays: number;
   batchSize: number;
   /** Where the GitHub token comes from: 'gh' = gh CLI keyring, 'env' = GITHUB_TOKEN,
@@ -157,6 +166,8 @@ export const DEFAULTS: AppConfig = {
   owners: [],
   exclude: [],
   port: 4400,
+  bindHosts: ['127.0.0.1'],
+  allowedOriginHosts: [],
   retentionDays: 7,
   batchSize: 6,
   tokenSource: 'gh',
@@ -529,6 +540,12 @@ export function loadConfig(path?: string): AppConfig {
     // internal, never honored from the file: derived from what the file actually set
     hotMsExplicit: user.intervals?.hotMs !== undefined,
   };
+  // bindHosts / allowedOriginHosts: coerce to clean string arrays; bindHosts
+  // must be non-empty (always serve loopback) — a bad/empty value falls back.
+  const cleanHosts = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string' && h.trim().length > 0) : [];
+  merged.bindHosts = cleanHosts(merged.bindHosts).length ? cleanHosts(merged.bindHosts) : ['127.0.0.1'];
+  merged.allowedOriginHosts = cleanHosts(merged.allowedOriginHosts);
   if (merged.tokenSource !== 'gh' && merged.tokenSource !== 'env' && merged.tokenSource !== 'app') {
     throw new Error(`config: tokenSource must be "gh", "env", or "app" (got "${String(merged.tokenSource)}")`);
   }

@@ -221,12 +221,22 @@ async function main() {
     } : undefined,
     restart: {},
   });
-  app.listen(config.port, '127.0.0.1', () => {
-    console.log(`pr-dashboard on http://127.0.0.1:${config.port}`);
-    if (webhookSecret != null) {
-      console.log(`[webhooks] receiver enabled at POST ${config.webhooks.path} (loopback — use a tunnel for ingress)`);
-    }
-  });
+  // One listener per bind host (default loopback only; add a Tailscale IP to
+  // reach the dashboard across the tailnet). A non-loopback bind that fails
+  // (e.g. tailscaled not up yet) is logged and skipped so loopback still serves.
+  const isLoopback = (h: string) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
+  for (const host of config.bindHosts) {
+    const server = app.listen(config.port, host, () => {
+      console.log(`pr-dashboard on http://${host}:${config.port}`);
+    });
+    server.on('error', (e: NodeJS.ErrnoException) => {
+      console.error(`[bind] could not listen on ${host}:${config.port} — ${e.message}`);
+      if (isLoopback(host)) process.exit(1); // loopback is essential
+    });
+  }
+  if (webhookSecret != null) {
+    console.log(`[webhooks] receiver enabled at POST ${config.webhooks.path} (loopback — use a tunnel for ingress)`);
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
