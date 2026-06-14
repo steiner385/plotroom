@@ -6,10 +6,12 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { prCiLane } from './lanes/prCiLane';
 import { mergeQueueLane } from './lanes/mergeQueueLane';
 import { mainLane } from './lanes/mainLane';
+import { deployLane } from './lanes/deployLane';
 import { scrollBehavior } from '../motion';
 import { PrCiPanel } from './panels/PrCiPanel';
 import { MergeQueuePanel } from './panels/MergeQueuePanel';
 import { MainPanel } from './panels/MainPanel';
+import { DeployPanel } from './panels/DeployPanel';
 
 const LS_KEY = 'prdash.spine.expanded';
 function readExpanded(): Set<string> {
@@ -28,6 +30,10 @@ function buildLanes(state: DashboardState | null): Lane[] {
   const prc = state ? prCiLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const mq = state ? mergeQueueLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const ml = state ? mainLane(repos) : { status: 'blind' as const, summary: 'loading…' };
+  const dp = state ? deployLane(repos) : { status: 'blind' as const, summary: 'loading…' };
+  // Advisory + not-wired whenever no repo ships a deploy snapshot, so the lane
+  // is excluded from the worst-wins rollup (it must never red the spine).
+  const deployWired = repos.some((r) => r.deploy);
   return [
     {
       id: 'pr-ci', title: 'PR CI', glyphPosition: 'dot', wiredness: 'wired', gating: true,
@@ -40,6 +46,11 @@ function buildLanes(state: DashboardState | null): Lane[] {
     {
       id: 'main', title: 'main', glyphPosition: 'dot', wiredness: 'wired', gating: true,
       status: ml.status, summary: ml.summary, renderExpanded: () => <MainPanel repos={repos} />,
+    },
+    {
+      id: 'deploy', title: 'Deploy', glyphPosition: 'dot',
+      wiredness: deployWired ? 'wired' : 'not-wired', gating: false,
+      status: dp.status, summary: dp.summary, renderExpanded: () => <DeployPanel repos={repos} />,
     },
   ];
 }

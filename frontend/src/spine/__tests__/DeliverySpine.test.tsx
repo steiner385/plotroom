@@ -14,6 +14,7 @@ describe('DeliverySpine', () => {
     expect(screen.getByTestId('spine-lane-pr-ci')).toBeInTheDocument();
     expect(screen.getByTestId('spine-lane-merge-queue')).toBeInTheDocument();
     expect(screen.getByTestId('spine-lane-main')).toBeInTheDocument();
+    expect(screen.getByTestId('spine-lane-deploy')).toBeInTheDocument();
     expect(screen.getByTestId('spine-rollup')).toHaveTextContent(/need attention/i);
   });
   it('skeleton state when state is null (no crash, lanes present)', () => {
@@ -31,5 +32,17 @@ describe('DeliverySpine', () => {
     render(<DeliverySpine state={st} kiosk />);   // kiosk = all lanes expanded
     expect(screen.getByTestId('spine-prci-row-1')).toBeInTheDocument();
     expect(screen.getAllByTestId('spine-main-spark-bar')).toHaveLength(2);
+  });
+  it('Deploy lane is wired and expands to its panel when a repo ships deploy data', () => {
+    const st = {
+      generatedAt: '', staleSince: null, repos: [{ repo: 'acme/widgets', hasDeploy: true,
+        prs: [], queue: null,
+        deploy: { envs: [{ name: 'qa', liveSha: 'a1b2c3d4', reachable: true }], awaitingQa: 0, awaitingProd: 1 } }],
+    } as unknown as DashboardState;
+    render(<DeliverySpine state={st} kiosk />);
+    expect(screen.getByTestId('spine-lane-deploy')).toBeInTheDocument();
+    const env = screen.getByTestId('spine-deploy-env');
+    expect(env).toHaveTextContent('qa');
+    expect(env).toHaveTextContent('a1b2c3d');
   });
 });

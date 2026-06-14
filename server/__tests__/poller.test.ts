@@ -5882,3 +5882,47 @@ describe('per-repo laneHealth on DashboardState', () => {
     expect(repo.laneHealth?.mainSeries?.length).toBeGreaterThan(0);
   });
 });
+
+describe('per-repo deploy status on DashboardState (Deploy lane, Spec 2)', () => {
+  const NO_DEPLOY: AppConfig = { ...DEFAULTS, ancestrySource: 'clone', owners: ['acme', 'octo'] };
+  it('caches the live sha per env from the deploy cycle and counts awaiting drift', async () => {
+    // a merged PR not yet live on qa OR prod → awaitingQa=1, awaitingProd=1
+    history.upsertMergedPr({ repo: 'acme/widgets', number: 8951, title: 'feat: allowance', url: 'u8951',
+      mergedAt: '2026-06-10T11:40:00Z', mergeCommitSha: 'squash8951' });
+    // health() returns a sha but ancestry is 'no' → env reachable, PR stays not-live
+    const deploy = fakeDeploy(
+      { 'https://qa.widgets.example.com/health': 'liveSha-qa', 'https://widgets.example.com/health': 'liveSha-prod' },
+      { 'liveSha-qa': 'no', 'liveSha-prod': 'no' },
+    );
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy, config: CONFIG, now: () => NOW });
+    await p.deployOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.deploy).toBeDefined();
+    expect(repo.deploy!.awaitingQa).toBe(1);
+    expect(repo.deploy!.awaitingProd).toBe(1);
+    const qa = repo.deploy!.envs.find((e) => e.name === 'qa')!;
+    expect(qa.liveSha).toBe('liveSha-qa');
+    expect(qa.reachable).toBe(true);
+  });
+
+  it('marks an env unreachable when /health returns no sha', async () => {
+    history.upsertMergedPr({ repo: 'acme/widgets', number: 8951, title: 'feat: allowance', url: 'u8951',
+      mergedAt: '2026-06-10T11:40:00Z', mergeCommitSha: 'squash8951' });
+    const deploy = fakeDeploy({}, {}); // health() returns null for every url
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy, config: CONFIG, now: () => NOW });
+    await p.deployOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    const qa = repo.deploy!.envs.find((e) => e.name === 'qa')!;
+    expect(qa.liveSha).toBeNull();
+    expect(qa.reachable).toBe(false);
+  });
+
+  it('repos with no deploy config get no deploy field', async () => {
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
+      config: NO_DEPLOY, now: () => NOW });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets');
+    expect(repo?.deploy).toBeUndefined();
+  });
+});

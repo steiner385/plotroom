@@ -30,6 +30,7 @@ import { measureDurationStep, flagsRegression, holdsRegression, regressionDetail
 import { evaluateStarvation, nextStarving, starvationDetail } from './estimator/starvation';
 import { countMergeTrains } from './trains';
 import { computeRepoLaneHealth, type RepoLaneHealth } from './estimator/lane-health';
+import { computeRepoDeploy, type RepoDeployStatus } from './estimator/deploy-status';
 import { diffCiGraphs, type WorkflowImpact } from './workflow-impact';
 import { splitOidChecks } from './oid-checks';
 
@@ -400,7 +401,8 @@ export interface RepoQueueView {
 export interface DashboardState {
   generatedAt: string;
   staleSince: string | null;
-  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null; laneHealth?: RepoLaneHealth }[];
+  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null;
+    laneHealth?: RepoLaneHealth; deploy?: RepoDeployStatus }[];
 }
 
 interface PollerDeps {
@@ -553,6 +555,7 @@ export class Poller extends EventEmitter {
   private poolStarvation = new Map<string, Map<string, PoolHealthView>>(); // repo → pool → live health (#45)
   private workflowImpactCache = new Map<string, WorkflowImpact | null>(); // repo\0headSha → derived-graph diff (#49)
   private laneHealthCache = new Map<string, RepoLaneHealth>();            // repo → per-cycle main-lane health (spec §15)
+  private deployStatusCache = new Map<string, RepoDeployStatus>();        // repo → per-deploy-cycle deploy status (Deploy lane, spec §15)
   private lastHourlyScanAt = 0;                           // epoch ms of the last hourly scan pass (#41/#45)
   private warnedAncestryFallback = new Set<string>();    // repos whose api→clone ancestry fallback was logged (log once)
   private warnedJobsApi = new Set<string>();             // repos whose jobs-API pool-learn fetch failed (log once)
@@ -1245,6 +1248,9 @@ export class Poller extends EventEmitter {
         }
       }
     }
+    // Recompute the per-repo deploy snapshot once now that envShas is fresh
+    // (Deploy lane, spec §15) — buildState only reads the cache.
+    this.refreshDeployStatus();
     // Hourly scans (duration regressions #41, pool starvation #45) ride this
     // cycle with a shared hourly throttle — local SQLite only, no API budget.
     this.maybeRunHourlyScans();
@@ -1822,6 +1828,23 @@ export class Poller extends EventEmitter {
     }
   }
 
+  /**
+   * Recompute per-repo deploy status once per deploy cycle (Deploy lane, spec
+   * §15) — runs after the env loop has refreshed `envShas`, so the cached live
+   * sha is current. buildState only reads the cache. Only repos with an
+   * effective deploy config get an entry; others stay absent (no deploy field).
+   */
+  private refreshDeployStatus(): void {
+    const { history, config } = this.deps;
+    const now = this.now();
+    const deployMap = this.effectiveDeploy();
+    this.deployStatusCache.clear();
+    for (const [repo, dc] of Object.entries(deployMap)) {
+      this.deployStatusCache.set(repo,
+        computeRepoDeploy(history, repo, dc, this.envShas, config.retentionDays, now));
+    }
+  }
+
   buildState(): DashboardState {
     const { history, config } = this.deps;
     const now = this.now();
@@ -1881,6 +1904,9 @@ export class Poller extends EventEmitter {
           // pure cache read — lane-health is computed once per cycle in
           // refreshLaneHealth (spec §15), never via a SQLite hit here
           laneHealth: this.laneHealthCache.get(repo),
+          // pure cache read — deploy status computed once per deploy cycle in
+          // refreshDeployStatus; absent for repos without a deploy config
+          deploy: this.deployStatusCache.get(repo),
         };
       })
       .sort((a, b) => a.repo.localeCompare(b.repo));
