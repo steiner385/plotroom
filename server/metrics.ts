@@ -1,9 +1,9 @@
-import { FLAKE_MIN_RUNS, type HistoryStore } from './history';
+import { FLAKE_MIN_RUNS, FAILING_CONCLUSIONS, type HistoryStore } from './history';
 import { poolRate, hasAnyRate, empiricalRate, type PoolMetaEntry } from './config';
 import type { DurationRegressionView, PoolHealthView } from './poller';
 import { percentile } from './math';
 import { activeForEvent, type CiGraphNode } from './required-checks';
-import { matchingPrefix } from './estimator/classify';
+import { matchingPrefix, matchesRequiredPrefix } from './estimator/classify';
 import { computeCriticalPath, type CriticalPathNodeInput } from './estimator/critical-path';
 import {
   lintTimeouts, lintFastGatingJobs, lintWaitDominated, sortFindings,
@@ -51,6 +51,13 @@ export interface MetricsPayload {
     mergesPerBucket: { bucket: string; count: number }[];
     queueWaitBuckets: { bucket: string; p50: number; n: number }[];
     groupRunBuckets: { bucket: string; p50: number; n: number }[] }[];
+  /** Queue efficiency (issue #23): merge_group runs per merged PR (churn) +
+   *  the run-level vs required-gate conclusion split. Repos with no merge_group
+   *  runs AND no merges in-window are omitted. */
+  queueEfficiency: { repo: string;
+    mergeGroupRuns: number; queueMerges: number; runsPerMerge: number | null;
+    runConclusion: { total: number; runFailed: number; requiredFailed: number;
+      advisoryNoise: number; requiredConfigured: boolean } }[];
   slowestJobs: { repo: string; jobs: { name: string; event: string; p50: number; p90: number;
     variability: number; n: number;
     trend: { bucket: string; p50: number; p90: number; n: number }[] }[] }[]; // top 10 by p50, variability = p90/p50
@@ -505,7 +512,8 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   costPerMinute: Record<string, number> | null = null,
   poolMeta: Record<string, PoolMetaEntry> | null = null,
   prNumberForSha: (repo: string, sha: string) => number | null = () => null,
-  costAutoRate = false): MetricsPayload {
+  costAutoRate = false,
+  requiredPrefixesFor: (repo: string) => string[] = () => []): MetricsPayload {
   const dropped = new Set(exclude);
   const keep = <T extends { repo: string }>(rows: T[]): T[] =>
     dropped.size ? rows.filter((r) => !dropped.has(r.repo)) : rows;
@@ -566,6 +574,47 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
         .map(({ bucket: b, p50, n }) => ({ bucket: b, p50, n })),
     };
   });
+
+  // 2b. Queue efficiency (issue #23): merge_group RUNS per merged PR (queue
+  // churn — the gate metric for raising batch size), and the run-level vs
+  // required-gate conclusion split (an advisory job failing makes a whole run
+  // read 'failed' even when the required `ci` gate passed — without this split
+  // the run-failure count is unreadable). Both from existing check_durations.
+  const mgByRepo = groupBy(keep(history.mergeGroupChecksSince(since)), (r) => r.repo);
+  const qeRepos = [...new Set([...mgByRepo.keys(), ...mergedByRepo.keys()])].sort();
+  const queueEfficiency = qeRepos.map((repo) => {
+    const prefixes = requiredPrefixesFor(repo);
+    // Fold checks into runs keyed by (head_sha, run_number); per run track
+    // whether ANY check failed (run-level) and whether any REQUIRED check failed.
+    const runs = new Map<string, { runFailed: boolean; requiredFailed: boolean }>();
+    for (const r of mgByRepo.get(repo) ?? []) {
+      const k = `${r.headSha ?? ''}#${r.runNumber ?? ''}`;
+      const failed = FAILING_CONCLUSIONS.has(r.conclusion);
+      const cur = runs.get(k) ?? { runFailed: false, requiredFailed: false };
+      cur.runFailed ||= failed;
+      cur.requiredFailed ||= failed && matchesRequiredPrefix(r.checkName, prefixes);
+      runs.set(k, cur);
+    }
+    let runFailed = 0; let requiredFailed = 0; let advisoryNoise = 0;
+    for (const v of runs.values()) {
+      if (v.runFailed) runFailed++;
+      if (v.requiredFailed) requiredFailed++;
+      if (v.runFailed && !v.requiredFailed) advisoryNoise++;
+    }
+    const queueMerges = (mergedByRepo.get(repo) ?? []).length;
+    return {
+      repo,
+      mergeGroupRuns: runs.size,
+      queueMerges,
+      runsPerMerge: queueMerges > 0 ? runs.size / queueMerges : null,
+      // requiredConfigured=false → the required/advisory split is unknowable
+      // (no requiredCheckPrefixes), so the frontend hides it and prompts config.
+      runConclusion: {
+        total: runs.size, runFailed, requiredFailed, advisoryNoise,
+        requiredConfigured: prefixes.length > 0,
+      },
+    };
+  }).filter((q) => q.mergeGroupRuns > 0 || q.queueMerges > 0);
 
   // 3. Slowest / most-variable jobs: top 10 per repo by window p50 (no headline
   // deltas → current window read only). Trend buckets carry p50 AND p90 so the
@@ -1147,8 +1196,8 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
         recentCoverageDate: recent?.date ?? null };
     });
 
-  return { window, bucket, runnerWaits, queue, slowestJobs, velocity, leadTime, trends,
-    calibration, flakiness, trainKillers, criticalPath, lint, regressions,
+  return { window, bucket, runnerWaits, queue, queueEfficiency, slowestJobs, velocity, leadTime,
+    trends, calibration, flakiness, trainKillers, criticalPath, lint, regressions,
     runnerPools, reclaims, concurrency, cost, costJobs, costRuns, costActuals,
     costAutoRate: blended != null
       ? { ...blended, windowDays: WINDOW_DAYS[window] } : null };

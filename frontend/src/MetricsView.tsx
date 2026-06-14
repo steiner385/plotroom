@@ -765,6 +765,37 @@ export function MetricsView({ now, focusCostNonce }: {
         ))}
       </Panel>
 
+      <Panel title="Queue efficiency" empty={(payload.queueEfficiency ?? []).length === 0}
+        emptyText="no merge_group runs or merges in window yet">
+        {(payload.queueEfficiency ?? []).map((q) => {
+          const rc = q.runConclusion;
+          return (
+            <div key={q.repo} className="metric-repo" data-testid={`queue-eff-${q.repo}`}>
+              <h3>{q.repo}</h3>
+              <div className="metric-row">
+                <MetricStat label="runs / merge" def={DEFS.queueEffRunsPerMerge}
+                  value={q.runsPerMerge != null ? q.runsPerMerge.toFixed(1) : '–'}
+                  delta={`${q.mergeGroupRuns} run${q.mergeGroupRuns === 1 ? '' : 's'} ÷ ${q.queueMerges} merge${q.queueMerges === 1 ? '' : 's'}`} />
+                <MetricStat label="advisory-only failures" def={DEFS.queueEffAdvisoryNoise}
+                  value={`${rc.advisoryNoise}`}
+                  delta={`of ${rc.runFailed} failed run${rc.runFailed === 1 ? '' : 's'}`} />
+                <MetricStat label="required-gate failures" def={DEFS.queueEffRequiredFailed}
+                  value={rc.requiredConfigured ? `${rc.requiredFailed}` : '–'}
+                  delta={rc.requiredConfigured ? `of ${rc.total} run${rc.total === 1 ? '' : 's'}`
+                    : 'set requiredCheckPrefixes'} />
+              </div>
+              {!rc.requiredConfigured && rc.runFailed > 0 && (
+                <p className="metric-note">
+                  no <code>requiredCheckPrefixes</code> configured for this repo — every failed run
+                  reads as advisory, so the required-gate split can’t be computed. Set it in
+                  <code>.pr-dashboard.yml</code> to separate real gate failures from advisory noise.
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </Panel>
+
       <Panel title="Slowest / most-variable jobs" empty={jobRepos.length === 0}>
         {jobRepos.map((r) => (
           <div key={r.repo} className="metric-repo">

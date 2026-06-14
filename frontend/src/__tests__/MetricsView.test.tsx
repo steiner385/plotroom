@@ -5,7 +5,8 @@ import type { MetricsBucket, MetricsPayload, MetricsWindow } from '../types';
 
 const EMPTY: MetricsPayload = {
   window: '3d', bucket: 'hour',
-  runnerWaits: [], queue: [], slowestJobs: [], velocity: [], leadTime: [], trends: [],
+  runnerWaits: [], queue: [], queueEfficiency: [], slowestJobs: [], velocity: [],
+  leadTime: [], trends: [],
   calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [],
   regressions: [], runnerPools: [], reclaims: [], concurrency: [], cost: [],
 };
@@ -36,6 +37,11 @@ const PAYLOAD: MetricsPayload = {
       queueWaitBuckets: [
         { bucket: H(8), p50: 500, n: 3 }, { bucket: H(9), p50: 460, n: 2 }, { bucket: H(10), p50: 480, n: 3 }],
       groupRunBuckets: [{ bucket: H(10), p50: 900, n: 2 }] },
+  ],
+  queueEfficiency: [
+    { repo: 'acme/widgets', mergeGroupRuns: 13, queueMerges: 2, runsPerMerge: 6.5,
+      runConclusion: { total: 13, runFailed: 11, requiredFailed: 1, advisoryNoise: 10,
+        requiredConfigured: true } },
   ],
   slowestJobs: [
     { repo: 'acme/widgets', jobs: [
@@ -239,6 +245,7 @@ beforeEach(() => {
 });
 
 const PANELS = ['Lead time', 'Trends', 'Runner-wait health', 'Queue throughput',
+  'Queue efficiency',
   'Slowest / most-variable jobs', 'Merge velocity + deploy lag', 'ETA calibration'];
 
 describe('MetricsView', () => {
@@ -385,6 +392,29 @@ describe('MetricsView', () => {
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Queue throughput' });
     expect(screen.getByText('collecting data — 2 samples so far')).toBeInTheDocument();
+  });
+
+  it('queue-efficiency panel shows runs/merge and the run-vs-required-gate split', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    const block = await screen.findByTestId('queue-eff-acme/widgets');
+    expect(within(block).getByText('6.5')).toBeInTheDocument();              // 13 runs ÷ 2 merges
+    expect(within(block).getByText('13 runs ÷ 2 merges')).toBeInTheDocument();
+    expect(within(block).getByText('10')).toBeInTheDocument();               // advisory-only failures
+    expect(within(block).getByText('of 11 failed runs')).toBeInTheDocument();
+    // required-gate failures shown (prefixes configured) — not the config hint
+    expect(within(block).queryByText('set requiredCheckPrefixes')).not.toBeInTheDocument();
+  });
+
+  it('queue-efficiency hides the required split and prompts config when prefixes are unset', async () => {
+    mockFetchOk({ ...PAYLOAD, queueEfficiency: [
+      { repo: 'acme/widgets', mergeGroupRuns: 5, queueMerges: 1, runsPerMerge: 5,
+        runConclusion: { total: 5, runFailed: 3, requiredFailed: 0, advisoryNoise: 3,
+          requiredConfigured: false } }] });
+    render(<MetricsView now={NOW} />);
+    const block = await screen.findByTestId('queue-eff-acme/widgets');
+    expect(within(block).getByText('set requiredCheckPrefixes')).toBeInTheDocument();
+    expect(within(block).getByText(/required-gate split can.t be computed/)).toBeInTheDocument();
   });
 
   it('slowest-jobs table keeps its leaderboard with variability highlighting and band trends', async () => {

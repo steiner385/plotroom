@@ -326,6 +326,13 @@ export interface MetricsPayload {
     mergesPerBucket: { bucket: string; count: number }[];
     queueWaitBuckets: { bucket: string; p50: number; n: number }[];
     groupRunBuckets: { bucket: string; p50: number; n: number }[] }[];
+  /** Queue efficiency (issue #23): merge_group runs per merged PR + the
+   *  run-level vs required-gate conclusion split. Optional to tolerate
+   *  pre-upgrade / captured payloads. */
+  queueEfficiency?: { repo: string;
+    mergeGroupRuns: number; queueMerges: number; runsPerMerge: number | null;
+    runConclusion: { total: number; runFailed: number; requiredFailed: number;
+      advisoryNoise: number; requiredConfigured: boolean } }[];
   slowestJobs: { repo: string; jobs: { name: string; event: string; p50: number; p90: number;
     variability: number; n: number;
     trend: { bucket: string; p50: number; p90: number; n: number }[] }[] }[]; // top 10 by p50, variability = p90/p50

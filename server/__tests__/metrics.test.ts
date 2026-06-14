@@ -294,7 +294,8 @@ describe('computeMetrics: empty history', () => {
   it('returns the full payload shape with empty sections', () => {
     expect(computeMetrics(h, '3d', 'hour', NOW)).toEqual({
       window: '3d', bucket: 'hour',
-      runnerWaits: [], queue: [], slowestJobs: [], velocity: [], leadTime: [], trends: [],
+      runnerWaits: [], queue: [], queueEfficiency: [], slowestJobs: [], velocity: [],
+      leadTime: [], trends: [],
       calibration: [], flakiness: [], trainKillers: [], criticalPath: [], lint: [],
       regressions: [], runnerPools: [], reclaims: [], concurrency: [], cost: [],
       costJobs: [], costRuns: [], costActuals: [], costAutoRate: null,
@@ -1532,5 +1533,54 @@ describe('computeMetrics: cost empirical auto-rate (issue #100)', () => {
     const m = run({ auto: true, cpm: { spot: 0.001 } });
     expect(m.costAutoRate).toBeNull();
     expect(m.cost[0]!.pools[0]!.dollars).toBeCloseTo(0.01, 6); // static fallback
+  });
+});
+
+describe('queue efficiency (issue #23)', () => {
+  // One merge_group check row; distinct (sha, run#) form runs.
+  const mgCheck = (name: string, conclusion: string, sha: string, runNo: number, min: number) =>
+    h.recordCheckDuration(REPO, name, 'merge_group',
+      `2026-06-10T10:${String(min).padStart(2, '0')}:00Z`,
+      `2026-06-10T10:${String(min + 1).padStart(2, '0')}:00Z`, conclusion, sha, 1, runNo);
+  const merge = (n: number) => h.upsertMergedPr({
+    repo: REPO, number: n, title: `pr ${n}`, url: `u/${n}`,
+    mergedAt: '2026-06-10T11:00:00Z', mergeCommitSha: `m${n}`,
+  });
+  const run = (prefixes: string[]) => computeMetrics(h, '7d', 'day', NOW, [], () => 1,
+    new Map(), new Map(), [], () => null, [], null, null, () => null, false,
+    () => prefixes).queueEfficiency;
+
+  it('counts merge_group RUNS per merged PR and splits run-level vs required-gate failures', () => {
+    // run A: ci ✓ + advisory ✓ → clean
+    mgCheck('ci', 'SUCCESS', 'sha1', 1, 0); mgCheck('lint-advisory', 'SUCCESS', 'sha1', 1, 2);
+    // run B: ci ✓ but advisory ✗ → run reads failed, required gate PASSED (noise)
+    mgCheck('ci', 'SUCCESS', 'sha2', 2, 4); mgCheck('lint-advisory', 'FAILURE', 'sha2', 2, 6);
+    // run C: ci ✗ → required gate failed
+    mgCheck('ci', 'FAILURE', 'sha3', 3, 8);
+    merge(1); merge(2);   // 2 queue merges
+
+    const [qe] = run(['ci']);
+    expect(qe!.mergeGroupRuns).toBe(3);
+    expect(qe!.queueMerges).toBe(2);
+    expect(qe!.runsPerMerge).toBeCloseTo(1.5, 6);   // 3 runs / 2 merges
+    expect(qe!.runConclusion).toEqual({
+      total: 3, runFailed: 2, requiredFailed: 1, advisoryNoise: 1, requiredConfigured: true,
+    });
+  });
+
+  it('without requiredCheckPrefixes the split is unknowable (everything reads advisory)', () => {
+    mgCheck('ci', 'FAILURE', 'sha1', 1, 0);   // a real gate failure…
+    const [qe] = run([]);                      // …but no prefixes configured
+    expect(qe!.runConclusion.requiredConfigured).toBe(false);
+    expect(qe!.runConclusion.runFailed).toBe(1);
+    expect(qe!.runConclusion.requiredFailed).toBe(0);     // can't tell it was required
+    expect(qe!.runConclusion.advisoryNoise).toBe(1);
+  });
+
+  it('runsPerMerge is null when there are runs but no merges in the window', () => {
+    mgCheck('ci', 'SUCCESS', 'sha1', 1, 0);
+    const [qe] = run(['ci']);
+    expect(qe!.queueMerges).toBe(0);
+    expect(qe!.runsPerMerge).toBeNull();
   });
 });

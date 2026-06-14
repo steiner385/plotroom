@@ -136,6 +136,14 @@ export const METRIC_DEFINITIONS = {
   costActualsCoverage: { label: 'attribution coverage',
     text: 'attributed ÷ actual — a confidence gauge on the breakdown, NOT a dollar amount. Computed over COMPARABLE days only: days since job-tracking began AND fully billed (today’s bill is still settling), so both sides cover the same span — comparing mismatched day-sets is what made attributed look like it beat actual. ~100% = priced jobs explain the bill well. BELOW = the gap is spend no single job owns (idle runner capacity, node boot/teardown, control-plane, unpriced pools; for fleet ~10% is non-compute EC2-Other/EKS/VPC). ABOVE 100% = the per-minute rate is over-pricing the fixed-capacity fleet (relay rate set too high, or the last day or two haven’t finished billing). The per-day column is noisy by nature — read the headline, not a single day' },
 
+  // ---- queue efficiency panel (issue #23) ----
+  queueEffRunsPerMerge: { label: 'runs / merge',
+    text: 'merge_group CI runs ÷ PRs merged, over the window — how many times the queue rebuilt a batch per PR it actually landed. The headline churn metric: ~0.33 is ideal (serial), and a high value (≈6.5 was observed at batch min=3) means batches keep rebuilding — the gate signal for raising batch size. Counts every merge_group run including re-runs and ejected batches' },
+  queueEffAdvisoryNoise: { label: 'advisory-only failures',
+    text: 'merge_group runs whose run-level conclusion read FAILED but the required gate (checks matching requiredCheckPrefixes) actually PASSED — i.e. only a non-required advisory job failed. GitHub marks the whole run failed when any job fails, so without this split the run-failure count is unreadable. A high share means advisory jobs should be removed from merge_group' },
+  queueEffRequiredFailed: { label: 'required-gate failures',
+    text: 'merge_group runs where a REQUIRED check (matching requiredCheckPrefixes) failed — the real gate failures, distinct from advisory noise. Needs requiredCheckPrefixes configured for the repo; without it the required/advisory split can’t be computed and every failure reads as advisory' },
+
   // ---- merge velocity panel ----
   velocityMerged: { label: 'merged',
     text: 'PRs merged in the window (vs the previous equal-length window)' },

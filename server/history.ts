@@ -69,6 +69,12 @@ export interface GroupFailureRow {
   repo: string; checkName: string; groupSha: string; at: string;
 }
 
+/** One completed merge_group check (queue-efficiency panel, #23). */
+export interface MergeGroupCheckRow {
+  repo: string; checkName: string; conclusion: string;
+  headSha: string | null; runNumber: number | null; completedAt: string;
+}
+
 /** One imported actual-spend row (cost explorer phase 2): `scope` is 'fleet'
  *  or a single pool label; `date` is the bill's YYYY-MM-DD day. */
 export interface CostActualRow {
@@ -137,6 +143,7 @@ export class HistoryStore {
   private readonly stmtSelectDurations: Database.Statement;
   private readonly stmtSelectDurationsP99: Database.Statement;
   private readonly stmtSelectExpectedSet: Database.Statement;
+  private readonly stmtSelectMergeGroupChecks: Database.Statement;
   private readonly stmtUpsertPr: Database.Statement;
   private readonly stmtMarkQaLive: Database.Statement;
   private readonly stmtMarkProdLive: Database.Statement;
@@ -368,6 +375,14 @@ export class HistoryStore {
     this.stmtSelectExpectedSet = this.db.prepare(
       `SELECT DISTINCT check_name FROM check_durations
        WHERE repo=? AND event=? AND conclusion='SUCCESS' AND completed_at >= ?`
+    );
+    // Queue-efficiency panel (issue #23): every completed merge_group check in a
+    // window — run-counting (distinct head_sha/run_number) + the run-level vs
+    // required-gate conclusion split.
+    this.stmtSelectMergeGroupChecks = this.db.prepare(
+      `SELECT repo, check_name, conclusion, head_sha, run_number, completed_at
+       FROM check_durations
+       WHERE event='merge_group' AND completed_at >= ? ORDER BY completed_at`
     );
     this.stmtUpsertPr = this.db.prepare(
       `INSERT INTO merged_prs (repo, number, title, url, merged_at, merge_commit_sha, created_at,
@@ -900,6 +915,19 @@ export class HistoryStore {
     return rows.map((r) => ({
       repo: r.repo as string, checkName: r.check_name as string,
       groupSha: r.group_sha as string, at: r.at as string,
+    }));
+  }
+
+  /** Every completed merge_group check at/after `since` (queue-efficiency, #23).
+   *  One row per check; callers group by (headSha, runNumber) to form runs. */
+  mergeGroupChecksSince(since: string): MergeGroupCheckRow[] {
+    const rows = this.stmtSelectMergeGroupChecks.all(since) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      repo: r.repo as string, checkName: r.check_name as string,
+      conclusion: r.conclusion as string,
+      headSha: (r.head_sha as string | null) ?? null,
+      runNumber: (r.run_number as number | null) ?? null,
+      completedAt: r.completed_at as string,
     }));
   }
 
