@@ -5,6 +5,8 @@ import { percentile } from './math';
 import { activeForEvent, type CiGraphNode } from './required-checks';
 import { matchingPrefix, matchesRequiredPrefix } from './estimator/classify';
 import { computeCriticalPath, type CriticalPathNodeInput } from './estimator/critical-path';
+import { ejectProbability } from './estimator/queue';
+import { modelBatchSizes } from './estimator/batch-advisor';
 import {
   lintTimeouts, lintFastGatingJobs, lintWaitDominated, sortFindings,
   type LintFinding, type TimeoutLintInput, type FastGatingInput, type WaitDominatedInput,
@@ -59,6 +61,16 @@ export interface MetricsPayload {
     runConclusion: { total: number; runFailed: number; requiredFailed: number;
       advisoryNoise: number; requiredConfigured: boolean };
     adminBypass: { merges: number; bypasses: number; rate: number | null } }[];
+  /** Batch-size what-if advisor (issue #52): queueing-theory replay over observed
+   *  arrival rate, train duration, and eject probability → modeled throughput +
+   *  median time-in-queue at batch sizes 1..12, with a recommendation. Only
+   *  emitted for repos with enough observed merge_group trains. */
+  batchAdvisor: { repo: string;
+    arrivalPerHour: number; trainDurationSecs: number;
+    ejectProbPerGroup: number; ejectProbPerPr: number;
+    currentBatch: number; recommendedBatch: number;
+    curve: { batch: number; throughputPerHour: number;
+      timeInQueueSecs: number | null; stable: boolean }[] }[];
   slowestJobs: { repo: string; jobs: { name: string; event: string; p50: number; p90: number;
     variability: number; n: number;
     trend: { bucket: string; p50: number; p90: number; n: number }[] }[] }[]; // top 10 by p50, variability = p90/p50
@@ -635,6 +647,35 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       },
     };
   }).filter((q) => q.mergeGroupRuns > 0 || q.queueMerges > 0);
+
+  // 2c. Batch-size what-if advisor (issue #52): replay the queueing model over
+  // observed arrival rate (merges/hr), train duration (group_run p50), and eject
+  // probability across batch sizes 1..12. Gated on real train data so the model
+  // isn't fit to a handful of runs.
+  const windowHours = WINDOW_DAYS[window] * 24;
+  const batchAdvisor = queueRepos.map((repo) => {
+    const durations = (groupRunsByRepo.get(repo) ?? []).map((r) => r.durationSecs)
+      .filter((d) => d > 0).sort((a, b) => a - b);
+    const merges = (mergedByRepo.get(repo) ?? []).length;
+    const groupRunCount = history.countGroupRuns(repo, since);
+    const groupEjectCount = history.countGroupEjects(repo, since);
+    // Need real train evidence: a duration sample and ≥3 observed trains, plus
+    // arrivals to drive the queue. Otherwise the model has nothing to fit.
+    if (durations.length === 0 || groupRunCount < 3 || merges <= 0) return null;
+    const trainDurationSecs = percentile(durations, 0.5);
+    const ejectProbPerGroup = ejectProbability(groupRunCount, groupEjectCount);
+    const currentBatch = batchSizeFor(repo);
+    const arrivalPerHour = merges / windowHours;
+    const advice = modelBatchSizes({ arrivalPerHour, trainDurationSecs, ejectProbPerGroup, currentBatch });
+    return {
+      repo,
+      arrivalPerHour: Math.round(arrivalPerHour * 100) / 100,
+      trainDurationSecs: Math.round(trainDurationSecs),
+      ejectProbPerGroup: Math.round(ejectProbPerGroup * 1000) / 1000,
+      ejectProbPerPr: advice.ejectProbPerPr,
+      currentBatch, recommendedBatch: advice.recommendedBatch, curve: advice.curve,
+    };
+  }).filter((x): x is NonNullable<typeof x> => x != null);
 
   // 3. Slowest / most-variable jobs: top 10 per repo by window p50 (no headline
   // deltas → current window read only). Trend buckets carry p50 AND p90 so the
@@ -1236,7 +1277,7 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
         recentCoverageDate: recent?.date ?? null };
     });
 
-  return { window, bucket, runnerWaits, queue, queueEfficiency, slowestJobs, velocity, leadTime,
+  return { window, bucket, runnerWaits, queue, queueEfficiency, batchAdvisor, slowestJobs, velocity, leadTime,
     trends, calibration, flakiness, trainKillers, criticalPath, needsGraph, lint, regressions,
     runnerPools, reclaims, concurrency, cost, costJobs, costRuns, costActuals,
     costAutoRate: blended != null

@@ -246,7 +246,7 @@ beforeEach(() => {
 });
 
 const PANELS = ['Lead time', 'Trends', 'Runner-wait health', 'Queue throughput',
-  'Queue efficiency', 'CI needs graph',
+  'Queue efficiency', 'Batch-size advisor', 'CI needs graph',
   'Slowest / most-variable jobs', 'Merge velocity + deploy lag', 'ETA calibration'];
 
 describe('MetricsView', () => {
@@ -420,6 +420,21 @@ describe('MetricsView', () => {
     const block = await screen.findByTestId('queue-eff-acme/widgets');
     expect(within(block).getByText('set requiredCheckPrefixes')).toBeInTheDocument();
     expect(within(block).getByText(/required-gate split can.t be computed/)).toBeInTheDocument();
+  });
+
+  it('batch-size advisor renders the curve and marks the recommended + current batch', async () => {
+    mockFetchOk({ ...PAYLOAD, batchAdvisor: [
+      { repo: 'acme/widgets', arrivalPerHour: 2.5, trainDurationSecs: 600,
+        ejectProbPerGroup: 0.14, ejectProbPerPr: 0.05, currentBatch: 3, recommendedBatch: 5,
+        curve: Array.from({ length: 12 }, (_, i) => ({ batch: i + 1, throughputPerHour: i + 1,
+          timeInQueueSecs: i < 9 ? 1000 - i * 10 : null, stable: i < 9 })) }] });
+    render(<MetricsView now={NOW} />);
+    const block = await screen.findByTestId('batch-advisor-acme/widgets');
+    expect(within(block).getByText('current is 3')).toBeInTheDocument();   // recommendation headline
+    expect(within(block).getByTestId('batch-row-acme/widgets-5').className).toContain('batch-recommended');
+    expect(within(block).getByTestId('batch-row-acme/widgets-3').className).toContain('batch-current');
+    // an unstable batch shows "—" for time-in-queue
+    expect(within(block).getByTestId('batch-row-acme/widgets-12').textContent).toContain('—');
   });
 
   it('CI needs-graph panel renders the DAG nodes with the critical path highlighted', async () => {

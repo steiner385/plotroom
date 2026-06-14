@@ -136,6 +136,14 @@ export const METRIC_DEFINITIONS = {
   costActualsCoverage: { label: 'attribution coverage',
     text: 'attributed ÷ actual — a confidence gauge on the breakdown, NOT a dollar amount. Computed over COMPARABLE days only: days since job-tracking began AND fully billed (today’s bill is still settling), so both sides cover the same span — comparing mismatched day-sets is what made attributed look like it beat actual. ~100% = priced jobs explain the bill well. BELOW = the gap is spend no single job owns (idle runner capacity, node boot/teardown, control-plane, unpriced pools; for fleet ~10% is non-compute EC2-Other/EKS/VPC). ABOVE 100% = the per-minute rate is over-pricing the fixed-capacity fleet (relay rate set too high, or the last day or two haven’t finished billing). The per-day column is noisy by nature — read the headline, not a single day' },
 
+  // ---- batch-size advisor (issue #52) ----
+  batchAdvisorRecommend: { label: 'recommended batch',
+    text: 'the throughput sweet spot from a queueing-theory replay over observed arrival rate, train duration, and eject probability: the batch with the most sustainable capacity before eject rework (1−q)^B erodes it. Batch size is a CAP, not a target — a low-traffic queue never fills a big batch, so a larger cap adds burst headroom at no latency cost until ejects make big trains waste re-runs. Static model, recomputed each load; the answer shifts as eject rate and train time drift' },
+  batchAdvisorThroughput: { label: 'throughput',
+    text: 'modelled PRs merged per hour at this batch size = 3600 · B · (1−q)^B ÷ train-duration, where q is the per-PR eject probability. Rises with batch then falls as larger batches fail (eject) more often and re-run' },
+  batchAdvisorTimeInQueue: { label: 'time in queue',
+    text: 'modelled median time from enqueue to merge at this batch size (batch-formation wait + M/D/1 queue wait + effective train duration including eject re-runs). “—” means the queue is unstable at this batch (arrival rate exceeds throughput — it can’t keep up)' },
+
   // ---- CI needs graph (issue #74) ----
   needsGraphNodes: { label: 'jobs',
     text: 'number of jobs in the derived needs-DAG for this event. The graph below lays them out by dependency depth (left→right), overlays each job’s observed p50 duration + runner wait, and highlights the critical path (the longest wait+duration chain that gates end-to-end time)' },

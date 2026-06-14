@@ -506,7 +506,7 @@ describe('POST /api/admin/restart', () => {
 import type { MetricsBucket, MetricsPayload, MetricsWindow } from '../metrics';
 
 const EMPTY_METRICS = (w: MetricsWindow, b: MetricsBucket): MetricsPayload =>
-  ({ window: w, bucket: b, runnerWaits: [], queue: [], queueEfficiency: [], slowestJobs: [],
+  ({ window: w, bucket: b, runnerWaits: [], queue: [], queueEfficiency: [], batchAdvisor: [], slowestJobs: [],
     velocity: [], leadTime: [], trends: [], calibration: [], flakiness: [], trainKillers: [],
     criticalPath: [], needsGraph: [], lint: [], regressions: [],
     runnerPools: [], reclaims: [], concurrency: [], cost: [], costJobs: [], costRuns: [],

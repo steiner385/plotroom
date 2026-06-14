@@ -444,6 +444,10 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .metric-table td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border);
   font-variant-numeric: tabular-nums; }
 .metric-table tr:last-child td { border-bottom: none; }
+/* Batch-size advisor (#52): recommended row stands out, current row marked */
+.metric-table tr.batch-recommended td { background: color-mix(in srgb, var(--done) 14%, transparent);
+  font-weight: 700; }
+.metric-table tr.batch-current td { font-style: italic; }
 .metric-job-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 .metric-trend-cell { width: 124px; }

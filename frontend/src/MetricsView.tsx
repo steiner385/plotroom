@@ -807,6 +807,55 @@ export function MetricsView({ now, focusCostNonce }: {
         })}
       </Panel>
 
+      <Panel title="Batch-size advisor" empty={(payload.batchAdvisor ?? []).length === 0}
+        emptyText="not enough observed merge_group trains to model yet">
+        <p className="metric-note">
+          queueing-theory replay over observed arrival rate, train duration, and eject
+          probability — modelled throughput + median time-in-queue per batch size. Static model;
+          the answer shifts as those inputs drift.
+        </p>
+        {(payload.batchAdvisor ?? []).map((a) => (
+          <div key={a.repo} className="metric-repo" data-testid={`batch-advisor-${a.repo}`}>
+            <h3>{a.repo}</h3>
+            <div className="metric-row">
+              <MetricStat label="recommended batch" def={DEFS.batchAdvisorRecommend}
+                value={String(a.recommendedBatch)}
+                delta={a.recommendedBatch === a.currentBatch
+                  ? `current (${a.currentBatch}) is optimal`
+                  : `current is ${a.currentBatch}`} />
+            </div>
+            <p className="metric-note">
+              from {a.arrivalPerHour}/h arrivals, {formatDur(a.trainDurationSecs)} trains,
+              {' '}{fmtPct(a.ejectProbPerGroup * 100)} group-eject rate
+              {' '}(≈{fmtPct(a.ejectProbPerPr * 100)} per PR)
+            </p>
+            <table className="metric-table">
+              <thead>
+                <tr>
+                  <th>batch</th>
+                  <th title={defTitle(DEFS.batchAdvisorThroughput)}>throughput /h</th>
+                  <th title={defTitle(DEFS.batchAdvisorTimeInQueue)}>time in queue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {a.curve.map((c) => {
+                  const cls = [c.batch === a.recommendedBatch ? 'batch-recommended' : '',
+                    c.batch === a.currentBatch ? 'batch-current' : ''].filter(Boolean).join(' ');
+                  return (
+                    <tr key={c.batch} className={cls || undefined}
+                      data-testid={`batch-row-${a.repo}-${c.batch}`}>
+                      <td>{c.batch}{c.batch === a.recommendedBatch ? ' ★' : ''}{c.batch === a.currentBatch ? ' (now)' : ''}</td>
+                      <td>{c.throughputPerHour}</td>
+                      <td>{c.timeInQueueSecs != null ? formatDur(c.timeInQueueSecs) : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </Panel>
+
       <Panel title="Slowest / most-variable jobs" empty={jobRepos.length === 0}>
         {jobRepos.map((r) => (
           <div key={r.repo} className="metric-repo">

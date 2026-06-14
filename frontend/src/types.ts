@@ -334,6 +334,14 @@ export interface MetricsPayload {
     runConclusion: { total: number; runFailed: number; requiredFailed: number;
       advisoryNoise: number; requiredConfigured: boolean };
     adminBypass: { merges: number; bypasses: number; rate: number | null } }[];
+  /** Batch-size what-if advisor (issue #52). Optional to tolerate captured /
+   *  pre-upgrade payloads. */
+  batchAdvisor?: { repo: string;
+    arrivalPerHour: number; trainDurationSecs: number;
+    ejectProbPerGroup: number; ejectProbPerPr: number;
+    currentBatch: number; recommendedBatch: number;
+    curve: { batch: number; throughputPerHour: number;
+      timeInQueueSecs: number | null; stable: boolean }[] }[];
   slowestJobs: { repo: string; jobs: { name: string; event: string; p50: number; p90: number;
     variability: number; n: number;
     trend: { bucket: string; p50: number; p90: number; n: number }[] }[] }[]; // top 10 by p50, variability = p90/p50

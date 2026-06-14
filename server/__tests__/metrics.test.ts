@@ -294,7 +294,7 @@ describe('computeMetrics: empty history', () => {
   it('returns the full payload shape with empty sections', () => {
     expect(computeMetrics(h, '3d', 'hour', NOW)).toEqual({
       window: '3d', bucket: 'hour',
-      runnerWaits: [], queue: [], queueEfficiency: [], slowestJobs: [], velocity: [],
+      runnerWaits: [], queue: [], queueEfficiency: [], batchAdvisor: [], slowestJobs: [], velocity: [],
       leadTime: [], trends: [],
       calibration: [], flakiness: [], trainKillers: [], criticalPath: [], needsGraph: [],
       lint: [],
@@ -1618,5 +1618,32 @@ describe('queue efficiency (issue #23)', () => {
     expect(qe!.adminBypass.merges).toBe(4);   // …but only known-merger rows feed the bypass rate
     expect(qe!.adminBypass.bypasses).toBe(1); // alice
     expect(qe!.adminBypass.rate).toBeCloseTo(0.25, 6);
+  });
+});
+
+describe('batch-size advisor (issue #52)', () => {
+  it('emits a model + recommendation when there are enough trains and merges', () => {
+    for (let i = 0; i < 6; i++) h.recordGroupRun(REPO, 600, `2026-06-10T1${i}:00:00Z`);  // 6 clean trains @600s
+    h.recordGroupFailure(REPO, 'unit-tests', 'shaEject', '2026-06-10T16:00:00Z');         // 1 eject
+    for (let n = 1; n <= 8; n++) {
+      h.upsertMergedPr({ repo: REPO, number: n, title: 't', url: 'u',
+        mergedAt: `2026-06-10T1${n % 6}:30:00Z`, mergeCommitSha: `m${n}` });
+    }
+    const m = computeMetrics(h, '3d', 'day', NOW, [], () => 4);   // current batch 4
+    const a = m.batchAdvisor.find((b) => b.repo === REPO)!;
+    expect(a.trainDurationSecs).toBe(600);
+    expect(a.currentBatch).toBe(4);
+    expect(a.curve).toHaveLength(12);
+    expect(a.recommendedBatch).toBeGreaterThanOrEqual(1);
+    expect(a.recommendedBatch).toBeLessThanOrEqual(12);
+    expect(a.ejectProbPerGroup).toBeCloseTo(1 / 7, 2);   // 1 eject / (6 runs + 1 eject)
+  });
+
+  it('omits repos without enough observed trains (< 3)', () => {
+    h.recordGroupRun(REPO, 600, '2026-06-10T10:00:00Z');   // only one train
+    h.upsertMergedPr({ repo: REPO, number: 1, title: 't', url: 'u',
+      mergedAt: '2026-06-10T11:00:00Z', mergeCommitSha: 'm1' });
+    const m = computeMetrics(h, '3d', 'day', NOW);
+    expect(m.batchAdvisor.find((b) => b.repo === REPO)).toBeUndefined();
   });
 });
