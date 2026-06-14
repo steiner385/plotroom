@@ -29,6 +29,7 @@ import { measureDurationStep, flagsRegression, holdsRegression, regressionDetail
   REGRESSION_MIN_SAMPLES } from './estimator/regression';
 import { evaluateStarvation, nextStarving, starvationDetail } from './estimator/starvation';
 import { countMergeTrains } from './trains';
+import { computeRepoLaneHealth, type RepoLaneHealth } from './estimator/lane-health';
 import { diffCiGraphs, type WorkflowImpact } from './workflow-impact';
 import { splitOidChecks } from './oid-checks';
 
@@ -291,6 +292,18 @@ export function ingestGroupFailures(history: HistoryStore, repo: string,
     history.recordGroupFailure(repo, c.name, groupSha, c.completedAt);
   }
 }
+/** Fold the push:main subset of an OID rollup into main_commits. The worst push
+ *  conclusion is the commit's push-CI verdict; an empty subset records nothing
+ *  (→ blind/idle, never a false green). */
+export function recordMainFromOid(history: HistoryStore, repo: string, oid: string,
+  mergedAt: string | null, pushChecks: CheckRun[]): void {
+  if (pushChecks.length === 0) return;
+  const order: Record<string, number> = { STARTUP_FAILURE: 5, TIMED_OUT: 5, FAILURE: 5, SUCCESS: 2, NEUTRAL: 1, SKIPPED: 0 };
+  const worst = pushChecks.reduce<string | null>((w, c) =>
+    (c.conclusion && (w == null || (order[c.conclusion] ?? 3) > (order[w] ?? 3))) ? c.conclusion : w, null);
+  const completedAt = pushChecks.map((c) => c.completedAt).filter(Boolean).sort().pop() ?? null;
+  history.recordMainCommit(repo, oid, mergedAt, worst, completedAt);
+}
 /**
  * Spot-reclaim live marker (issue #46): a CANCELLED check whose SHA already
  * has a newer-attempt check running/queued in the same rollup —
@@ -387,7 +400,7 @@ export interface RepoQueueView {
 export interface DashboardState {
   generatedAt: string;
   staleSince: string | null;
-  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null }[];
+  repos: { repo: string; hasDeploy: boolean; prs: PrView[]; queue: RepoQueueView | null; laneHealth?: RepoLaneHealth }[];
 }
 
 interface PollerDeps {
@@ -539,6 +552,7 @@ export class Poller extends EventEmitter {
   private durationRegressions = new Map<string, Map<string, DurationRegressionView>>(); // repo → name\0event → active step (#41)
   private poolStarvation = new Map<string, Map<string, PoolHealthView>>(); // repo → pool → live health (#45)
   private workflowImpactCache = new Map<string, WorkflowImpact | null>(); // repo\0headSha → derived-graph diff (#49)
+  private laneHealthCache = new Map<string, RepoLaneHealth>();            // repo → per-cycle main-lane health (spec §15)
   private lastHourlyScanAt = 0;                           // epoch ms of the last hourly scan pass (#41/#45)
   private warnedAncestryFallback = new Set<string>();    // repos whose api→clone ancestry fallback was logged (log once)
   private warnedJobsApi = new Set<string>();             // repos whose jobs-API pool-learn fetch failed (log once)
@@ -689,6 +703,9 @@ export class Poller extends EventEmitter {
       this.pruneCaches(keep);
       history.setMeta('lastSweep', sweepStartedAt.toISOString());
     }
+    // Per-cycle lane-health recompute (spec §15): once here, at the end of the
+    // sweep that just updated this.prs — buildState only reads the cache.
+    this.refreshLaneHealth();
     this.emitUpdate();
   }
 
@@ -804,6 +821,14 @@ export class Poller extends EventEmitter {
       .filter((p) => p.headSha).map((p) => `${p.repo}\u0000${p.headSha}`));
     for (const key of this.workflowImpactCache.keys()) {
       if (!liveShaKeys.has(key)) this.workflowImpactCache.delete(key);
+    }
+    // lane-health cache (spec §15) is keyed by repo — drop repos no longer
+    // surfaced (open-PR repos ∪ tracked-merged repos); refreshLaneHealth re-fills
+    // the survivors next cycle
+    const liveRepos = new Set([...this.prs.values()].map((p) => p.repo));
+    for (const key of tracked) liveRepos.add(key.slice(0, key.lastIndexOf('#')));
+    for (const repo of this.laneHealthCache.keys()) {
+      if (!liveRepos.has(repo)) this.laneHealthCache.delete(repo);
     }
     // notifier debounce state lives per PR key — same lifecycle as `stages`
     this.deps.notifier?.prune(new Set([...openKeys, ...tracked]));
@@ -1140,6 +1165,7 @@ export class Poller extends EventEmitter {
             if (!commit?.oid) continue;
             const checks = mapRollupContexts(commit.statusCheckRollup?.contexts?.nodes ?? [], true);
             const split = splitOidChecks(checks);
+            recordMainFromOid(this.deps.history, repo, commit.oid as string, null, split.push);
             this.groupChecks.set(commit.oid, split.mergeGroup);
             ingestCheckSet(this.deps.history, repo, checks, (n) => this.needsFor(repo, n),
               (p, e) => this.needActiveFor(repo, p, e), this.graphKeysFor(repo),
@@ -1768,6 +1794,34 @@ export class Poller extends EventEmitter {
 
   // ---- state assembly -----------------------------------------------------
 
+  /**
+   * The repos the poller is currently surfacing: the unique repos of the open-PR
+   * snapshots (`this.prs`) plus the merged PRs inside the retention window
+   * (`listTrackedMerged`), minus the configured excludes. This is the SINGLE
+   * source of truth for "which repos" — buildState derives its repo rows from
+   * exactly these two collections, and refreshLaneHealth recomputes lane-health
+   * for exactly this set. Keep them in lockstep: never add a second enumeration.
+   */
+  private trackedRepos(): Set<string> {
+    const { history, config } = this.deps;
+    const repos = new Set<string>();
+    for (const pr of this.prs.values()) repos.add(pr.repo);
+    for (const rec of history.listTrackedMerged(config.retentionDays, this.now())) {
+      if (!config.exclude.includes(rec.repo)) repos.add(rec.repo);
+    }
+    return repos;
+  }
+
+  /**
+   * Recompute per-repo lane-health once per cycle (spec §15) — buildState only
+   * reads the cache, never SQLite.
+   */
+  private refreshLaneHealth(): void {
+    for (const repo of this.trackedRepos()) {
+      this.laneHealthCache.set(repo, computeRepoLaneHealth(this.deps.history, repo, this.now()));
+    }
+  }
+
   buildState(): DashboardState {
     const { history, config } = this.deps;
     const now = this.now();
@@ -1824,6 +1878,9 @@ export class Poller extends EventEmitter {
             (STAGE_ORDER[b.stage.stage] ?? 0) - (STAGE_ORDER[a.stage.stage] ?? 0) ||
             (b.stage.percent ?? -1) - (a.stage.percent ?? -1)),
           queue,
+          // pure cache read — lane-health is computed once per cycle in
+          // refreshLaneHealth (spec §15), never via a SQLite hit here
+          laneHealth: this.laneHealthCache.get(repo),
         };
       })
       .sort((a, b) => a.repo.localeCompare(b.repo));

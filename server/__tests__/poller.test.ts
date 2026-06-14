@@ -5854,4 +5854,22 @@ describe('queue OID de-conflation (merge_group vs push:main on the same commit)'
     const pr = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs.find((x) => x.number === 8962)!;
     expect((pr.groupChecks ?? []).map((c) => c.name)).not.toContain('accessibility / axe');
   });
+
+  it('records the push:main rollup into main_commits (not as a queue stat)', async () => {
+    const p = new Poller({ router: asRouter(client()), history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce(); await p.detailOnce(); await p.queueOnce();
+    // one main commit, push CI FAILURE → a lone fresh red is 'amber' per the transient rule
+    expect(history.mainLaneHealth('acme/widgets').status).toBe('amber');
+  });
+});
+
+describe('per-repo laneHealth on DashboardState', () => {
+  it('computes main-lane health from main_commits and attaches it to each repo', async () => {
+    // a single failing push:main commit → a lone fresh red is 'amber' (transient rule)
+    history.recordMainCommit('acme/widgets', 'sha1', NOW.toISOString(), 'FAILURE', NOW.toISOString());
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config: CONFIG, now: () => NOW });
+    await p.sweepOnce();
+    const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
+    expect(repo.laneHealth?.main).toBe('amber');
+  });
 });

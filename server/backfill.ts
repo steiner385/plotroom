@@ -24,6 +24,7 @@ export async function backfillRepo(client: GithubClient, history: HistoryStore,
     if (!hist) return;
     for (const commit of hist.nodes ?? []) {
       // shared ingestion: completed durations + runner-pickup waits (needs graph permitting)
+      // TODO(spine): main_commits backfill feed deferred — needs per-commit merged_at for ordering (spec §8.4).
       ingestCheckSet(history, repo,
         mapRollupContexts(commit?.statusCheckRollup?.contexts?.nodes ?? []),
         needsFor, activeFor, graphKeys, rollupWorkflowName,
