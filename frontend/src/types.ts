@@ -342,7 +342,7 @@ export interface MetricsPayload {
    *  pre-upgrade payloads. */
   batchAdvisor?: { repo: string;
     arrivalPerHour: number; trainDurationSecs: number;
-    ejectProbPerGroup: number; ejectProbPerPr: number;
+    ejectProbPerGroup: number; ejectProbPerPr: number; arrivalsPerTrain?: number;
     currentBatch: number; recommendedBatch: number;
     curve: { batch: number; throughputPerHour: number;
       timeInQueueSecs: number | null; stable: boolean }[] }[];

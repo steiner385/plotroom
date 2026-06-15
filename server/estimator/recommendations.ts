@@ -20,7 +20,8 @@ export interface Recommendation {
 
 export interface RecommendationInputs {
   batchAdvisor: { repo: string; currentBatch: number; recommendedBatch: number;
-    ejectProbPerGroup: number; curve: { batch: number; throughputPerHour: number }[] }[];
+    ejectProbPerGroup: number; arrivalsPerTrain: number;
+    curve: { batch: number; throughputPerHour: number }[] }[];
   queueEfficiency: { repo: string;
     runConclusion: { total: number; runFailed: number; advisoryNoise: number; requiredConfigured: boolean };
     adminBypass: { rate: number | null; merges: number } }[];
@@ -29,17 +30,61 @@ export interface RecommendationInputs {
 
 const PRIORITY_RANK: Record<RecPriority, number> = { high: 0, medium: 1, low: 2 };
 
+/** Guards on the batch-size advisor's RAISE recommendation. The throughput model
+ *  (batch-advisor.ts) maximises B·(1−q)^B assuming infinite demand and idealised
+ *  independent ejects — so it will happily recommend a bigger cap even when the
+ *  queue never fills the current one (no demand to spend the headroom) or the
+ *  eject rate is so high that a deeper batch mostly rebuilds (rework, not merges,
+ *  and 2× the on-demand CI cost). When either guard trips we FLIP the advice to
+ *  "consider lowering" instead of amplifying. Tunable. */
+const BATCH_SATURATION_MARGIN = 0.85; // queue "fills" the cap when arrivalsPerTrain ≥ margin·currentBatch
+const BATCH_REWORK_EJECT_THRESHOLD = 0.20; // group-eject ≥ this → deeper batch mostly rebuilds
+
 export function deriveRecommendations(inp: RecommendationInputs): Recommendation[] {
   const recs: Recommendation[] = [];
 
   // Batch-size advisor recommends a different cap than the one in effect.
   for (const b of inp.batchAdvisor) {
     if (b.recommendedBatch === b.currentBatch) continue;
-    const dir = b.recommendedBatch > b.currentBatch ? 'raise' : 'lower';
     const cur = b.curve.find((c) => c.batch === b.currentBatch)?.throughputPerHour;
     const rec = b.curve.find((c) => c.batch === b.recommendedBatch)?.throughputPerHour;
     const gainPct = cur != null && rec != null && cur > 0 ? Math.round((rec / cur - 1) * 100) : null;
     const ejectPct = Math.round(b.ejectProbPerGroup * 100);
+    const wantsRaise = b.recommendedBatch > b.currentBatch;
+
+    // Guard the RAISE path: the model is blind to whether the cap is even
+    // binding (saturation) and to eject-driven rework. If the queue doesn't fill
+    // the current cap, or the eject rate is high, raising is a no-op or actively
+    // wasteful — flip to "consider lowering" toward what demand/eject support.
+    if (wantsRaise) {
+      const notSaturated = b.arrivalsPerTrain < b.currentBatch * BATCH_SATURATION_MARGIN;
+      const highRework = b.ejectProbPerGroup >= BATCH_REWORK_EJECT_THRESHOLD;
+      if (notSaturated || highRework) {
+        // Flip to a CONSERVATIVE one-step lower, not a demand-matched target:
+        // arrivalsPerTrain is an AVERAGE, and a batch cap exists to absorb bursts
+        // (we observe peaks well above the mean), so sizing the cap to the mean
+        // would serialise those bursts — the mirror of the model's own blind
+        // spot. The reason text carries the fill number so the operator can
+        // decide how much further to trim. Skip if currentBatch is already 1.
+        const lowerTo = b.currentBatch - 1;
+        if (lowerTo >= 1) {
+          const reasons: string[] = [];
+          if (notSaturated) {
+            reasons.push(`queue fills only ~${b.arrivalsPerTrain.toFixed(1)} of ${b.currentBatch} per train — the cap isn't binding`);
+          }
+          if (highRework) {
+            reasons.push(`${ejectPct}% group-eject means a deeper batch mostly rebuilds (rework + 2× CI cost, not merges)`);
+          }
+          recs.push({ repo: b.repo, kind: 'batch-size', priority: 'low',
+            title: `consider lowering merge-queue batch ${b.currentBatch} → ${lowerTo}`,
+            detail: `${reasons.join('; ')} — the throughput model favoured ${b.recommendedBatch} but ignores idle-cap and rework` });
+        }
+        continue; // suppressed the raise; flipped (or nothing actionable)
+      }
+    }
+
+    // Legit: a saturated, low-rework raise — or a model-recommended lower.
+    const dir = wantsRaise ? 'raise' : 'lower';
     recs.push({ repo: b.repo, kind: 'batch-size', priority: 'medium',
       title: `${dir} merge-queue batch ${b.currentBatch} → ${b.recommendedBatch}`,
       detail: gainPct != null

@@ -46,6 +46,10 @@ export interface BatchPoint {
 export interface BatchAdvice {
   /** Per-PR eject probability derived from the observed per-group rate. */
   ejectProbPerPr: number;
+  /** PRs arriving during one train (λ·D/3600) — the largest batch the queue can
+   *  actually fill with no standing backlog. The recommendation layer uses this
+   *  as a SATURATION guard: below currentBatch, raising the cap is a no-op. */
+  arrivalsPerTrain: number;
   curve: BatchPoint[];
   recommendedBatch: number;
 }
@@ -101,5 +105,9 @@ export function modelBatchSizes(inp: BatchInputs): BatchAdvice {
   const recommendedBatch = pool.reduce((best, c) =>
     c.throughputPerHour > best.throughputPerHour + 1e-9 ? c : best, pool[0]!).batch;
 
-  return { ejectProbPerPr: Math.round(q * 1000) / 1000, curve, recommendedBatch };
+  return {
+    ejectProbPerPr: Math.round(q * 1000) / 1000,
+    arrivalsPerTrain: Math.round(arrivalsPerTrain * 100) / 100,
+    curve, recommendedBatch,
+  };
 }
