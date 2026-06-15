@@ -34,8 +34,12 @@ export interface AppManifest {
 const WEBHOOK_EVENTS = ['check_run', 'check_suite', 'pull_request', 'workflow_run', 'merge_group'] as const;
 
 /**
- * Build the App manifest: private App, read-only permissions matching what the
- * dashboard polls today.
+ * Build the App manifest: private App. Permissions are read-only except
+ * `pull_requests: write`, which backs the one write-action the dashboard
+ * offers — flip a draft PR ready-for-review and arm auto-merge (pr-actions.ts).
+ * On an installation that predates this permission, GitHub holds the upgrade
+ * until the owner approves it (Settings → Applications); the action 403s with a
+ * fix-it hint until then.
  *
  * By DEFAULT the manifest is webhook-less — no `default_events` and no
  * `hook_attributes`. GitHub rejects `default_events` without a hook URL, and
@@ -48,7 +52,7 @@ const WEBHOOK_EVENTS = ['check_run', 'check_suite', 'pull_request', 'workflow_ru
 export function buildManifest(opts: ManifestOptions): AppManifest {
   const permissions: Record<string, 'read' | 'write'> = {
     checks: 'read',
-    pull_requests: 'read',
+    pull_requests: 'write', // mark-ready + enable-auto-merge (pr-actions.ts); read covers polling
     actions: 'read',
     contents: 'read',
     metadata: 'read',

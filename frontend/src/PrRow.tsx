@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type MouseEvent } from 'react';
 import type { PrView } from './types';
 import { formatDur, formatEta, stageLabel } from './format';
 import { MetroTrack } from './MetroTrack';
@@ -66,6 +66,33 @@ function subLine(pr: PrView, queueCulprit: number | null): string | null {
   return stageLabel(s.stage, s.substate);
 }
 
+/** Check conclusions that count as "already failed" for the ready+auto-merge
+ *  gate. NEUTRAL/SKIPPED/SUCCESS are not failures; null = still running. */
+const FAILING_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED']);
+
+/**
+ * Decide whether the "Ready + auto-merge" button shows for this PR, and whether
+ * it's blocked. Per product decision (drafts, disabled-when-blocked):
+ *   - show ONLY on draft PRs (stage parked / substate 'draft')
+ *   - block (disable) when the PR conflicts with base (mergeStateStatus DIRTY)
+ *     or a required check has ALREADY concluded as a failure
+ * Arming auto-merge on a still-running draft is safe — GitHub waits for green —
+ * so a draft with checks in flight is shown enabled.
+ */
+export function readyMergeGate(pr: PrView): { show: boolean; blocked: boolean; reason: string } {
+  const isDraft = pr.stage.stage === 'parked' && pr.stage.substate === 'draft';
+  if (!isDraft) return { show: false, blocked: false, reason: '' };
+  if (pr.mergeStateStatus === 'DIRTY') {
+    return { show: true, blocked: true, reason: 'conflicts with base — rebase before it can merge' };
+  }
+  const failing = pr.checks.find(
+    (c) => c.isRequired && c.conclusion != null && FAILING_CONCLUSIONS.has(c.conclusion));
+  if (failing) {
+    return { show: true, blocked: true, reason: `required check failing (${failing.name}) — fix before arming` };
+  }
+  return { show: true, blocked: false, reason: '' };
+}
+
 export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }: {
   pr: PrView; hasDeploy: boolean;
   /** Repo-level RepoQueueView.unmergeableCulprit (queue-blocked sub line). */
@@ -74,6 +101,39 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
   expandable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionResult, setActionResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const gate = readyMergeGate(pr);
+
+  async function onReadyMerge(e: MouseEvent) {
+    e.stopPropagation();
+    if (busy || gate.blocked) return;
+    setBusy(true);
+    setActionResult(null);
+    try {
+      const res = await fetch('/api/pr/ready-merge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repo: pr.repo, number: pr.number }),
+      });
+      const data = await res.json().catch(() => ({} as Record<string, unknown>));
+      if (!res.ok) {
+        setActionResult({ ok: false, msg: String(data.error ?? `HTTP ${res.status}`) });
+        return;
+      }
+      const parts: string[] = [];
+      if (data.markedReady) parts.push('marked ready');
+      if (data.cleanReadyToMerge) parts.push('mergeable now — merge it directly');
+      else if (data.alreadyArmed) parts.push('auto-merge already armed');
+      else if (data.autoMergeArmed) parts.push('auto-merge armed');
+      setActionResult({ ok: true, msg: parts.join(' · ') || 'done' });
+    } catch (err) {
+      setActionResult({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const s = pr.stage;
   const parked = s.stage === 'parked';
   const eta = formatEta(s.etaSeconds, s.etaRangeSeconds, s.overdue);
@@ -111,6 +171,24 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
         {/* sub-line vocabulary tooltips (issue #66): the definitions of every
             recognized term in the line, from the shared SUBLINE_TERMS map */}
         {sub && <div className="sub" title={subLineTitle(sub)}>{sub}</div>}
+        {/* ready+auto-merge action (drafts only; disabled when conflicting or a
+            required check has already failed). Own click-guarded row so it never
+            toggles the expand panel. */}
+        {expandable && gate.show && (
+          <div className="pr-actions" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="pr-ready-merge" data-testid="pr-ready-merge"
+              disabled={busy || gate.blocked}
+              title={gate.blocked ? gate.reason : 'Mark this draft ready for review and arm auto-merge (squash)'}
+              onClick={onReadyMerge}>
+              {busy ? 'arming…' : 'Ready + auto-merge'}
+            </button>
+            {gate.blocked && <span className="pr-action-blocked">{gate.reason}</span>}
+            {actionResult && (
+              <span className={`pr-action-msg ${actionResult.ok ? 'ok' : 'err'}`}
+                data-testid="pr-action-msg">{actionResult.msg}</span>
+            )}
+          </div>
+        )}
       </div>
       {/* PR-level CI cost (cost explorer): the current head's runner-minutes
           (running checks count started→now), priced when rates are configured —

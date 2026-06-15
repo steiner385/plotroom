@@ -19,7 +19,7 @@ describe('buildManifest', () => {
       redirect_url: 'http://127.0.0.1:51234/callback',
       default_permissions: {
         checks: 'read',
-        pull_requests: 'read',
+        pull_requests: 'write',
         actions: 'read',
         contents: 'read',
         metadata: 'read',
@@ -44,7 +44,7 @@ describe('buildManifest', () => {
       redirect_url: 'http://127.0.0.1:51234/callback',
       default_permissions: {
         checks: 'read',
-        pull_requests: 'read',
+        pull_requests: 'write',
         actions: 'read',
         contents: 'read',
         metadata: 'read',

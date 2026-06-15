@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { PrRow } from '../PrRow';
-import type { PrView } from '../types';
+import { PrRow, readyMergeGate } from '../PrRow';
+import type { PrView, CheckView } from '../types';
 
 const pr = (over: Partial<PrView>): PrView => ({
   repo: 'acme/widgets', number: 8962, title: 'fix: calendar overlap', url: 'https://x/8962',
@@ -445,5 +445,79 @@ describe('PrRow — PR-level CI cost line (cost explorer)', () => {
     // pre-upgrade payload: the fields are absent entirely
     render(<PrRow pr={pr({})} hasDeploy />);
     expect(screen.queryByTestId('pr-cost')).toBeNull();
+  });
+});
+
+describe('PrRow ready+auto-merge action', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const mkCheck = (over: Partial<CheckView>): CheckView => ({
+    name: 'static-checks / TypeScript', status: 'COMPLETED', conclusion: 'SUCCESS', isRequired: true,
+    workflowName: null, elapsedSeconds: 100, expectedSeconds: 120, url: null,
+    expectedLowSeconds: null, expectedHighSeconds: null, waitKind: null, blockedOn: null,
+    waitingSeconds: null, expectedRunnerWaitSeconds: null, flakeRatePct: null, likelyFlake: false, ...over });
+
+  const draft = (over: Partial<PrView> = {}): PrView => pr({
+    stage: { stage: 'parked', substate: 'draft', percent: null, etaSeconds: null, etaRangeSeconds: null, overdue: false },
+    checks: [], ...over });
+
+  it('readyMergeGate: only drafts show the button; conflict and failed-check block it', () => {
+    expect(readyMergeGate(pr({})).show).toBe(false); // non-draft
+    expect(readyMergeGate(draft()).show).toBe(true);
+    expect(readyMergeGate(draft()).blocked).toBe(false);
+    expect(readyMergeGate(draft({ mergeStateStatus: 'DIRTY' })).blocked).toBe(true);
+    expect(readyMergeGate(draft({ checks: [mkCheck({ conclusion: 'FAILURE' })] })).blocked).toBe(true);
+    // a still-running required check does NOT block (auto-merge waits for green)
+    expect(readyMergeGate(draft({ checks: [mkCheck({ status: 'IN_PROGRESS', conclusion: null })] })).blocked).toBe(false);
+  });
+
+  it('renders an enabled button on a clean draft, hidden on a non-draft', () => {
+    const { rerender } = render(<PrRow pr={draft()} hasDeploy />);
+    expect(screen.getByTestId('pr-ready-merge')).toBeEnabled();
+    rerender(<PrRow pr={pr({})} hasDeploy />);
+    expect(screen.queryByTestId('pr-ready-merge')).toBeNull();
+  });
+
+  it('disables the button (with a reason) when the draft conflicts with base', () => {
+    render(<PrRow pr={draft({ mergeStateStatus: 'DIRTY' })} hasDeploy />);
+    expect(screen.getByTestId('pr-ready-merge')).toBeDisabled();
+    expect(screen.getByText(/conflicts with base/)).toBeInTheDocument();
+  });
+
+  it('disables the button when a required check has already failed', () => {
+    render(<PrRow pr={draft({ checks: [mkCheck({ conclusion: 'FAILURE', name: 'unit-tests' })] })} hasDeploy />);
+    expect(screen.getByTestId('pr-ready-merge')).toBeDisabled();
+    expect(screen.getByText(/required check failing \(unit-tests\)/)).toBeInTheDocument();
+  });
+
+  it('is hidden in kiosk (non-expandable) mode', () => {
+    render(<PrRow pr={draft()} hasDeploy expandable={false} />);
+    expect(screen.queryByTestId('pr-ready-merge')).toBeNull();
+  });
+
+  it('POSTs { repo, number } and shows the armed result on success', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ markedReady: true, autoMergeArmed: true, alreadyArmed: false, cleanReadyToMerge: false }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<PrRow pr={draft()} hasDeploy />);
+    fireEvent.click(screen.getByTestId('pr-ready-merge'));
+    const msg = await screen.findByTestId('pr-action-msg');
+    expect(msg.textContent).toMatch(/marked ready · auto-merge armed/);
+    expect(fetchMock).toHaveBeenCalledWith('/api/pr/ready-merge', expect.objectContaining({ method: 'POST' }));
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ repo: 'acme/widgets', number: 8962 });
+  });
+
+  it('surfaces a server error message on failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 403, json: async () => ({ error: 'GitHub App lacks pull_requests:write' }),
+    }));
+    render(<PrRow pr={draft()} hasDeploy />);
+    fireEvent.click(screen.getByTestId('pr-ready-merge'));
+    const msg = await screen.findByTestId('pr-action-msg');
+    expect(msg).toHaveClass('err');
+    expect(msg.textContent).toMatch(/pull_requests:write/);
   });
 });

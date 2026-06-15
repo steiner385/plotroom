@@ -7,6 +7,7 @@ import { READ_ONLY_CONFIG_KEYS, validateConfigPatch, type AppConfig, type Config
 import { maskWebhookUrl } from './notifier';
 import { resolveMetricsQuery, type MetricsBucket, type MetricsPayload, type MetricsWindow } from './metrics';
 import { verifySignature, routeEvent, type WebhookRoute } from './webhooks';
+import { PermissionError, type MergeMethod, type ReadyMergeInput, type ReadyMergeResult } from './pr-actions';
 
 /**
  * Wiring for /api/config. Note the security boundary lives HERE (and in
@@ -159,6 +160,9 @@ export function createApp(opts: {
   /** POST /api/cost/actuals — operator-imported daily spend (cost explorer
    *  phase 2). Upsert is all-or-nothing over the validated rows. */
   costActuals?: { upsert: (rows: CostActualInput[]) => void };
+  /** POST /api/pr/ready-merge — flip a draft PR ready-for-review and arm
+   *  auto-merge. Wired in index.ts to the per-owner GithubClient. */
+  prActions?: { readyAndAutoMerge: (input: ReadyMergeInput) => Promise<ReadyMergeResult> };
   /** Restart endpoint knobs — `exit` injectable for tests. */
   restart?: { exit?: (code: number) => void; delayMs?: number };
 }): express.Express {
@@ -242,6 +246,41 @@ export function createApp(opts: {
         return;
       }
       res.json({ upserted: v.rows.length });
+    });
+  }
+
+  if (opts.prActions) {
+    const actions = opts.prActions;
+    // Same-origin guarded like the other mutating endpoints. Body is the data
+    // the PrRow already holds: { repo: "owner/name", number, mergeMethod? }.
+    app.post('/api/pr/ready-merge', originGuard, async (req, res) => {
+      const body = (req.body ?? {}) as { repo?: unknown; number?: unknown; mergeMethod?: unknown };
+      const repo = typeof body.repo === 'string' ? body.repo.trim() : '';
+      const slash = repo.indexOf('/');
+      const owner = slash > 0 ? repo.slice(0, slash) : '';
+      const name = slash > 0 ? repo.slice(slash + 1) : '';
+      const number = typeof body.number === 'number' ? body.number : NaN;
+      const method = body.mergeMethod;
+      if (!owner || !name || name.includes('/') || !Number.isInteger(number) || number <= 0) {
+        res.status(400).json({ error: 'expected { repo: "owner/name", number }' });
+        return;
+      }
+      if (method !== undefined && method !== 'SQUASH' && method !== 'MERGE' && method !== 'REBASE') {
+        res.status(400).json({ error: 'mergeMethod must be SQUASH | MERGE | REBASE' });
+        return;
+      }
+      try {
+        const result = await actions.readyAndAutoMerge({
+          owner, repo: name, number, mergeMethod: method as MergeMethod | undefined });
+        res.json(result);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const status = e instanceof PermissionError ? 403
+          : /not found/i.test(msg) ? 404
+          : /not OPEN|no installation/i.test(msg) ? 409
+          : 502;
+        res.status(status).json({ error: msg });
+      }
     });
   }
 

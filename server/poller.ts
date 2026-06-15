@@ -98,6 +98,12 @@ export interface PrTimeline {
 export interface PrView {
   repo: string; number: number; title: string; url: string;
   stage: StageResult;
+  /** GitHub mergeStateStatus (BLOCKED|BEHIND|DIRTY|UNSTABLE|CLEAN|UNKNOWN|DRAFT)
+   *  for OPEN PRs; null for merged-PR views. Drives the ready+auto-merge button's
+   *  disabled-when-conflicting gate (DIRTY). Note: a draft often reports DRAFT
+   *  rather than its underlying conflict, so this catches already-computed
+   *  conflicts only — the CI-red gate (failing required check) covers the rest. */
+  mergeStateStatus: string | null;
   queueAheadCount: number | null;
   checks: CheckView[];
   /** Per-PR "where did the time go" waterfall (issue #50) — merged PRs within
@@ -2595,6 +2601,7 @@ export class Poller extends EventEmitter {
       this.rollupWorkflowFor(pr.repo), (n) => this.poolsFor(pr.repo, n),
       this.deps.config.costPerMinute ?? null, this.deps.config.poolMeta ?? null, now);
     return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, stage,
+      mergeStateStatus: pr.mergeStateStatus,
       queueAheadCount, costMinutes, costDollars, costDollarsPartial,
       checks: this.checkViews(pr, now, prefixes),
       timeline: null,
@@ -2647,7 +2654,7 @@ export class Poller extends EventEmitter {
     this.deps.notifier?.observe({ repo: rec.repo, prNumber: rec.number, title: rec.title,
       prev: prevStage, next: stage });
     return { repo: rec.repo, number: rec.number, title: rec.title, url: rec.url, stage,
-      queueAheadCount: null, checks: [],
+      mergeStateStatus: null, queueAheadCount: null, checks: [],
       // waterfall spine (issue #50): the merged record IS the source of truth —
       // missing waypoints stay null, the UI omits those segments
       timeline: { createdAt: rec.createdAt, firstGreenAt: rec.firstGreenAt,
