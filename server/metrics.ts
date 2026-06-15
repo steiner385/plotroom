@@ -68,7 +68,7 @@ export interface MetricsPayload {
    *  emitted for repos with enough observed merge_group trains. */
   batchAdvisor: { repo: string;
     arrivalPerHour: number; trainDurationSecs: number;
-    ejectProbPerGroup: number; ejectProbPerPr: number;
+    ejectProbPerGroup: number; ejectProbPerPr: number; arrivalsPerTrain: number;
     currentBatch: number; recommendedBatch: number;
     curve: { batch: number; throughputPerHour: number;
       timeInQueueSecs: number | null; stable: boolean }[] }[];
@@ -696,6 +696,7 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       trainDurationSecs: Math.round(trainDurationSecs),
       ejectProbPerGroup: Math.round(ejectProbPerGroup * 1000) / 1000,
       ejectProbPerPr: advice.ejectProbPerPr,
+      arrivalsPerTrain: advice.arrivalsPerTrain,
       currentBatch, recommendedBatch: advice.recommendedBatch, curve: advice.curve,
     };
   }).filter((x): x is NonNullable<typeof x> => x != null);
