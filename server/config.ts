@@ -174,6 +174,24 @@ export interface AppConfig {
    *  the static rate when no fleet actuals exist yet. Default false (opt-in) —
    *  the static-rate behavior is unchanged when off. File-only. */
   costAutoRate: boolean;
+  /** Runner routing control (feature/runner-routing).
+   *  Three keys are PUT-writable via a dedicated endpoint (enabled,
+   *  shedThresholdMinutes, overrides); two are file-only write/network targets
+   *  (targetRepo, reclaimWindow) — a browser page must not redirect these. */
+  runnerRouting: {
+    /** PUT-writable. Master switch; default false (opt-in). */
+    enabled: boolean;
+    /** PUT-writable. Queue depth (minutes) above which spot runners are shed
+     *  in favour of on-demand; must be > 0. Default 1.0. */
+    shedThresholdMinutes: number;
+    /** PUT-writable. Per-job-name runner pool overrides (e.g. { unit: 'ondemand' }). */
+    overrides: Record<string, 'spot' | 'ondemand'>;
+    /** FILE-ONLY. Rolling window used to compute reclaim probability. Default '24h'. */
+    reclaimWindow: string;
+    /** FILE-ONLY. Target repo slug the routing writes GH variables to. Default
+     *  'cairnea/KinDash'. Validated against RUNNER_ROUTING_TARGET_ALLOWLIST. */
+    targetRepo: string;
+  };
   deploy: Record<string, DeployConfig>;
   repos?: Record<string, RepoConfig>;
   intervals: { sweepMs: number; hotMs: number; deployMs: number };
@@ -182,6 +200,14 @@ export interface AppConfig {
    *  (×4) is skipped when the operator pinned hotMs themselves. */
   hotMsExplicit: boolean;
 }
+
+export const RUNNER_ROUTING_DEFAULTS = {
+  enabled: false,
+  shedThresholdMinutes: 1,
+  overrides: {} as Record<string, 'spot' | 'ondemand'>,
+  reclaimWindow: '24h',
+  targetRepo: 'cairnea/KinDash',
+} as const satisfies AppConfig['runnerRouting'];
 
 export const DEFAULTS: AppConfig = {
   owners: [],
@@ -198,6 +224,7 @@ export const DEFAULTS: AppConfig = {
   notifications: DEFAULT_NOTIFICATIONS,
   webhooks: { enabled: false, path: '/api/webhooks/github' },
   costAutoRate: false,
+  runnerRouting: { ...RUNNER_ROUTING_DEFAULTS, overrides: {} },
   deploy: {},
   repos: {},
   intervals: { sweepMs: 60_000, hotMs: 15_000, deployMs: 30_000 },
@@ -393,6 +420,56 @@ export type SafeConfigKey = (typeof SAFE_CONFIG_KEYS)[number];
  *  SAFE_CONFIG_KEYS carve-out); the rest of the block remains file-only. */
 export const READ_ONLY_CONFIG_KEYS = ['tokenSource', 'apiUrl', 'port', 'app', 'ancestrySource', 'costPerMinute', 'poolMeta'] as const;
 
+// ---- runner-routing config API (feature/runner-routing) ---------------------
+
+/** Writable subset of `runnerRouting` accepted by the dedicated PUT endpoint.
+ *  `targetRepo` and `reclaimWindow` are FILE-ONLY — a browser page must not
+ *  redirect these write/network targets. */
+const RUNNER_ROUTING_WRITABLE = ['enabled', 'shedThresholdMinutes', 'overrides'] as const;
+
+/** Allowlist of `targetRepo` values accepted in the config file. A value not on
+ *  this list falls back to the default rather than throwing, to avoid a bad
+ *  config locking out the operator on startup. */
+export const RUNNER_ROUTING_TARGET_ALLOWLIST = ['cairnea/KinDash'];
+
+export interface RunnerRoutingValidation { ok: boolean; errors: string[]; }
+
+/**
+ * Validate a body destined for the dedicated PUT /api/runner-routing endpoint.
+ * Only the three writable keys (enabled, shedThresholdMinutes, overrides) are
+ * accepted; file-only keys (targetRepo, reclaimWindow) are rejected the same
+ * way SAFE_CONFIG_KEYS rejects forbidden top-level keys. All three fields are
+ * optional (callers may send a partial patch).
+ */
+export function validateRunnerRoutingPatch(body: unknown): RunnerRoutingValidation {
+  const errors: string[] = [];
+  if (typeof body !== 'object' || body === null) return { ok: false, errors: ['not an object'] };
+  const b = body as Record<string, unknown>;
+  for (const k of Object.keys(b)) {
+    if (!(RUNNER_ROUTING_WRITABLE as readonly string[]).includes(k)) {
+      errors.push(`file-only or unknown key: ${k}`);
+    }
+  }
+  if ('enabled' in b && typeof b.enabled !== 'boolean') errors.push('enabled must be boolean');
+  if ('shedThresholdMinutes' in b) {
+    const n = b.shedThresholdMinutes;
+    if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) {
+      errors.push('shedThresholdMinutes must be a positive finite number');
+    }
+  }
+  if ('overrides' in b) {
+    const o = b.overrides;
+    if (typeof o !== 'object' || o === null) {
+      errors.push('overrides must be an object');
+    } else {
+      for (const [k, v] of Object.entries(o)) {
+        if (v !== 'spot' && v !== 'ondemand') errors.push(`override ${k} must be 'spot' or 'ondemand'`);
+      }
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 const INTERVAL_KEYS = ['sweepMs', 'hotMs', 'deployMs'] as const;
 
 /** A validated safe-subset patch (every field optional; intervals may be partial). */
@@ -550,6 +627,31 @@ export function loadConfig(path?: string): AppConfig {
   const user: Partial<AppConfig> = existsSync(resolvedPath)
     ? (JSON.parse(readFileSync(resolvedPath, 'utf8')) as Partial<AppConfig>)
     : {};
+  // runnerRouting: merge the file block over the defaults; clamp/sanitize
+  // individual fields so a malformed file never throws and falls back cleanly.
+  const rrRaw = (user.runnerRouting && typeof user.runnerRouting === 'object' && !Array.isArray(user.runnerRouting))
+    ? user.runnerRouting as Record<string, unknown>
+    : {};
+  const rrEnabled = typeof rrRaw.enabled === 'boolean' ? rrRaw.enabled : RUNNER_ROUTING_DEFAULTS.enabled;
+  const rrThreshold = (typeof rrRaw.shedThresholdMinutes === 'number'
+    && Number.isFinite(rrRaw.shedThresholdMinutes)
+    && rrRaw.shedThresholdMinutes > 0)
+    ? rrRaw.shedThresholdMinutes
+    : RUNNER_ROUTING_DEFAULTS.shedThresholdMinutes;
+  const rrOverrides: Record<string, 'spot' | 'ondemand'> =
+    (rrRaw.overrides && typeof rrRaw.overrides === 'object' && !Array.isArray(rrRaw.overrides))
+      ? Object.fromEntries(
+          Object.entries(rrRaw.overrides as Record<string, unknown>)
+            .filter(([, v]) => v === 'spot' || v === 'ondemand') as [string, 'spot' | 'ondemand'][])
+      : {};
+  const rrReclaimWindow = (typeof rrRaw.reclaimWindow === 'string' && rrRaw.reclaimWindow.trim())
+    ? rrRaw.reclaimWindow.trim()
+    : RUNNER_ROUTING_DEFAULTS.reclaimWindow;
+  const rrTargetRepo = (typeof rrRaw.targetRepo === 'string'
+    && RUNNER_ROUTING_TARGET_ALLOWLIST.includes(rrRaw.targetRepo))
+    ? rrRaw.targetRepo
+    : RUNNER_ROUTING_DEFAULTS.targetRepo;
+
   const merged: AppConfig = {
     ...DEFAULTS, ...user,
     intervals: { ...DEFAULTS.intervals, ...(user.intervals ?? {}) },
@@ -559,6 +661,13 @@ export function loadConfig(path?: string): AppConfig {
     notifications: { ...DEFAULTS.notifications, ...(user.notifications ?? {}),
       events: { ...DEFAULTS.notifications.events, ...(user.notifications?.events ?? {}) },
       digest: { ...DEFAULTS.notifications.digest, ...(user.notifications?.digest ?? {}) } },
+    runnerRouting: {
+      enabled: rrEnabled,
+      shedThresholdMinutes: rrThreshold,
+      overrides: rrOverrides,
+      reclaimWindow: rrReclaimWindow,
+      targetRepo: rrTargetRepo,
+    },
     // internal, never honored from the file: derived from what the file actually set
     hotMsExplicit: user.intervals?.hotMs !== undefined,
   };

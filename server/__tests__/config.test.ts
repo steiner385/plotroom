@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { writeFileSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, repoSettings, effectiveRepoSettings, effectiveDeployMap, resolveOwners, validateConfigPatch, writeConfigPatch, configFileSources, _resetDeployAllowlistWarnings, SAFE_CONFIG_KEYS, READ_ONLY_CONFIG_KEYS, DEFAULTS, poolRate, hasAnyRate, empiricalRate, type AppConfig } from '../config';
+import { loadConfig, repoSettings, effectiveRepoSettings, effectiveDeployMap, resolveOwners, validateConfigPatch, writeConfigPatch, configFileSources, _resetDeployAllowlistWarnings, SAFE_CONFIG_KEYS, READ_ONLY_CONFIG_KEYS, DEFAULTS, poolRate, hasAnyRate, empiricalRate, validateRunnerRoutingPatch, type AppConfig } from '../config';
 import { parseRepoConfig } from '../repo-config';
 import { APP_ROOT } from '../paths';
 
@@ -1141,5 +1141,28 @@ describe('costAutoRate config flag (issue #100)', () => {
     expect(loadConfig(writeConfig({ costAutoRate: 0 })).costAutoRate).toBe(false);
     expect(loadConfig(writeConfig({ costAutoRate: '' })).costAutoRate).toBe(false);
     expect(loadConfig(writeConfig({ costAutoRate: null })).costAutoRate).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runner routing config block (feature/runner-routing)
+// ---------------------------------------------------------------------------
+
+describe('validateRunnerRoutingPatch', () => {
+  it('accepts the writable subset', () => {
+    const v = validateRunnerRoutingPatch({ enabled: true, shedThresholdMinutes: 2,
+      overrides: { unit: 'ondemand' } });
+    expect(v.ok).toBe(true);
+  });
+  it('rejects a non-positive or NaN threshold', () => {
+    expect(validateRunnerRoutingPatch({ shedThresholdMinutes: 0 }).ok).toBe(false);
+    expect(validateRunnerRoutingPatch({ shedThresholdMinutes: -1 }).ok).toBe(false);
+  });
+  it('rejects an invalid override value', () => {
+    expect(validateRunnerRoutingPatch({ overrides: { unit: 'on-demand' } }).ok).toBe(false);
+  });
+  it('rejects file-only keys in the PUT patch (targetRepo, reclaimWindow)', () => {
+    expect(validateRunnerRoutingPatch({ targetRepo: 'evil/repo' }).ok).toBe(false);
+    expect(validateRunnerRoutingPatch({ reclaimWindow: '99d' }).ok).toBe(false);
   });
 });
