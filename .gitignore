@@ -6,3 +6,6 @@ config.json
 *.pem
 *.webhook-secret
 docs/superpowers/
+
+# runtime audit log (runner routing)
+logs/
