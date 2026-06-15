@@ -440,6 +440,19 @@ describe('MetricsView', () => {
     expect(within(list).getByTestId('rec-batch-size').textContent).toContain('raise merge-queue batch 6 → 12');
   });
 
+  it('a recommendation deep-links to its evidence panel (UX-M4)', async () => {
+    mockFetchOk({ ...PAYLOAD, recommendations: [
+      { repo: 'acme/widgets', kind: 'batch-size', priority: 'medium',
+        title: 'raise merge-queue batch 6 → 12', detail: '+50%' }] });
+    render(<MetricsView now={NOW} />);
+    const link = await screen.findByTestId('rec-link-batch-size');
+    // default section is Tuning; clicking jumps to the batch advisor in Throughput
+    expect(screen.getByTestId('metrics-subtab-tuning')).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(link);
+    expect(screen.getByTestId('metrics-subtab-throughput')).toHaveAttribute('aria-pressed', 'true');
+    expect(document.getElementById('metrics-batch-advisor')).not.toBeNull();
+  });
+
   it('config-change panel lists changes and overlays a marker on the queue charts', async () => {
     mockFetchOk({ ...PAYLOAD, configChanges: [
       { repo: 'acme/widgets', at: '2026-06-11T09:30:00Z', field: 'batchSize',
@@ -675,7 +688,8 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
     const panel = heading.closest('section')! as HTMLElement;
-    expect(within(panel).getByText(/ignores the window selector/)).toBeInTheDocument();
+    // appears in the visible note AND (UX-M1) the sr-only stat description
+    expect(within(panel).getAllByText(/ignores the window selector/).length).toBeGreaterThan(0);
   });
 
   it('shows the empty placeholder without critical-path data', async () => {
@@ -1239,14 +1253,14 @@ describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => 
 describe('MetricsView sub-tabs (page cleanup)', () => {
   beforeEach(() => { try { localStorage.removeItem('prdash.metrics.section'); } catch { /* ignore */ } });
 
-  it('renders the 5 section sub-tabs and defaults to Throughput', async () => {
+  it('renders the 5 section sub-tabs and defaults to Tuning (UX-M3)', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
-    await screen.findByTestId('metrics-subtab-throughput');
+    await screen.findByTestId('metrics-subtab-tuning');
     for (const id of ['tuning', 'throughput', 'performance', 'reliability', 'cost']) {
       expect(screen.getByTestId(`metrics-subtab-${id}`)).toBeInTheDocument();
     }
-    expect(screen.getByTestId('metrics-subtab-throughput')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('metrics-subtab-tuning')).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('switching sub-tabs moves the active marker and persists to localStorage', async () => {
@@ -1265,7 +1279,7 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
     await screen.findByTestId('metrics-subtab-cost');
     // CI cost lives in the Cost section
     expect(document.getElementById('metrics-ci-cost')).toHaveAttribute('data-section', 'cost');
-    // default Throughput active → Cost section inactive (hidden by class)
+    // default Tuning active → Cost section inactive (hidden by class)
     expect(document.getElementById('metrics-ci-cost')!.className).toContain('metric-panel--inactive');
     fireEvent.click(screen.getByTestId('metrics-subtab-cost'));
     expect(document.getElementById('metrics-ci-cost')!.className).not.toContain('metric-panel--inactive');

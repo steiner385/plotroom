@@ -20,11 +20,21 @@
     --accent-strong: #2563eb; --done-strong: #15803d; --amber-strong: #9a5d00; }
 }
 body { margin: 0; background: var(--bg); color: var(--text); }
-.app { max-width: 1100px; margin: 0 auto; padding: 16px 20px 60px; }
+/* Wider cap for the glance-from-across-the-room context this tool targets — the
+   metro tracks, queue trains, and metric charts use the extra width (UX-M2). */
+.app { max-width: min(1400px, 96vw); margin: 0 auto; padding: 16px 20px 60px; }
 header { display: flex; align-items: baseline; gap: 14px; }
 header h1 { font-size: 20px; }
 .generated, .stale, .empty { color: var(--muted); font-size: 12px; }
 .stale { color: var(--fail); }
+/* Liveness indicator (UX-M5): the dot carries "connected", so the timestamp
+   beside it is free to be the last-CHANGE time without reading as stale. */
+.conn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--done); margin-right: 2px; vertical-align: middle; }
+@media (prefers-reduced-motion: no-preference) {
+  .conn-dot { animation: conn-pulse 2.4s ease-in-out infinite; }
+}
+@keyframes conn-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 
 /* --- Collapsible repo header button --- */
@@ -504,6 +514,11 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .rec-title { font-weight: 600; color: var(--text); }
 .rec-detail { font-size: 12px; color: var(--muted); }
 .rec-repo { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Deep-link from a recommendation to its evidence panel (UX-M4). */
+.rec-link { align-self: flex-start; margin-top: 3px; padding: 2px 0; background: none;
+  border: none; cursor: pointer; font: inherit; font-size: 11px; font-weight: 600;
+  color: var(--accent); }
+.rec-link:hover { text-decoration: underline; }
 
 /* Recent config changes (tuning tool): change-log list + chart-marker swatch */
 .cfg-change-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }

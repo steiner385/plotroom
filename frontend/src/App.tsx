@@ -188,10 +188,14 @@ export function App() {
           <span className="stale">stale since {new Date(state.staleSince).toLocaleTimeString()}</span>
         )}
         {connected && (
-          /* Driven by connection state: SSE suppresses unchanged frames, so a
-             frozen "updated" stamp would read as staleness when the stream is
-             actually live. The server keepalive re-emits at least every 60s. */
-          <span className="generated">live · updated {new Date(state.generatedAt).toLocaleTimeString()}</span>
+          /* SSE suppresses unchanged frames, so the stamp legitimately freezes
+             on a quiet period while the stream is live — wording it "last change"
+             (not "updated") makes a frozen stamp read correctly as "nothing
+             changed", and the connected dot carries liveness (UX-M5). The server
+             keepalive re-emits at least every 60s. */
+          <span className="generated">
+            <span className="conn-dot" aria-hidden="true" /> live · last change {new Date(state.generatedAt).toLocaleTimeString()}
+          </span>
         )}
         {/* Persistent assertive live region (UX-H4): the visible spans above are
             not live regions, so a connection drop is silent for SR users. This

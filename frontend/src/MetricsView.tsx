@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { scrollBehavior } from './motion';
 import type { HeadlineStat, MetricsBucket, MetricsPayload, MetricsWindow } from './types';
 import { LEAD_TIME_SEGMENTS } from './leadtime';
@@ -95,7 +95,21 @@ const METRICS_SECTIONS: { id: MetricsSection; label: string }[] = [
   { id: 'cost', label: 'Cost' },
 ];
 const SECTION_STORAGE_KEY = 'prdash.metrics.section';
-const ActiveSectionContext = createContext<MetricsSection>('throughput');
+
+/** Deep-link a Tuning recommendation to the panel that is its evidence (UX-M4):
+ *  the section to switch to + the panel id to scroll/focus. lint:* kinds all map
+ *  to the workflow-lint panel (handled by prefix in resolveRecLink). */
+const REC_LINK: Record<string, { section: MetricsSection; panel: string }> = {
+  'batch-size': { section: 'throughput', panel: 'metrics-batch-advisor' },
+  'admin-bypass': { section: 'throughput', panel: 'metrics-queue-efficiency' },
+  'advisory-in-merge-group': { section: 'throughput', panel: 'metrics-queue-efficiency' },
+  'set-required-prefixes': { section: 'throughput', panel: 'metrics-queue-efficiency' },
+};
+function resolveRecLink(kind: string): { section: MetricsSection; panel: string } | null {
+  return REC_LINK[kind] ?? (kind.startsWith('lint:')
+    ? { section: 'reliability', panel: 'metrics-workflow-lint' } : null);
+}
+const ActiveSectionContext = createContext<MetricsSection>('tuning');
 
 function Panel({ id, title, empty, emptyText = 'no data yet', section, children }: {
   id?: string; title: string; empty: boolean; emptyText?: string;
@@ -118,14 +132,17 @@ function Panel({ id, title, empty, emptyText = 'no data yet', section, children 
 function MetricStat({ label, value, delta, def }: {
   label: string; value: string; delta?: string | null;
   /** What this figure means / how it's computed (issue #66) — every headline
-   *  stat must carry one; rendered as the title tooltip. */
+   *  stat must carry one; rendered as the mouse tooltip AND, for screen-reader
+   *  users who can't reach a title=, an aria-describedby hidden description (UX-M1). */
   def: Definition;
 }) {
+  const descId = useId();
   return (
-    <div className="metric-stat" title={defTitle(def)}>
+    <div className="metric-stat" title={defTitle(def)} aria-describedby={descId}>
       <b>{value}</b>
       <span>{label}</span>
       {delta != null && <em className="metric-delta">{delta}</em>}
+      <span id={descId} className="sr-only">{defTitle(def)}</span>
     </div>
   );
 }
@@ -221,11 +238,25 @@ export function MetricsView({ now, focusCostNonce }: {
       const s = localStorage.getItem(SECTION_STORAGE_KEY);
       if (s && METRICS_SECTIONS.some((x) => x.id === s)) return s as MetricsSection;
     } catch { /* private mode */ }
-    return 'throughput';
+    // Default to the ranked Tuning Actions — the one panel that says what to fix
+    // — rather than a data section, when there's no remembered preference (UX-M3).
+    return 'tuning';
   });
   const selectSection = (s: MetricsSection) => {
     setSection(s);
     try { localStorage.setItem(SECTION_STORAGE_KEY, s); } catch { /* ignore */ }
+  };
+  // Jump from a recommendation to its evidence panel: switch section, then (after
+  // the panel re-renders into view) scroll to it and move focus to its heading (UX-M4).
+  const goToEvidence = (kind: string) => {
+    const link = resolveRecLink(kind);
+    if (!link) return;
+    selectSection(link.section);
+    requestAnimationFrame(() => {
+      const el = document.getElementById(link.panel);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el?.querySelector('h2')?.focus?.();
+    });
   };
   const [payload, setPayload] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -422,6 +453,12 @@ export function MetricsView({ now, focusCostNonce }: {
                 <span className="rec-title">{r.title}</span>
                 <span className="rec-detail">{r.detail}</span>
                 <span className="rec-repo">{r.repo}</span>
+                {resolveRecLink(r.kind) && (
+                  <button type="button" className="rec-link" data-testid={`rec-link-${r.kind}`}
+                    onClick={() => goToEvidence(r.kind)}>
+                    view evidence →
+                  </button>
+                )}
               </span>
             </li>
           ))}
@@ -877,7 +914,7 @@ export function MetricsView({ now, focusCostNonce }: {
         ))}
       </Panel>
 
-      <Panel title="Queue efficiency" section="throughput" empty={(payload.queueEfficiency ?? []).length === 0}
+      <Panel id="metrics-queue-efficiency" title="Queue efficiency" section="throughput" empty={(payload.queueEfficiency ?? []).length === 0}
         emptyText="no merge_group runs or merges in window yet">
         {(payload.queueEfficiency ?? []).map((q) => {
           const rc = q.runConclusion;
@@ -913,7 +950,7 @@ export function MetricsView({ now, focusCostNonce }: {
         })}
       </Panel>
 
-      <Panel title="Batch-size advisor" section="throughput" empty={(payload.batchAdvisor ?? []).length === 0}
+      <Panel id="metrics-batch-advisor" title="Batch-size advisor" section="throughput" empty={(payload.batchAdvisor ?? []).length === 0}
         emptyText="not enough observed merge_group trains to model yet">
         <p className="metric-note">
           queueing-theory replay over observed arrival rate, train duration, and eject
@@ -1203,7 +1240,7 @@ export function MetricsView({ now, focusCostNonce }: {
         ))}
       </Panel>
 
-      <Panel title="Workflow lint" section="reliability" empty={lintRepos.length === 0} emptyText="no findings">
+      <Panel id="metrics-workflow-lint" title="Workflow lint" section="reliability" empty={lintRepos.length === 0} emptyText="no findings">
         {lintRepos.map((l) => (
           <div key={l.repo} className="metric-repo">
             <h3>{l.repo}</h3>

@@ -62,15 +62,15 @@ describe('App', () => {
     expect(screen.queryByText('disconnected — retrying…')).not.toBeInTheDocument();
   });
 
-  it('shows the "live · updated" stamp while connected', () => {
+  it('shows the "live · last change" stamp while connected (UX-M5)', () => {
     render(<App />);
-    expect(screen.getByText(/^live · updated /)).toBeInTheDocument();
+    expect(screen.getByText(/live · last change /)).toBeInTheDocument();
   });
 
-  it('hides the updated stamp while disconnected (badge covers the state)', () => {
+  it('hides the last-change stamp while disconnected (badge covers the state)', () => {
     mockUseDashboard.mockReturnValue(hook({ connected: false }));
     render(<App />);
-    expect(screen.queryByText(/updated /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/last change /)).not.toBeInTheDocument();
     expect(screen.getByText('disconnected — retrying…')).toBeInTheDocument();
   });
 
