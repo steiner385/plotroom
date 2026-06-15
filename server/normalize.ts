@@ -66,7 +66,25 @@ function latestRunMembers(members: CheckRun[]): CheckRun[] {
     if (c.runNumber != null && (max == null || c.runNumber > max)) max = c.runNumber;
   }
   if (max == null) return members;
-  return members.filter((c) => c.runNumber === max);
+  const inLatestRun = members.filter((c) => c.runNumber === max);
+
+  // Within the latest run, collapse RE-RUN ATTEMPTS of the same job to the
+  // highest run_attempt (issue: expanded PR showed the PREVIOUS run's status/url).
+  // A "Re-run failed jobs" keeps runNumber and increments run_attempt, so the
+  // rollup can carry both the stale completed attempt and the new one. Re-run
+  // attempts share a rawName; genuine matrix shards have DISTINCT rawNames — so
+  // keying by rawName keeps every real shard (and, for a partial re-run, keeps
+  // each shard at its own latest attempt) while dropping a job's stale attempt.
+  const best = new Map<string, CheckRun>();
+  for (const c of inLatestRun) {
+    const prev = best.get(c.rawName);
+    const a = c.runAttempt ?? 0;
+    const b = prev?.runAttempt ?? 0;
+    if (!prev || a > b || (a === b && (c.startedAt ?? '') > (prev.startedAt ?? ''))) {
+      best.set(c.rawName, c);
+    }
+  }
+  return [...best.values()];
 }
 
 // Conclusion severity for family aggregation: any failing member fails the

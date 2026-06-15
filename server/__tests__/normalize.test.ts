@@ -247,3 +247,62 @@ describe('familyDisplayName', () => {
     expect(familyDisplayName(run({ rawName: 'static-checks / Unit Tests (2/8)' }))).toBe('static-checks / Unit Tests (2/8)');
   });
 });
+
+describe('dedupeChecks — re-run attempts (same name, same runNumber, higher run_attempt)', () => {
+  it('keeps the latest ATTEMPT url+status, not the previous run, while a re-run is in progress', () => {
+    // "Re-run failed jobs": same runNumber, attempt 2 just queued (startedAt null).
+    const out = dedupeChecks([
+      run({ name: 'X', rawName: 'X', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'FAILURE',
+        startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:05:00Z', url: 'https://x/run/100/attempt/1' }),
+      run({ name: 'X', rawName: 'X', workflowName: 'CI', runNumber: 100, runAttempt: 2,
+        status: 'IN_PROGRESS', conclusion: null, startedAt: null, completedAt: null, url: 'https://x/run/100/attempt/2' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.url).toBe('https://x/run/100/attempt/2');   // current run, NOT the previous
+    expect(out[0]!.status).toBe('IN_PROGRESS');
+    expect(out[0]!.conclusion).toBeNull();                     // not the stale FAILURE
+    expect(out[0]!.shardCount).toBe(1);                        // 1 job re-run, not a 2-shard family
+  });
+
+  it('a successful re-run does not inherit the previous attempt\'s FAILURE', () => {
+    const out = dedupeChecks([
+      run({ name: 'X', rawName: 'X', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'FAILURE',
+        startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:05:00Z', url: 'https://x/run/100/attempt/1' }),
+      run({ name: 'X', rawName: 'X', workflowName: 'CI', runNumber: 100, runAttempt: 2,
+        status: 'COMPLETED', conclusion: 'SUCCESS',
+        startedAt: '2026-06-10T10:10:00Z', completedAt: '2026-06-10T10:15:00Z', url: 'https://x/run/100/attempt/2' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.conclusion).toBe('SUCCESS');                // latest attempt's verdict
+    expect(out[0]!.url).toBe('https://x/run/100/attempt/2');
+    expect(out[0]!.shardCount).toBe(1);
+  });
+
+  it('still aggregates a genuine matrix family (distinct shards, same attempt)', () => {
+    const out = dedupeChecks([
+      run({ name: 'U (shard/8)', rawName: 'U (1/8)', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:04:00Z' }),
+      run({ name: 'U (shard/8)', rawName: 'U (2/8)', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:06:00Z' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.shardCount).toBe(2);   // two real shards, NOT collapsed
+  });
+
+  it('partial matrix re-run: keeps every shard at its own latest attempt', () => {
+    // shard 1 passed at attempt 1 (not re-run); shard 2 failed then re-ran at attempt 2.
+    const out = dedupeChecks([
+      run({ name: 'U (shard/8)', rawName: 'U (1/8)', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:04:00Z' }),
+      run({ name: 'U (shard/8)', rawName: 'U (2/8)', workflowName: 'CI', runNumber: 100, runAttempt: 1,
+        status: 'COMPLETED', conclusion: 'FAILURE', startedAt: '2026-06-10T10:00:00Z', completedAt: '2026-06-10T10:03:00Z' }),
+      run({ name: 'U (shard/8)', rawName: 'U (2/8)', workflowName: 'CI', runNumber: 100, runAttempt: 2,
+        status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-06-10T10:10:00Z', completedAt: '2026-06-10T10:13:00Z' }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.shardCount).toBe(2);          // 2 distinct shards
+    expect(out[0]!.conclusion).toBe('SUCCESS');  // shard 2's STALE failure dropped
+  });
+});
