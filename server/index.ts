@@ -5,6 +5,7 @@ import { loadConfig, resolveOwners, writeConfigPatch, configFileSources,
 import { createTokenSource, AppJwtSigner, InstallationRegistry, type TokenProvider } from './auth';
 import { GithubClient } from './github';
 import { ClientRouter } from './client-router';
+import { readyAndAutoMerge } from './pr-actions';
 import { HistoryStore } from './history';
 import { DeployWatcher } from './deploy-watcher';
 import { Poller, describeError } from './poller';
@@ -220,6 +221,17 @@ async function main() {
       secret: webhookSecret,
       nudge: (route) => poller.nudge(route),
     } : undefined,
+    // ready+auto-merge write-action — routed to the PR owner's installation
+    // client (App mode) or the single shared client (gh/env).
+    prActions: {
+      readyAndAutoMerge: (input) => {
+        const client = router.clientFor(input.owner);
+        if (!client) {
+          return Promise.reject(new Error(`no installation covers ${input.owner}`));
+        }
+        return readyAndAutoMerge(client, input);
+      },
+    },
     restart: {},
   });
   // One listener per bind host (default loopback only; add a Tailscale IP to

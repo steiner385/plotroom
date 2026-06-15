@@ -71,6 +71,17 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 }
 .sub { font-size: 11px; color: var(--muted); margin-top: 4px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* --- Ready + auto-merge action (drafts) --- */
+.pr-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.pr-ready-merge { font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+  color: #fff; background: var(--accent); border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 10px; }
+.pr-ready-merge:hover:not(:disabled) { filter: brightness(1.08); }
+.pr-ready-merge:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+.pr-action-blocked { font-size: 11px; color: var(--muted); }
+.pr-action-msg { font-size: 11px; }
+.pr-action-msg.ok { color: var(--done); }
+.pr-action-msg.err { color: var(--fail); }
 /* --- Check Gantt (expanded panel, V4) --- */
 .checks { list-style: none; margin: 0; padding: 6px 14px 10px; border-top: 1px solid var(--border);
   font-size: 12px; }

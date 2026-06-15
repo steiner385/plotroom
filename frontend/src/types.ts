@@ -59,6 +59,10 @@ export interface PrTimeline {
 export interface PrView {
   repo: string; number: number; title: string; url: string;
   stage: StageResult;
+  /** GitHub mergeStateStatus (…|DIRTY|CLEAN|UNKNOWN|DRAFT) for OPEN PRs; null for
+   *  merged-PR views and pre-upgrade payloads. Gates the ready+auto-merge button:
+   *  disabled when DIRTY (conflict). Optional to tolerate older payloads. */
+  mergeStateStatus?: string | null;
   queueAheadCount: number | null;
   checks: CheckView[];
   /** Per-PR waterfall spine (issue #50) — merged PRs only; null for open PRs.

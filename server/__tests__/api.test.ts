@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createApp } from '../api';
+import { PermissionError } from '../pr-actions';
 import type { DashboardState } from '../poller';
 
 const STATE: DashboardState = {
@@ -683,6 +684,79 @@ describe('POST /api/cost/actuals', () => {
     const app = createApp({ getState: () => STATE, bus: new EventEmitter() });
     const res = await request(app).post('/api/cost/actuals')
       .send({ date: '2026-06-11', dollars: 1 });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/pr/ready-merge', () => {
+  const okResult = { markedReady: true, autoMergeArmed: true, alreadyArmed: false,
+    cleanReadyToMerge: false, state: 'BLOCKED' };
+
+  it('passes a valid body through to the capability and returns its result', async () => {
+    const readyAndAutoMerge = vi.fn().mockResolvedValue(okResult);
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge } });
+    const res = await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 42 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject(okResult);
+    expect(readyAndAutoMerge).toHaveBeenCalledWith(
+      { owner: 'acme', repo: 'widgets', number: 42, mergeMethod: undefined });
+  });
+
+  it('forwards an explicit mergeMethod', async () => {
+    const readyAndAutoMerge = vi.fn().mockResolvedValue(okResult);
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge } });
+    await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 42, mergeMethod: 'REBASE' });
+    expect(readyAndAutoMerge).toHaveBeenCalledWith(
+      expect.objectContaining({ mergeMethod: 'REBASE' }));
+  });
+
+  it('400s on a malformed repo or number', async () => {
+    const readyAndAutoMerge = vi.fn();
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge } });
+    for (const body of [{ repo: 'widgets', number: 1 }, { repo: 'a/b', number: 0 },
+      { repo: 'a/b', number: -3 }, { number: 1 }, { repo: 'a/b/c', number: 1 }]) {
+      const res = await request(app).post('/api/pr/ready-merge').send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(readyAndAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it('400s on an invalid mergeMethod', async () => {
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge: vi.fn() } });
+    const res = await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 1, mergeMethod: 'FASTFORWARD' });
+    expect(res.status).toBe(400);
+  });
+
+  it('maps a PermissionError to 403', async () => {
+    const readyAndAutoMerge = vi.fn().mockRejectedValue(new PermissionError('needs pull_requests:write'));
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge } });
+    const res = await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 42 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/pull_requests:write/);
+  });
+
+  it('maps a not-found error to 404', async () => {
+    const readyAndAutoMerge = vi.fn().mockRejectedValue(new Error('PR acme/widgets#9 not found'));
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      prActions: { readyAndAutoMerge } });
+    const res = await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 9 });
+    expect(res.status).toBe(404);
+  });
+
+  it('is absent (404) when no prActions capability is wired', async () => {
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter() });
+    const res = await request(app).post('/api/pr/ready-merge')
+      .send({ repo: 'acme/widgets', number: 1 });
     expect(res.status).toBe(404);
   });
 });
