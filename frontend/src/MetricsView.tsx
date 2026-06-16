@@ -1143,8 +1143,10 @@ export function MetricsView({ now, focusCostNonce }: {
               </tbody>
             </table>
             <p className="metric-note">
-              ≥99% green over ≥50 distinct runs, ranked by runner-minutes spent.
-              Advisory — a green check may still guard against rare regressions; review before demoting.
+              ≥99% green over ≥50 distinct runs, ranked by runner-minutes spent. Only
+              moves that keep the merge-queue gate are suggested — a merge-queue check
+              is never demoted off the gate. Advisory — a green check may still guard
+              rare regressions; review before demoting.
             </p>
           </div>
         ))}

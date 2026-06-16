@@ -12,6 +12,13 @@
  * excluded (see SuccessStat), so a FLAKY check — which has a failed attempt in
  * the window — drops below the threshold and never qualifies. That keeps this
  * lane cleanly distinct from the flake lane: flaky ≠ demotable.
+ *
+ * GATE SAFETY (see demotionTarget): the detector never proposes a demotion that
+ * removes a merge gate. A merge_group check is the terminal pre-land gate and is
+ * never suggested for a post-merge tier; a pull_request check is suggested only
+ * when the same check still gates in the merge queue, so the suggestion can only
+ * ever move WHERE a green check runs, never leave it ungated. "Green gate" is
+ * survivorship — evidence the control works, not that it is removable.
  */
 
 /** Minimum distinct runs in the window for a check to be eligible — a long green
@@ -36,16 +43,42 @@ export interface SuccessStat {
   sumDurationSecs: number;
 }
 
-/** The lower-frequency tier suggested for a given trigger event. Events absent
- *  from the ladder have no cheaper tier the dashboard understands, so a check on
- *  such an event never becomes a candidate (e.g. an already-nightly `schedule`
- *  job — we can't tell nightly from weekly by event alone). */
+/**
+ * The lower-frequency tier a candidate may be demoted to — GATE-AWARE.
+ *
+ * The key safety rule: a `merge_group` check is the **terminal pre-land gate**
+ * (the merge queue runs the required `ci` rollup on the merge_group ref, and
+ * these jobs are its `needs`). A post-merge tier (nightly) runs AFTER merge and
+ * AFTER main auto-deploys, so demoting a queue gate to nightly converts a
+ * *preventive* control into a *detective* one — broken/non-compliant code would
+ * merge and deploy before the check ever runs. "100% green" on a gate is
+ * survivorship (the gate is green because it's blocking the failures), not
+ * evidence it's removable. So we NEVER suggest demoting a merge_group check.
+ *
+ * A `pull_request` check is only safe to demote to "merge queue only" when the
+ * SAME check still runs on `merge_group` (the gate remains in the queue — the
+ * #7534 pattern). If it runs only on PRs, demoting it off PRs would ungate it
+ * entirely, so we suppress it.
+ *
+ * A `push` check runs post-merge already (a main backstop, not a gate), so
+ * demoting it to nightly only reduces backstop frequency — allowed.
+ *
+ * Returns null when no SAFE demotion exists for this (check, event).
+ */
 interface Ladder { currentTier: string; suggestedTier: string; }
-export const DEMOTION_LADDER: Record<string, Ladder> = {
-  pull_request: { currentTier: 'every PR push',          suggestedTier: 'merge queue only' },
-  push:         { currentTier: 'every push to main',     suggestedTier: 'nightly' },
-  merge_group:  { currentTier: 'every merge-queue build', suggestedTier: 'nightly' },
-};
+function demotionTarget(stat: SuccessStat, gatedInQueue: Set<string>): Ladder | null {
+  if (stat.event === 'pull_request') {
+    // Safe ONLY if the gate remains in the merge queue.
+    if (!gatedInQueue.has(stat.name)) return null;
+    return { currentTier: 'every PR push', suggestedTier: 'merge queue only' };
+  }
+  if (stat.event === 'push') {
+    return { currentTier: 'every push to main', suggestedTier: 'nightly' };
+  }
+  // merge_group (the gate) and any other event: no safe demotion from success
+  // data alone.
+  return null;
+}
 
 /** One demotion candidate, projected to the serializable facts the UI ships. */
 export interface DemotionCandidate {
@@ -69,14 +102,21 @@ export const DEMOTION_DEFAULTS: DemotionConfig = {
 export function computeDemotionCandidates(
   stats: SuccessStat[], cfg: DemotionConfig = DEMOTION_DEFAULTS,
 ): DemotionCandidate[] {
+  // Check NAMES that run on merge_group — i.e. still gate in the queue. Presence
+  // (not greenness) is what matters: a gate that runs at all keeps protecting,
+  // so a PR-tier demotion of the same check leaves the queue gate intact. Built
+  // from the FULL stats list, not just candidates.
+  const gatedInQueue = new Set(
+    stats.filter((s) => s.event === 'merge_group' && s.totalRuns > 0).map((s) => s.name),
+  );
   const out: DemotionCandidate[] = [];
   for (const s of stats) {
-    const ladder = DEMOTION_LADDER[s.event];
-    if (!ladder) continue;                       // no cheaper tier we understand
     if (s.totalRuns < cfg.minRuns) continue;     // not enough history to trust
     const greenRuns = s.totalRuns - s.failingRuns;
     const successPct = s.totalRuns ? (greenRuns / s.totalRuns) * 100 : 0;
     if (successPct < cfg.minSuccessPct) continue; // not green enough
+    const ladder = demotionTarget(s, gatedInQueue);
+    if (!ladder) continue;                        // no SAFE demotion (gate / would ungate)
     const minutes = Math.round(s.sumDurationSecs / 60);
     out.push({
       name: s.name,
