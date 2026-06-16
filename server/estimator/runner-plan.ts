@@ -23,6 +23,24 @@ export const RUNNER_JOB_KEYS = {
 } as const;
 export type RunnerJobKey = keyof typeof RUNNER_JOB_KEYS;
 
+/** Display/context metadata for each routed job: the real CI check name and the
+ *  reusable workflow that owns its `runs-on` (where the
+ *  `fromJSON(vars.RUNNER_MAP)['<key>']` wiring lives). Keyed identically to
+ *  RUNNER_JOB_KEYS — the contract test asserts the key sets match AND that each
+ *  `workflow` actually wires its key. The UI groups the spot/on-demand picker by
+ *  `workflow` and labels rows with `label` instead of the bare key. */
+export const RUNNER_JOB_META: Record<RunnerJobKey, { label: string; workflow: string }> = {
+  unit:         { label: 'test: unit',            workflow: '_static-checks.yml' },
+  integration:  { label: 'test: integration',     workflow: '_integration-tests.yml' },
+  server:       { label: 'test: server',          workflow: '_static-checks.yml' },
+  tsc:          { label: 'types: tsc',            workflow: '_static-checks.yml' },
+  build:        { label: 'build: production',     workflow: '_build.yml' },
+  'build-test': { label: 'build: test bundle',    workflow: '_build-test.yml' },
+  db:           { label: 'db: migrations',        workflow: '_db-migrations.yml' },
+  eslint:       { label: 'lint: eslint',          workflow: '_fast-checks.yml' },
+  security:     { label: 'security: audit',       workflow: '_static-checks.yml' },
+};
+
 export interface RunnerJobInput { key: string; p90Secs: number | null; }
 export interface RunnerPlanConfig {
   shedThresholdMinutes: number;

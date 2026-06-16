@@ -503,6 +503,10 @@ export interface PlanRow {
   source: 'auto' | 'override';
   /** True while the job doesn't have enough samples to produce a reliable p90. */
   collecting: boolean;
+  /** Real CI check name (e.g. 'test: unit'); absent for keys without metadata. */
+  label?: string;
+  /** Reusable workflow that owns this job's runs-on (e.g. '_static-checks.yml'). */
+  workflow?: string;
 }
 
 /** Full response of `GET /api/runner-plan`. */

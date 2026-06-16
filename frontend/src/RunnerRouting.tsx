@@ -22,6 +22,20 @@ function overrideState(row: PlanRow): 'spot' | 'ondemand' | 'auto' {
   return 'auto';
 }
 
+/** Group plan rows by their owning workflow, preserving first-seen order (both
+ *  of groups and of rows within a group). Rows without `workflow` metadata fall
+ *  into a trailing 'other' group so nothing is silently dropped. */
+export function groupByWorkflow(plan: PlanRow[]): { workflow: string; rows: PlanRow[] }[] {
+  const groups: { workflow: string; rows: PlanRow[] }[] = [];
+  for (const row of plan) {
+    const workflow = row.workflow ?? 'other';
+    let group = groups.find((g) => g.workflow === workflow);
+    if (!group) { group = { workflow, rows: [] }; groups.push(group); }
+    group.rows.push(row);
+  }
+  return groups;
+}
+
 // ---- component --------------------------------------------------------------
 
 export function RunnerRouting() {
@@ -143,17 +157,27 @@ export function RunnerRouting() {
         </span>
       </div>
 
-      {/* Job list */}
+      {/* Job list — grouped by the reusable workflow that owns each job's
+          runs-on, so the picker reads workflow → check rather than a flat list
+          of bare keys. Group order follows first appearance in the plan. */}
       <div
         role="group"
         aria-label="Job runner assignments"
         className="runner-job-list"
       >
-        {plan.map((row) => {
+        {groupByWorkflow(plan).map((group) => (
+          <div key={group.workflow} className="runner-job-group">
+            <div className="runner-job-group-header" data-testid={`runner-group-${group.workflow}`}>
+              {group.workflow}
+            </div>
+            {group.rows.map((row) => {
           const state = overrideState(row);
           return (
             <div key={row.key} className="runner-job-row">
-              <span className="runner-job-key">{row.key}</span>
+              <span className="runner-job-label">
+                {row.label ?? row.key}
+                {row.label && <span className="runner-job-key-sub">{row.key}</span>}
+              </span>
 
               <span
                 data-testid={`runner-decision-${row.key}`}
@@ -214,7 +238,9 @@ export function RunnerRouting() {
               )}
             </div>
           );
-        })}
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );

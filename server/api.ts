@@ -9,7 +9,8 @@ import { resolveMetricsQuery, type MetricsBucket, type MetricsPayload, type Metr
 import { verifySignature, routeEvent, type WebhookRoute } from './webhooks';
 import { PermissionError, type MergeMethod, type ReadyMergeInput, type ReadyMergeResult } from './pr-actions';
 import type { RoutingState } from './runner-routing';
-import type { RunnerPlan } from './estimator/runner-plan';
+import type { RunnerPlan, RunnerJobKey } from './estimator/runner-plan';
+import { RUNNER_JOB_META } from './estimator/runner-plan';
 
 /**
  * Wiring for /api/config. Note the security boundary lives HERE (and in
@@ -340,7 +341,14 @@ export function createApp(opts: {
     app.get('/api/runner-plan', (_req, res) => {
       const s = rr.state();
       const { map, plan } = rr.plan();
-      res.json({ plan, map, enabled: s.enabled, shedCount: s.shedCount,
+      // Enrich each row with display context (real check name + owning workflow)
+      // so the UI can group the picker by workflow. Metadata is keyed by job key;
+      // an unknown key (shouldn't happen — contract-tested) simply omits context.
+      const enrichedPlan = plan.map((row) => {
+        const meta = RUNNER_JOB_META[row.key as RunnerJobKey];
+        return meta ? { ...row, label: meta.label, workflow: meta.workflow } : row;
+      });
+      res.json({ plan: enrichedPlan, map, enabled: s.enabled, shedCount: s.shedCount,
         shedThresholdMinutes: s.shedThresholdMinutes, reclaimRatePct: s.reclaimRatePct,
         lastPushedAt: s.lastPushedAt, lastPushedHash: s.lastPushedHash,
         lastVerifiedAt: s.lastVerifiedAt, lastError: s.lastError });
