@@ -5,6 +5,7 @@
 import { useMemo, useState } from 'react';
 import type { DashboardState, PrView, CheckView } from '../../types';
 import { CheckGantt } from '../../CheckGantt';
+import { clusterFailures } from './clustering';
 
 const FAILED = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'stale']);
 
@@ -30,6 +31,7 @@ export interface DiagnoseViewProps { state: DashboardState; focusedRepo?: string
 
 export function DiagnoseView({ state, focusedRepo }: DiagnoseViewProps) {
   const prs = useMemo(() => prsForDiagnose(state, focusedRepo), [state, focusedRepo]);
+  const clusters = useMemo(() => clusterFailures(state, 3), [state]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const key = (p: PrView) => `${p.repo}#${p.number}`;
   const selected = prs.find((p) => key(p) === selectedKey) ?? prs[0] ?? null;
@@ -37,6 +39,19 @@ export function DiagnoseView({ state, focusedRepo }: DiagnoseViewProps) {
 
   return (
     <div className="diagnose-view">
+      {clusters.length > 0 && (
+        <section className="failure-clusters" role="status" aria-label="Failure clusters">
+          <strong>⚠ Systemic failures</strong> — likely one incident, not {clusters.reduce((n, c) => n + c.prCount, 0)} separate problems:
+          <ul role="list">
+            {clusters.map((c) => (
+              <li key={c.check} className="failure-cluster">
+                <span className="cluster-check">{c.check}</span> failing on <strong>{c.prCount} PRs</strong>
+                {c.repos.length > 1 ? ` across ${c.repos.length} repos` : ''}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <ul className="diagnose-pr-list" role="list" aria-label="Open pull requests">
         {prs.map((p) => (
           <li key={key(p)}
