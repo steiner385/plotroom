@@ -2,6 +2,8 @@ import Database from 'better-sqlite3';
 import { median, percentile } from './math';
 import type { SuccessStat } from './estimator/demotion-candidates';
 
+export type { SuccessStat } from './estimator/demotion-candidates';
+
 export interface Expected { p10: number; p50: number; p90: number; n: number; }
 export interface MergedPrInput {
   repo: string; number: number; title: string; url: string;

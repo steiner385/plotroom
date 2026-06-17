@@ -6,3 +6,4 @@ export { narrowEvents } from './narrow-events';
 export { expandMatrix } from './expand-matrix';
 export { deriveStaticGraph } from './derive-static';
 export { gatingClosure } from './gating';
+export * from './derived';
