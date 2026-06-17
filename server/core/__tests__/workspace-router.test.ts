@@ -87,6 +87,30 @@ describe('workspace-router (integration, contracts/api.md)', () => {
     expect(res.status).toBe(409);
   });
 
+  it('GET /security audits the model workflow files and reports findings + confidence', async () => {
+    const VULN = `name: CI
+on: { pull_request: {}, pull_request_target: {}, merge_group: {} }
+jobs:
+  e2e: { runs-on: ubuntu-latest, steps: [{ uses: actions/checkout@v4 }] }
+  ci: { name: ci, needs: [e2e], runs-on: ubuntu-latest }
+`;
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'),
+      fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? VULN : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(),
+      flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const deriver = new ModelDeriver(deps);
+    const prClient: PrClient = { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn() as unknown as PrClient['openDraftPr'] };
+    const a = express(); a.use(express.json()); a.use('/api/workspace', createWorkspaceRouter({ deriver, prClient }));
+    const res = await request(a).get('/api/workspace/security?repo=o/r');
+    expect(res.status).toBe(200);
+    const kinds = res.body.findings.map((f: { kind: string }) => f.kind);
+    expect(kinds).toContain('pull_request_target');
+    expect(kinds).toContain('unpinned-action');
+    expect(res.body.scannedFiles).toBeGreaterThan(0);
+  });
+
   it('POST /draft-pr 409s with headSha when HEAD drifts (FR-026)', async () => {
     const res = await request(app(['sha-1', 'sha-2'])).post('/api/workspace/draft-pr')
       .send({ repo: 'o/r', dryRun: false, intent: { kind: 'tier', check: 'e2e', jobId: 'e2e', fromTierId: 'pr', targetEvent: 'merge_group' } });

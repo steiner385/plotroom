@@ -8,6 +8,7 @@ import { ModelDeriver } from '../model/derive';
 import { simulateTierMove, type TierMove } from '../model/simulate';
 import { buildPrompt, type PromptInput } from '../actions/prompt';
 import { prepareDraftEdit, openDraftPr, type PrClient, type TierAssignIntent } from '../actions/draftPr';
+import { auditWorkflowSecurity } from '../model/security';
 
 export interface WorkspaceRouterDeps {
   deriver: ModelDeriver;
@@ -52,6 +53,22 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     const pinned = await deps.deriver.deriveAtHead(repo);
     if (!pinned) return res.status(404).json({ error: 'no derivable model' });
     res.json({ prompt: buildPrompt(repo, pinned.model, finding) });
+  });
+
+  // GET /security?repo= — CI security audit (Group M) of the model's workflow
+  // files at the pinned SHA. Tier-2 (SHA-pinned) per the review; per-finding
+  // confidence, never a false "clean" (FR-040/SC-016).
+  r.get('/security', async (req, res) => {
+    const repo = repoOf(req, res); if (!repo) return;
+    const pinned = await deps.deriver.deriveAtHead(repo);
+    if (!pinned) return res.status(404).json({ error: 'no derivable model' });
+    const files = [...new Set((pinned.model.checkMeta ?? []).flatMap((m) => m.provenance.map((p) => p.file)))];
+    const findings = [];
+    for (const file of files) {
+      const yaml = await deps.prClient.fetchWorkflowAtSha(repo, file, pinned.sourceSha);
+      if (yaml != null) findings.push(...auditWorkflowSecurity(yaml, file));
+    }
+    res.json({ repo, sourceSha: pinned.sourceSha, scannedFiles: files.length, findings });
   });
 
   // POST /draft-pr — { repo, intent, dryRun } → preview diff OR open a draft PR (FR-026)
