@@ -133,5 +133,7 @@ describe('KinDash golden model (keystone exit gate)', () => {
       expect(buildProd, 'expected a gate matching /build: production/i').toBeDefined();
       expect(buildProd?.events).toContain('merge_group');
     },
+    // ~16 sequential gh fetches; the 5s default times out under parallel suite load.
+    30_000,
   );
 });

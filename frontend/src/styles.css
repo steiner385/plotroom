@@ -917,3 +917,18 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .pm-legend .pm-cond { color: var(--amber); font-weight: 600; }
 .pm-legend .pm-adv { color: var(--muted); font-weight: 600; }
 .pm-legend .pm-drift { color: var(--fail); font-weight: 600; }
+
+/* --- Protection map: findings rail --- */
+.pm-body { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+.pm-findings { flex: 1 1 280px; min-width: 260px; max-width: 460px; }
+.pm-findings h3 { font-size: 13px; margin: 0 0 8px; color: var(--text); }
+.pm-findings-count { color: var(--muted); font-weight: 400; }
+.pm-findings-empty { color: var(--muted); font-size: 12px; }
+.pm-findings ul { list-style: none; margin: 0; padding: 0; }
+.pm-finding { display: grid; grid-template-columns: 1.4em 1fr; gap: 2px 6px;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.pm-finding:last-child { border-bottom: none; }
+.pm-finding-icon { grid-row: span 2; }
+.pm-finding-check { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.pm-finding-detail { color: var(--muted); font-size: 11px; }
+.pm-finding-drift .pm-finding-check { color: var(--fail); }

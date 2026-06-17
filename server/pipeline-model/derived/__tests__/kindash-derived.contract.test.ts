@@ -57,5 +57,5 @@ describe('KinDash DerivedModel (assembly integration)', () => {
     // surface as conditional rather than gate/advisory.
     const conditionalCells = model.cells.filter((c) => c.state === 'conditional');
     expect(conditionalCells.length).toBeGreaterThan(0);
-  });
+  }, 30_000); // ~16 sequential gh fetches; 5s default times out under parallel suite load
 });
