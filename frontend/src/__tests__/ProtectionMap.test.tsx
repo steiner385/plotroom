@@ -41,7 +41,7 @@ function mockFetch(model: DerivedModel | { error: string }, status = 200) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('ProtectionMap', () => {
-  it('renders the matrix with state-coded cells and a summary', async () => {
+  it('renders the matrix with state-coded cells and a health strip', async () => {
     mockFetch(MODEL);
     render(<ProtectionMap />);
     await screen.findByTestId('pm-grid');
@@ -50,10 +50,19 @@ describe('ProtectionMap', () => {
     // a11y is conditional at PR, absent at Queue
     expect(screen.getByTestId('pm-cell-a11y: axe-pr')).toHaveAttribute('data-state', 'conditional');
     expect(screen.getByTestId('pm-cell-a11y: axe-queue')).toHaveAttribute('data-state', 'absent');
-    // summary chips
-    expect(screen.getByTestId('pm-summary').textContent).toMatch(/2 checks × 2 tiers/);
-    expect(screen.getByText('2 gate')).toBeInTheDocument();
-    expect(screen.getByText('1 conditional')).toBeInTheDocument();
+    // health strip: verdict (drift present) + headline stats (2 gates, 1 drift)
+    const strip = screen.getByTestId('pm-summary');
+    expect(within(strip).getByText('1 drift')).toBeInTheDocument(); // verdict
+    expect(strip.textContent).toMatch(/2gates/);
+    expect(strip.textContent).toMatch(/1drift/);
+  });
+
+  it('states the merge contract (which checks block the queue)', async () => {
+    mockFetch(MODEL);
+    render(<ProtectionMap />);
+    const contract = await screen.findByTestId('pm-contract');
+    expect(contract.textContent).toMatch(/Blocks merge \(1\)/); // build:production gates at queue
+    expect(contract.textContent).toMatch(/build: production/);
   });
 
   it('marks drift cells', async () => {
