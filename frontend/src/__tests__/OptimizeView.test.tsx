@@ -38,6 +38,10 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
       if (check === 'build') throw new Error('"build" is a required merge gate — cannot quarantine it');
       return { dryRun: true as const, diff: '@@ e2e quarantine — continue-on-error @@', baseSha: 'abc' };
     }),
+    plan: vi.fn(async (_r: string, moves: { check: string }[]) => ({
+      combinedCostDeltaMinutes: -5000, legal: !moves.some((m) => m.check === 'build'),
+      reason: moves.some((m) => m.check === 'build') ? 'build: required-gate' : undefined, results: [],
+    })),
     ...over,
   };
 }
@@ -78,6 +82,22 @@ describe('OptimizeView (US4 — drives /api/workspace loop)', () => {
     const btns = await screen.findAllByText('Quarantine (flaky)');
     fireEvent.click(btns[1]); // build (required gate)
     expect(await screen.findByText(/Can’t quarantine build/)).toHaveTextContent(/required merge gate/);
+  });
+
+  it('multi-change planning (N2): composites selected demotes and shows the combined saving', async () => {
+    render(<OptimizeView repo="o/r" api={fakeApi()} />);
+    const checkboxes = await screen.findAllByLabelText(/Add .* to plan/);
+    fireEvent.click(checkboxes[0]); // e2e
+    fireEvent.click(screen.getByText(/Simulate plan \(1 change\)/));
+    expect(await screen.findByText(/Plan is safe — combined saves 5,000 min/)).toBeInTheDocument();
+  });
+
+  it('multi-change planning (N2): surfaces a blocked composite plan', async () => {
+    render(<OptimizeView repo="o/r" api={fakeApi()} />);
+    const checkboxes = await screen.findAllByLabelText(/Add .* to plan/);
+    fireEvent.click(checkboxes[1]); // build (required gate)
+    fireEvent.click(screen.getByText(/Simulate plan/));
+    expect(await screen.findByText(/Plan blocked — build: required-gate/)).toBeInTheDocument();
   });
 
   it('surfaces a load error', async () => {

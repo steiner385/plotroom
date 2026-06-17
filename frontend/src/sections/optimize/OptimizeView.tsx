@@ -27,6 +27,8 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
   const [diff, setDiff] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [quarantine, setQuarantine] = useState<{ check: string; diff?: string; error?: string } | null>(null);
+  const [planChecks, setPlanChecks] = useState<Set<string>>(new Set());
+  const [plan, setPlan] = useState<{ combinedCostDeltaMinutes: number; legal: boolean; reason?: string } | null>(null);
 
   useEffect(() => {
     if (!repo) return;
@@ -63,6 +65,19 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
     finally { setBusy(false); }
   }
 
+  function togglePlan(check: string) {
+    setPlan(null);
+    setPlanChecks((prev) => { const next = new Set(prev); next.has(check) ? next.delete(check) : next.add(check); return next; });
+  }
+  async function simulatePlan() {
+    if (!repo || !model || planChecks.size === 0) return;
+    const moves = [...planChecks].map((check) => ({ check, fromTierId: homeTier(model, check) ?? 'pr', toTierId: null }));
+    setBusy(true);
+    try { setPlan(await api.plan(repo, moves)); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
   if (!repo) return <div className="optimize-view empty">Select a pipeline to optimize.</div>;
   if (error) return <div className="optimize-view error" role="alert">Couldn’t load the model: {error}</div>;
   if (!model) return <div className="optimize-view" role="status">Deriving the pipeline model…</div>;
@@ -73,12 +88,27 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
       <ul className="optimize-checks" role="list">
         {model.checks.map((c) => (
           <li key={c} className={c === selected ? 'optimize-check active' : 'optimize-check'}>
+            <label className="plan-toggle">
+              <input type="checkbox" checked={planChecks.has(c)} onChange={() => togglePlan(c)} aria-label={`Add ${c} to plan`} />
+            </label>
             <span className="optimize-check-name">{c}</span>
             <button type="button" disabled={busy} onClick={() => simulate(c)}>Simulate demote</button>
             <button type="button" className="quarantine-btn" disabled={busy} onClick={() => doQuarantine(c)}>Quarantine (flaky)</button>
           </li>
         ))}
       </ul>
+      {planChecks.size > 0 && (
+        <section className="optimize-plan" aria-label="Multi-change plan">
+          <button type="button" disabled={busy} onClick={simulatePlan}>Simulate plan ({planChecks.size} change{planChecks.size === 1 ? '' : 's'})</button>
+          {plan && (
+            <p className={plan.legal ? 'plan-note legal' : 'plan-note illegal'} role="status">
+              {plan.legal
+                ? `Plan is safe — combined ${plan.combinedCostDeltaMinutes < 0 ? `saves ${(-plan.combinedCostDeltaMinutes).toLocaleString()}` : `adds ${plan.combinedCostDeltaMinutes.toLocaleString()}`} min`
+                : `Plan blocked — ${plan.reason}`}
+            </p>
+          )}
+        </section>
+      )}
       {quarantine && (
         <section className="optimize-quarantine" aria-label={`Quarantine ${quarantine.check}`}>
           {quarantine.error

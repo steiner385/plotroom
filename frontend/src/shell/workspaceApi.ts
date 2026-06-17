@@ -64,6 +64,8 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
     policy: (repo: string) => fetchImpl(`${base}/policy?${q(repo)}`).then(json<PolicyDto>),
     quarantineDryRun: (repo: string, check: string, jobId: string) =>
       fetchImpl(`${base}/quarantine`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, check, jobId, dryRun: true }) }).then(json<{ dryRun: true; diff: string; baseSha: string }>),
+    plan: (repo: string, moves: TierMoveDto[]) =>
+      fetchImpl(`${base}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, moves }) }).then(json<{ combinedCostDeltaMinutes: number; legal: boolean; reason?: string; results: SimResultDto[] }>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;
