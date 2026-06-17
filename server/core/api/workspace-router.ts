@@ -13,6 +13,7 @@ import { buildSelfHealth, type ApiRateLimit } from '../model/selfHealth';
 import { reconcileRuleset } from '../model/ruleset';
 import { forecastTrend, type Point } from '../analytics/forecast';
 import { buildChangelog, buildAuditLog, type ChangelogRow, type AuditRow } from '../analytics/changelog';
+import { attributeOutcome, summarizeAccuracy, type AppliedChange } from '../analytics/outcomes';
 
 export interface WorkspaceRouterDeps {
   deriver: ModelDeriver;
@@ -30,6 +31,8 @@ export interface WorkspaceRouterDeps {
   changelog?: (repo: string) => Promise<ChangelogRow[]>;
   /** the tool's own action-audit rows (Group L2). */
   auditLog?: (repo: string) => Promise<AuditRow[]>;
+  /** applied-change ledger for closed-loop outcome attribution (Group H). */
+  outcomes?: (repo: string) => Promise<AppliedChange[]>;
 }
 
 function repoOf(req: Request, res: Response): string | null {
@@ -98,6 +101,15 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     const changes = deps.changelog ? await deps.changelog(repo) : [];
     const audit = deps.auditLog ? await deps.auditLog(repo) : [];
     res.json({ repo, changelog: buildChangelog(changes), audit: buildAuditLog(audit) });
+  });
+
+  // GET /outcomes?repo= — applied-change ledger + projected-vs-realized accuracy
+  // (Group H / FR-034). Degrades to an empty ledger; the recommender-usable flag
+  // gates whether outcomes may feed finding rankings (advisory until proven).
+  r.get('/outcomes', async (req, res) => {
+    const repo = repoOf(req, res); if (!repo) return;
+    const ledger = deps.outcomes ? await deps.outcomes(repo) : [];
+    res.json({ repo, outcomes: ledger.map(attributeOutcome), accuracy: summarizeAccuracy(ledger) });
   });
 
   // GET /self — the tool's own health (Group O / FR-043). Always available; no repo.

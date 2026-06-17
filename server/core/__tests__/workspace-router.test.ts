@@ -110,6 +110,24 @@ describe('workspace-router (integration, contracts/api.md)', () => {
     expect(res.body).toMatchObject({ changelog: [], audit: [] });
   });
 
+  it('GET /outcomes attributes projected-vs-realized from an injected ledger (Group H)', async () => {
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? CI : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(), flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const a = express(); a.use(express.json());
+    a.use('/api/workspace', createWorkspaceRouter({
+      deriver: new ModelDeriver(deps),
+      prClient: { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn() as unknown as PrClient['openDraftPr'] },
+      outcomes: async () => [{ prNumber: 5, check: 'e2e', projected: { costDeltaMinutes: -1000, coverageDelta: 0 }, realized: { costDeltaMinutes: -980, coverageDelta: 0 }, windowDays: 21 }],
+    }));
+    const res = await request(a).get('/api/workspace/outcomes?repo=o/r');
+    expect(res.status).toBe(200);
+    expect(res.body.outcomes[0].costAccuracy).toBeGreaterThan(0.9);
+    expect(res.body.outcomes[0].caveat).toMatch(/confounded/);
+    expect(res.body.accuracy).toMatchObject({ count: 1, recommenderUsable: false });
+  });
+
   it('GET /forecast degrades to available:false when no cost series is wired', async () => {
     const res = await request(app()).get('/api/workspace/forecast?repo=o/r');
     expect(res.status).toBe(200);
