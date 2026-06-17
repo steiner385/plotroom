@@ -47,6 +47,10 @@ export interface CheckNode {
   callerJobId: string;          // the rollup-file job that owns this leaf
   triggers: TriggerSpec;        // owning workflow triggers, narrowed by caller if:
   provenance: ProvenanceAnchor[];
+  /** 'low' when resolution is incomplete: complex if:, unexpandable matrix, unresolved
+   *  uses:, a reusable-workflow callee leaf that itself has `uses:` (nested reusable
+   *  workflow — not expanded further), or a `uses:` caller that carries its own
+   *  `strategy.matrix` (caller fan-out is unmodelled). */
   confidence: Confidence;
 }
 

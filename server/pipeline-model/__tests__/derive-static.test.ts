@@ -50,4 +50,89 @@ describe('deriveStaticGraph', () => {
     expect(x.confidence).toBe('low');
     expect(x.provenance).toEqual([{ file: 'ci.yml', jobId: 'x' }]);
   });
+
+  // Fix #1: callee leaf that itself has uses: (nested reusable workflow) → confidence:'low'
+  it('a callee leaf with uses: (nested reusable workflow) is marked low-confidence', () => {
+    const deepCallee = `
+on:
+  workflow_call:
+jobs:
+  nested-leaf:
+    uses: ./.github/workflows/_deep.yml
+`;
+    const callee = `
+on:
+  workflow_call:
+jobs:
+  leaf-with-uses:
+    uses: ./.github/workflows/_deep-callee.yml
+    name: "nested leaf"
+`;
+    const rollup = `
+on:
+  pull_request:
+jobs:
+  caller:
+    uses: ./.github/workflows/_callee.yml
+`;
+    const g = deriveStaticGraph({
+      'ci.yml': rollup,
+      '_callee.yml': callee,
+      '_deep-callee.yml': deepCallee,
+    });
+    const node = g.checks.find((c) => c.checkName === 'caller / nested leaf')!;
+    expect(node).toBeDefined();
+    expect(node.confidence).toBe('low');
+  });
+
+  // Fix #2: uses: caller that also carries strategy.matrix → all emitted nodes low-confidence
+  it('a uses: caller with its own strategy.matrix emits low-confidence nodes', () => {
+    const callee = `
+on:
+  workflow_call:
+jobs:
+  leaf-job:
+    name: "leaf"
+    runs-on: ubuntu-latest
+`;
+    const rollup = `
+on:
+  pull_request:
+jobs:
+  caller:
+    uses: ./.github/workflows/_callee.yml
+    strategy:
+      matrix:
+        env: [qa, prod]
+`;
+    const g = deriveStaticGraph({ 'ci.yml': rollup, '_callee.yml': callee });
+    const nodes = g.checks.filter((c) => c.callerJobId === 'caller');
+    expect(nodes.length).toBeGreaterThan(0);
+    for (const node of nodes) {
+      expect(node.confidence).toBe('low');
+    }
+  });
+
+  // Fix #3: repeated values in a matrix dimension must produce distinct suffixes (no collision)
+  it('duplicate values in a matrix dim produce distinct (1/3),(2/3),(3/3) suffixes', () => {
+    const rollup = `
+on:
+  pull_request:
+jobs:
+  sharded:
+    name: "test: unit"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 1, 2]
+`;
+    const g = deriveStaticGraph({ 'ci.yml': rollup });
+    const names = g.checks.filter((c) => c.callerJobId === 'sharded').map((c) => c.checkName);
+    expect(names).toHaveLength(3);
+    expect(names).toContain('test: unit (1/3)');
+    expect(names).toContain('test: unit (2/3)');
+    expect(names).toContain('test: unit (3/3)');
+    // all three must be distinct (no collision)
+    expect(new Set(names).size).toBe(3);
+  });
 });

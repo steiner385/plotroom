@@ -42,4 +42,18 @@ jobs:
     expect(parseJobs('not: a workflow').jobs).toEqual([]);
     expect(parseJobs(':::nonsense:::').jobs).toEqual([]);
   });
+
+  // Fix #4: an empty-array matrix dimension is ignored (treated as no matrix)
+  it('an empty-array matrix dimension is ignored, matrix becomes null', () => {
+    const yaml = `
+jobs:
+  job-empty-dim:
+    strategy:
+      matrix:
+        shard: []
+`;
+    const { jobs } = parseJobs(yaml);
+    const job = jobs.find((j) => j.id === 'job-empty-dim')!;
+    expect(job.matrix).toBeNull();
+  });
 });

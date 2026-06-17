@@ -4,6 +4,15 @@ import { narrowEvents } from './narrow-events';
 import { expandMatrix } from './expand-matrix';
 import type { CheckNode, MatrixCoord, RawJob, StaticGraph, TriggerSpec } from './types';
 
+/**
+ * Derive a static CheckNode graph from a set of workflow YAML files.
+ *
+ * Limits (emitted as confidence:'low', never silently wrong):
+ *   - a reusable workflow that itself calls another reusable workflow (nested `uses:`)
+ *     is not expanded one level deeper; the node is kept with its name but marked low.
+ *   - a `uses:` caller with its own `strategy.matrix` is not fanned out; all emitted
+ *     nodes for that caller are marked low.
+ */
 export function deriveStaticGraph(
   files: Record<string, string>, opts: { rollupFile?: string } = {},
 ): StaticGraph {
@@ -43,7 +52,9 @@ export function deriveStaticGraph(
               { file: rollupFile, jobId: job.id },
               { file: calleeName, jobId: leaf.id, ...(inst.coord && Object.keys(inst.coord).length ? { matrixCoord: inst.coord } : {}) },
             ],
-            confidence: narrowed.confidence === 'low' ? 'low' : 'high',
+            // Fix #1: leaf itself has uses: → nested reusable workflow, unresolvable deeper.
+            // Fix #2: caller has its own matrix on a uses: job → fan-out unmodelled.
+            confidence: (narrowed.confidence === 'low' || leaf.uses != null || job.matrix != null) ? 'low' : 'high',
           });
         }
       }
@@ -64,17 +75,14 @@ export function deriveStaticGraph(
   return { rollupFile, checks, callerNeeds };
 }
 
-/** Expand one job into instances, computing a GitHub-style suffix `(i/n)` for the
- *  FIRST matrix dimension (the common shard pattern). No matrix → one bare instance. */
+/** Expand one job into instances, computing a GitHub-style suffix `(i/n)` using the
+ *  instance's POSITION in the expanded product (not indexOf, which collides on repeated
+ *  values). No matrix → one bare instance. */
 function expandLeaf(job: RawJob): { coord: MatrixCoord; suffix: string }[] {
   const coords = expandMatrix(job.matrix);
   if (!job.matrix) return coords.map((coord) => ({ coord, suffix: '' }));
-  const firstDim = Object.keys(job.matrix)[0]!;
-  const total = job.matrix[firstDim]!.length;
-  return coords.map((coord) => {
-    const idx = job.matrix![firstDim]!.indexOf(coord[firstDim]) + 1;
-    return { coord, suffix: ` (${idx}/${total})` };
-  });
+  const total = coords.length;
+  return coords.map((coord, i) => ({ coord, suffix: ` (${i + 1}/${total})` }));
 }
 
 function basename(usesPath: string): string {

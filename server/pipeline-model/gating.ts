@@ -19,8 +19,8 @@ export function gatingClosure(
   }
 
   const conditional = new Set(opts.conditionalCallerJobs ?? []);
-  const gatingCallerJobs = [...closure].filter((id) => !conditional.has(id)).sort();
-  const conditionalCallerJobs = [...closure].filter((id) => conditional.has(id)).sort();
+  const gatingCallerJobs = [...closure].filter((id) => !conditional.has(id)).sort((a, b) => a.localeCompare(b));
+  const conditionalCallerJobs = [...closure].filter((id) => conditional.has(id)).sort((a, b) => a.localeCompare(b));
 
   // A node gates (unconditionally OR conditionally) when its caller is in the
   // closure; report the events it runs at.

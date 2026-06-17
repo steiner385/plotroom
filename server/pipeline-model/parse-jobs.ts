@@ -34,7 +34,8 @@ function matrixDims(m: Record<string, unknown>): Record<string, unknown[]> | nul
   const dims: Record<string, unknown[]> = {};
   for (const [k, v] of Object.entries(m)) {
     if (k === 'include' || k === 'exclude') continue;
-    if (Array.isArray(v)) dims[k] = v as unknown[];
+    // Fix #4: ignore empty-array dims (they would zero the product; treat as no matrix)
+    if (Array.isArray(v) && v.length > 0) dims[k] = v as unknown[];
   }
   return Object.keys(dims).length ? dims : null;
 }
