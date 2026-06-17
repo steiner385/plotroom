@@ -942,3 +942,13 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .pm-ov.active { background: var(--accent-strong); color: #fff; }
 /* under an overlay the heat carries the signal — dim the state glyph so the tint reads */
 .pm-cell.pm-overlaid { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+
+/* --- Protection map: simulator --- */
+.pm-sim { margin-top: 16px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; max-width: 720px; }
+.pm-sim > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text); }
+.pm-sim-controls { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 6px; align-items: center; }
+.pm-sim-controls label { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.pm-sim-controls select { font: inherit; font-size: 11px; max-width: 220px; }
+.pm-sim-result { font-size: 12px; font-weight: 600; margin: 4px 0 2px; color: var(--muted); }
+.pm-sim-result.good { color: var(--done); }
+.pm-sim-result.bad { color: var(--amber); }

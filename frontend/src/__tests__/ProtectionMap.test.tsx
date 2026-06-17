@@ -93,6 +93,18 @@ describe('ProtectionMap', () => {
     expect(screen.getByTestId('pm-cell-build: production-pr').getAttribute('style') ?? '').not.toMatch(/background/);
   });
 
+  it('simulates a tier move and shows the projected cost/coverage delta', async () => {
+    mockFetch(MODEL);
+    render(<ProtectionMap />);
+    await screen.findByTestId('pm-grid');
+    // default check is build: production; move it away from Queue (1000 observed min, a gate)
+    fireEvent.change(screen.getByTestId('pm-sim-from'), { target: { value: 'queue' } });
+    const result = screen.getByTestId('pm-sim-result');
+    expect(result.getAttribute('data-cost-delta')).toBe('-1000');
+    expect(result.textContent).toMatch(/saves 1,?000 min/);
+    expect(result.textContent).toMatch(/loses gate at queue/);
+  });
+
   it('shows an error when the map cannot be derived', async () => {
     mockFetch({ error: 'no derivable ci.yml for x/y' }, 404);
     render(<ProtectionMap />);
