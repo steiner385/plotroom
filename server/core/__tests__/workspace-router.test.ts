@@ -87,6 +87,30 @@ describe('workspace-router (integration, contracts/api.md)', () => {
     expect(res.status).toBe(409);
   });
 
+  it('GET /forecast degrades to available:false when no cost series is wired', async () => {
+    const res = await request(app()).get('/api/workspace/forecast?repo=o/r');
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(false);
+  });
+
+  it('GET /forecast projects days-to-threshold from an injected series (Group J1)', async () => {
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? CI : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(), flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const a = express(); a.use(express.json());
+    a.use('/api/workspace', createWorkspaceRouter({
+      deriver: new ModelDeriver(deps),
+      prClient: { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn() as unknown as PrClient['openDraftPr'] },
+      costForecast: async () => ({ points: Array.from({ length: 30 }, (_, i) => ({ day: i, value: 100 + 10 * i })), thresholdValue: 500, unit: 'minutes' }),
+    }));
+    const res = await request(a).get('/api/workspace/forecast?repo=o/r');
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.daysToThreshold).toBe(11);
+    expect(res.body.confidence).toBe('high');
+  });
+
   it('GET /ruleset degrades to readable:false when no ruleset reader is wired (no silent mismatch)', async () => {
     const res = await request(app()).get('/api/workspace/ruleset?repo=o/r');
     expect(res.status).toBe(200);

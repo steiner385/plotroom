@@ -11,6 +11,7 @@ import { prepareDraftEdit, openDraftPr, type PrClient, type TierAssignIntent } f
 import { auditWorkflowSecurity } from '../model/security';
 import { buildSelfHealth, type ApiRateLimit } from '../model/selfHealth';
 import { reconcileRuleset } from '../model/ruleset';
+import { forecastTrend, type Point } from '../analytics/forecast';
 
 export interface WorkspaceRouterDeps {
   deriver: ModelDeriver;
@@ -22,6 +23,8 @@ export interface WorkspaceRouterDeps {
   liveRuleset?: (repo: string) => Promise<readonly string[] | null>;
   /** self-observability inputs (Group O): ingestion freshness + API rate-limit budget. */
   selfHealth?: () => { ingestionFreshnessSecs: number | null; apiRateLimit: ApiRateLimit | null };
+  /** cost/minutes daily series + optional budget threshold for forecasting (Group J1). */
+  costForecast?: (repo: string) => Promise<{ points: Point[]; thresholdValue?: number; unit?: string }>;
 }
 
 function repoOf(req: Request, res: Response): string | null {
@@ -71,6 +74,16 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     if (!pinned) return res.status(404).json({ error: 'no derivable model' });
     const live = deps.liveRuleset ? await deps.liveRuleset(repo) : null;
     res.json({ repo, sourceSha: pinned.sourceSha, ...reconcileRuleset(pinned.model, live) });
+  });
+
+  // GET /forecast?repo= — cost/capacity trend + days-to-budget (Group J1 / FR-037).
+  // Degrades to { available:false } when no series is wired (cost actuals are
+  // operator-imported, not auto-telemetry — see the review).
+  r.get('/forecast', async (req, res) => {
+    const repo = repoOf(req, res); if (!repo) return;
+    if (!deps.costForecast) return res.json({ repo, available: false, reason: 'no cost series imported' });
+    const { points, thresholdValue, unit } = await deps.costForecast(repo);
+    res.json({ repo, available: true, unit: unit ?? 'minutes', thresholdValue, ...forecastTrend(points, { thresholdValue }) });
   });
 
   // GET /self — the tool's own health (Group O / FR-043). Always available; no repo.
