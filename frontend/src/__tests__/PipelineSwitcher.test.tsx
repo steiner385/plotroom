@@ -34,6 +34,22 @@ describe('useFocusedPipeline (sticky focus)', () => {
     const { result } = renderHook(() => useFocusedPipeline(REPOS));
     expect(result.current[0]).toBe('steiner385/pr-dashboard');
   });
+
+  it('adopts the first repo when repos arrive AFTER mount (live-browser bug regression)', () => {
+    // repos empty on first render (live state not streamed yet) → focused starts null
+    const { result, rerender } = renderHook(({ repos }) => useFocusedPipeline(repos), { initialProps: { repos: [] as string[] } });
+    expect(result.current[0]).toBeNull();
+    // state streams in → the effect must adopt repos[0] (the bug: it stayed null)
+    act(() => rerender({ repos: REPOS }));
+    expect(result.current[0]).toBe('cairnea/KinDash');
+  });
+
+  it('adopts a persisted focus (not just repos[0]) when repos arrive after mount', () => {
+    localStorage.setItem('workspace.focusedPipeline', 'cairnea/infra');
+    const { result, rerender } = renderHook(({ repos }) => useFocusedPipeline(repos), { initialProps: { repos: [] as string[] } });
+    act(() => rerender({ repos: REPOS }));
+    expect(result.current[0]).toBe('cairnea/infra');
+  });
 });
 
 describe('PipelineSwitcher', () => {

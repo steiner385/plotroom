@@ -13,9 +13,18 @@ export function useFocusedPipeline(repos: readonly string[]): [string | null, (r
     try { const s = localStorage.getItem(STORE_KEY); if (s && repos.includes(s)) return s; } catch { /* ignore */ }
     return repos[0] ?? null;
   });
-  // if the stored focus disappears from the repo set, fall back to the first repo
+  // Adopt a focus once repos load (repos is empty on first render before the live
+  // state streams in, so the initial useState lands on null) AND re-home if the
+  // current focus disappears from the set. Bug: the old guard `if (focused && …)`
+  // never adopted a repo when focus started null — Model/Optimize then stayed on
+  // their "select a pipeline" empty state forever. (Found via live browser testing.)
   useEffect(() => {
-    if (focused && !repos.includes(focused)) setFocused(repos[0] ?? null);
+    if (repos.length === 0) return;
+    if (!focused || !repos.includes(focused)) {
+      let stored: string | null = null;
+      try { stored = localStorage.getItem(STORE_KEY); } catch { /* ignore */ }
+      setFocused(stored && repos.includes(stored) ? stored : repos[0]);
+    }
   }, [repos, focused]);
   const focus = (repo: string) => {
     setFocused(repo);
