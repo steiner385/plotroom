@@ -10,6 +10,8 @@ import { WorkspaceShell } from './WorkspaceShell';
 import { PipelineSwitcher, useFocusedPipeline } from './PipelineSwitcher';
 import { HealthView } from '../sections/health/HealthView';
 import { DiagnoseView } from '../sections/diagnose/DiagnoseView';
+import { OptimizeView } from '../sections/optimize/OptimizeView';
+import { makeWorkspaceApi } from './workspaceApi';
 import type { SectionId } from './sections';
 
 // workspace section → legacy tab hash (where its capability lives until rebuilt)
@@ -32,6 +34,7 @@ export function WorkspaceApp() {
   const { state, connected } = useDashboard();
   const repos = useMemo(() => (state ? state.repos.map((r) => r.repo) : []), [state]);
   const [focused, focus] = useFocusedPipeline(repos);
+  const api = useMemo(() => makeWorkspaceApi(), []);
 
   const header = (
     <div className="workspace-spine">
@@ -59,6 +62,7 @@ export function WorkspaceApp() {
       content={{
         health: <HealthView state={state} connected={connected} onFocusRepo={focus} />,
         diagnose: <DiagnoseView state={state} focusedRepo={focused} />,
+        optimize: <OptimizeView repo={focused} api={api} />,
       }}
       legacyBridge={(id) => <LegacyBridge id={id} />}
     />
