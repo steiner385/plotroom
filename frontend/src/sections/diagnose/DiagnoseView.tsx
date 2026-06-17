@@ -6,6 +6,7 @@ import { useMemo, useState } from 'react';
 import type { DashboardState, PrView, CheckView } from '../../types';
 import { CheckGantt } from '../../CheckGantt';
 import { clusterFailures } from './clustering';
+import { queueIncidents } from './incidents';
 
 const FAILED = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'stale']);
 
@@ -32,6 +33,7 @@ export interface DiagnoseViewProps { state: DashboardState; focusedRepo?: string
 export function DiagnoseView({ state, focusedRepo }: DiagnoseViewProps) {
   const prs = useMemo(() => prsForDiagnose(state, focusedRepo), [state, focusedRepo]);
   const clusters = useMemo(() => clusterFailures(state, 3), [state]);
+  const incidents = useMemo(() => queueIncidents(state), [state]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const key = (p: PrView) => `${p.repo}#${p.number}`;
   const selected = prs.find((p) => key(p) === selectedKey) ?? prs[0] ?? null;
@@ -39,6 +41,17 @@ export function DiagnoseView({ state, focusedRepo }: DiagnoseViewProps) {
 
   return (
     <div className="diagnose-view">
+      {incidents.length > 0 && (
+        <section className="queue-incidents" role="status" aria-label="Queue incidents">
+          <strong>🚑 Queue stalled</strong> — guided recovery:
+          {incidents.map((inc) => (
+            <div key={inc.repo} className="queue-incident">
+              <span className="incident-repo">{inc.repo}</span>
+              <ol>{inc.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
+            </div>
+          ))}
+        </section>
+      )}
       {clusters.length > 0 && (
         <section className="failure-clusters" role="status" aria-label="Failure clusters">
           <strong>⚠ Systemic failures</strong> — likely one incident, not {clusters.reduce((n, c) => n + c.prCount, 0)} separate problems:
