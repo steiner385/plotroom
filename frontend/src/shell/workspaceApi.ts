@@ -16,6 +16,11 @@ export interface RulesetDto {
   readable: boolean; derivedRequired: string[]; liveRequired: string[];
   missingFromModel: string[]; extraInModel: string[]; inSync: boolean;
 }
+export interface ForecastDto {
+  available: boolean; reason?: string; unit?: string; thresholdValue?: number;
+  slopePerDay?: number; projectedAt?: number | null; daysToThreshold?: number | null;
+  confidence?: 'high' | 'medium' | 'low'; sampleDays?: number;
+}
 export interface ToolHealthDto {
   ingestionFreshnessSecs: number | null;
   derivationCache: { hits: number; misses: number; hitRate: number; size: number };
@@ -48,6 +53,7 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
       fetchImpl(`${base}/security?${q(repo)}`).then(json<{ repo: string; sourceSha: string; scannedFiles: number; findings: SecurityFindingDto[] }>),
     self: () => fetchImpl(`${base}/self`).then(json<ToolHealthDto>),
     ruleset: (repo: string) => fetchImpl(`${base}/ruleset?${q(repo)}`).then(json<RulesetDto>),
+    forecast: (repo: string) => fetchImpl(`${base}/forecast?${q(repo)}`).then(json<ForecastDto>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;

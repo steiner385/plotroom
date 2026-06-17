@@ -29,6 +29,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
     security: vi.fn(async () => ({ repo: 'o/r', sourceSha: 's', scannedFiles: 0, findings: [] })),
     self: vi.fn(async () => ({ ingestionFreshnessSecs: 0, derivationCache: { hits: 0, misses: 0, hitRate: 0, size: 0 }, apiRateLimit: null, status: 'ok' as const, reasons: [] })),
     ruleset: vi.fn(async () => ({ readable: true, derivedRequired: [], liveRequired: [], missingFromModel: [], extraInModel: [], inSync: true })),
+    forecast: vi.fn(async () => ({ available: false })),
     ...over,
   };
 }

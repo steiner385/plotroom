@@ -14,6 +14,7 @@ import { OptimizeView } from '../sections/optimize/OptimizeView';
 import { ModelView } from '../sections/model/ModelView';
 import { makeWorkspaceApi } from './workspaceApi';
 import { SelfHealthDot } from './SelfHealthDot';
+import { ForecastBanner } from './ForecastBanner';
 import type { SectionId } from './sections';
 
 // workspace section → legacy tab hash (where its capability lives until rebuilt)
@@ -63,7 +64,7 @@ export function WorkspaceApp() {
     <WorkspaceShell
       header={header}
       content={{
-        health: <HealthView state={state} connected={connected} onFocusRepo={focus} />,
+        health: <><ForecastBanner api={api} repo={focused} /><HealthView state={state} connected={connected} onFocusRepo={focus} /></>,
         diagnose: <DiagnoseView state={state} focusedRepo={focused} />,
         model: <ModelView repo={focused} api={api} />,
         optimize: <OptimizeView repo={focused} api={api} />,
