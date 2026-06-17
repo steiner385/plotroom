@@ -21,6 +21,7 @@ import { computeProtectionMap } from './protection-map';
 import { createWorkspaceRouter } from './core/api/workspace-router';
 import { workspaceDepsFromClient } from './core/api/wire';
 import { WorkspaceStore } from './core/store/workspaceStore';
+import { LiveSnapshotStore } from './core/live/snapshot';
 import { createApp } from './api';
 import { loadWebhookSecret } from './webhooks';
 import { dataDir, staticDir, configPath } from './paths';
@@ -312,14 +313,20 @@ async function main() {
         // Durable workspace store (Groups H/L2/I2) — real persistence outliving the
         // rolling telemetry retention. Wires outcomes/audit/policy from real data.
         const wsStore = new WorkspaceStore(join(dataDir(), 'workspace.db'));
+        // Tier-1 live store, fed by the poller — the workspace's live source + the
+        // authoritative ingestion-freshness clock for self-obs (wall-clock of the
+        // last frame, not the debounced generatedAt).
+        const liveSnapshot = new LiveSnapshotStore<ReturnType<typeof poller.getState>>();
+        liveSnapshot.set(poller.getState());
+        poller.on('update', () => liveSnapshot.set(poller.getState()));
         return createWorkspaceRouter({
           ...deps,
           // Group O self-observability from REAL sources: ingestion freshness from
           // the poller's last frame, API budget from the client-router (GraphQL cap
           // is 5000/hr — the client tracks `remaining`, not the limit).
           selfHealth: () => {
-            const st = poller.getState();
-            const freshSecs = st?.generatedAt ? Math.max(0, Math.round((Date.now() - Date.parse(st.generatedAt)) / 1000)) : null;
+            const lastFrame = liveSnapshot.updatedAt();
+            const freshSecs = lastFrame ? Math.max(0, Math.round((Date.now() - lastFrame) / 1000)) : null;
             const remaining = router.minRemaining();
             return { ingestionFreshnessSecs: freshSecs, apiRateLimit: remaining != null ? { remaining, limit: 5000 } : null };
           },
