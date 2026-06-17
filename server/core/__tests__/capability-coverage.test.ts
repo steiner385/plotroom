@@ -1,9 +1,10 @@
 // Capability-contract COVERAGE harness (spec 001, FR-023 / SC-004). Asserts every
 // net-new capability (G–O) has a REACHABLE workspace endpoint that serves real-shaped
 // data (degraded providers are wired so each route resolves). This is the coverage
-// half of the contract; the parity-vs-legacy half needs the legacy engine on a
-// fixture DB (deferred — documented in spec.md "Persona Review"). One failing entry
-// = a capability silently dropped.
+// half of the contract; the parity-vs-legacy half (rebuilt deriver == legacy
+// computeProtectionMap, exact) is covered for the model slice in model-parity.test.ts.
+// A fuller history-DB-backed parity over every analytics provider remains deferred
+// (documented in spec.md "Persona Review"). One failing entry = a capability silently dropped.
 import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
