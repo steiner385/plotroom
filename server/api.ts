@@ -185,6 +185,10 @@ export function createApp(opts: {
     plan: () => RunnerPlan;
     applyConfig: (patch: Record<string, unknown>) => void;
   };
+  /** Unified-workspace IDE/model loop router (spec 001) — mounted at /api/workspace
+   *  when present. Built in index.ts via workspaceDepsFromClient + createWorkspaceRouter.
+   *  Strangler-fig: absent (flag off) leaves the app unchanged. */
+  workspaceRouter?: express.Router;
   /** Restart endpoint knobs — `exit` injectable for tests. */
   restart?: { exit?: (code: number) => void; delayMs?: number };
 }): express.Express {
@@ -227,6 +231,14 @@ export function createApp(opts: {
   }
 
   app.use(express.json());
+
+  // Unified-workspace IDE/model loop (spec 001). Mounted only when wired (flag on);
+  // the same-origin guard gates its mutating (non-GET) routes like the rest of /api.
+  if (opts.workspaceRouter) {
+    app.use('/api/workspace',
+      (req, res, next) => (req.method === 'GET' ? next() : originGuard(req, res, next)),
+      opts.workspaceRouter);
+  }
   opts.bus.setMaxListeners(0);
   // res.sendFile requires an absolute path — callers pass relative dirs like 'dist/public'
   const staticDir = opts.staticDir ? resolve(opts.staticDir) : undefined;
