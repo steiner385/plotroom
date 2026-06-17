@@ -4,7 +4,7 @@
 // is answerable at a glance (SC-005). Reads the SHA-pinned model via the same
 // /api/workspace client; API injected for tests.
 import { useEffect, useMemo, useState } from 'react';
-import type { WorkspaceApi, SecurityFindingDto } from '../../shell/workspaceApi';
+import type { WorkspaceApi, SecurityFindingDto, RulesetDto } from '../../shell/workspaceApi';
 import type { DerivedModelLike, CellLike } from '../optimize/types';
 
 const GLYPH: Record<string, string> = { gate: '🔒', conditional: '◐', advisory: '•', absent: '·' };
@@ -23,13 +23,15 @@ export function ModelView({ repo, api }: ModelViewProps) {
   const [sha, setSha] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [security, setSecurity] = useState<SecurityFindingDto[] | null>(null);
+  const [ruleset, setRuleset] = useState<RulesetDto | null>(null);
 
   useEffect(() => {
     if (!repo) return;
-    setModel(null); setError(null); setSha(null); setSecurity(null);
+    setModel(null); setError(null); setSha(null); setSecurity(null); setRuleset(null);
     api.getPipeline(repo).then((r) => { setModel(r.model); setSha(r.sourceSha); }).catch((e: Error) => setError(e.message));
-    // security audit is advisory — its failure must not block the model read
+    // security + ruleset are advisory — their failure must not block the model read
     api.security(repo).then((r) => setSecurity(r.findings)).catch(() => setSecurity(null));
+    api.ruleset(repo).then(setRuleset).catch(() => setRuleset(null));
   }, [repo, api]);
 
   const required = useMemo(() => (model ? requiredGates(model) : []), [model]);
@@ -49,6 +51,15 @@ export function ModelView({ repo, api }: ModelViewProps) {
       </p>
       {drift.length > 0 && (
         <p className="model-drift" role="status">⚠ {drift.length} cell{drift.length === 1 ? '' : 's'} drifting (config ≠ observed)</p>
+      )}
+      {ruleset && (
+        <p className={`model-ruleset ${ruleset.readable ? (ruleset.inSync ? 'in-sync' : 'mismatch') : 'unreadable'}`} role="status">
+          {!ruleset.readable
+            ? '🔐 Ruleset unreadable — grant administration:read to verify required-gate parity'
+            : ruleset.inSync
+              ? '✓ Required gates match the branch-protection ruleset'
+              : `⚠ Ruleset mismatch — ${ruleset.missingFromModel.length ? `ruleset requires ${ruleset.missingFromModel.join(', ')} not enforced by config` : ''}${ruleset.missingFromModel.length && ruleset.extraInModel.length ? '; ' : ''}${ruleset.extraInModel.length ? `config gates ${ruleset.extraInModel.join(', ')} the ruleset doesn’t` : ''}`}
+        </p>
       )}
       {security && security.length > 0 && (
         <section className="model-security" aria-label="Security findings">

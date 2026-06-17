@@ -23,7 +23,8 @@ const MODEL: DerivedModelLike = {
 const api = (over: Partial<WorkspaceApi> = {}): WorkspaceApi => ({
   getPipeline: vi.fn(async () => ({ repo: 'o/r', sourceSha: 'deadbeefcafe', model: MODEL })),
   security: vi.fn(async () => ({ repo: 'o/r', sourceSha: 'deadbeefcafe', scannedFiles: 1, findings: [] })),
-  simulate: vi.fn(), prompt: vi.fn(), draftPrDryRun: vi.fn(), draftPrOpen: vi.fn(), ...over,
+  ruleset: vi.fn(async () => ({ readable: true, derivedRequired: ['build'], liveRequired: ['build'], missingFromModel: [], extraInModel: [], inSync: true })),
+  simulate: vi.fn(), prompt: vi.fn(), draftPrDryRun: vi.fn(), draftPrOpen: vi.fn(), self: vi.fn(), ...over,
 } as unknown as WorkspaceApi);
 
 describe('requiredGates / driftCells (pure)', () => {
@@ -52,6 +53,18 @@ describe('ModelView (US3)', () => {
     const panel = await screen.findByLabelText('Security findings');
     expect(within(panel).getByText('pull_request_target')).toBeInTheDocument();
     expect(within(panel).getByText('[high]')).toBeInTheDocument();
+  });
+
+  it('shows a ruleset mismatch (the dangerous gap — ruleset requires a check config misses)', async () => {
+    const mismatch = api({ ruleset: vi.fn(async () => ({ readable: true, derivedRequired: ['build'], liveRequired: ['build', 'security-scan'], missingFromModel: ['security-scan'], extraInModel: [], inSync: false })) });
+    render(<ModelView repo="o/r" api={mismatch} />);
+    expect(await screen.findByText(/Ruleset mismatch/)).toHaveTextContent(/requires security-scan not enforced by config/);
+  });
+
+  it('shows "grant administration:read" when the ruleset is unreadable (no false in-sync)', async () => {
+    const unreadable = api({ ruleset: vi.fn(async () => ({ readable: false, derivedRequired: ['build'], liveRequired: [], missingFromModel: [], extraInModel: [], inSync: false })) });
+    render(<ModelView repo="o/r" api={unreadable} />);
+    expect(await screen.findByText(/grant administration:read/)).toBeInTheDocument();
   });
 
   it('still renders the model when the security audit fails (advisory, non-blocking)', async () => {

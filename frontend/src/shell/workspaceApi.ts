@@ -12,6 +12,10 @@ export interface SimResultDto {
 }
 export interface TierMoveDto { check: string; fromTierId: string; toTierId: string | null }
 export interface SecurityFindingDto { file: string; jobId?: string; kind: string; detail: string; confidence: 'high' | 'medium' | 'low' }
+export interface RulesetDto {
+  readable: boolean; derivedRequired: string[]; liveRequired: string[];
+  missingFromModel: string[]; extraInModel: string[]; inSync: boolean;
+}
 export interface ToolHealthDto {
   ingestionFreshnessSecs: number | null;
   derivationCache: { hits: number; misses: number; hitRate: number; size: number };
@@ -43,6 +47,7 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
     security: (repo: string) =>
       fetchImpl(`${base}/security?${q(repo)}`).then(json<{ repo: string; sourceSha: string; scannedFiles: number; findings: SecurityFindingDto[] }>),
     self: () => fetchImpl(`${base}/self`).then(json<ToolHealthDto>),
+    ruleset: (repo: string) => fetchImpl(`${base}/ruleset?${q(repo)}`).then(json<RulesetDto>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;
