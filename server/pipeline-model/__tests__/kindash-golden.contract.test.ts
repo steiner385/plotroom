@@ -60,11 +60,17 @@ function reusableRefs(ciYaml: string): string[] {
  * Rules (applied in order):
  *   1. Strip trailing " /" (reusable-workflow caller suffix).
  *   2. Strip a leading "word(s): " label prefix (e.g. "setup: ").
+ *
+ * Bridge production display-name prefixes (e.g. "setup: changed-scope", "static-checks /")
+ * to the new parser's job-ids. ASSUMES the job KEY equals the display-name suffix after
+ * stripping a "<label>: " prefix and a trailing " /". If a future KinDash rename breaks
+ * that, this test fails LOUDLY (a required prefix won't map to any job-id) — which is the
+ * intended sentinel, not a silent pass.
  */
 function normalizePrefix(prefix: string): string {
   return prefix
     .replace(/ \/$/, '')        // strip trailing " /"
-    .replace(/^[^:]+:\s+/, '')  // strip leading "label: " prefix
+    .replace(/^[^:]+:\s*/, '')  // strip leading "label: " prefix (with or without space)
     .trim();
 }
 
