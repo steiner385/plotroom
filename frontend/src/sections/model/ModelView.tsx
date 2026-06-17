@@ -4,7 +4,7 @@
 // is answerable at a glance (SC-005). Reads the SHA-pinned model via the same
 // /api/workspace client; API injected for tests.
 import { useEffect, useMemo, useState } from 'react';
-import type { WorkspaceApi } from '../../shell/workspaceApi';
+import type { WorkspaceApi, SecurityFindingDto } from '../../shell/workspaceApi';
 import type { DerivedModelLike, CellLike } from '../optimize/types';
 
 const GLYPH: Record<string, string> = { gate: '🔒', conditional: '◐', advisory: '•', absent: '·' };
@@ -22,11 +22,14 @@ export function ModelView({ repo, api }: ModelViewProps) {
   const [model, setModel] = useState<DerivedModelLike | null>(null);
   const [sha, setSha] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [security, setSecurity] = useState<SecurityFindingDto[] | null>(null);
 
   useEffect(() => {
     if (!repo) return;
-    setModel(null); setError(null); setSha(null);
+    setModel(null); setError(null); setSha(null); setSecurity(null);
     api.getPipeline(repo).then((r) => { setModel(r.model); setSha(r.sourceSha); }).catch((e: Error) => setError(e.message));
+    // security audit is advisory — its failure must not block the model read
+    api.security(repo).then((r) => setSecurity(r.findings)).catch(() => setSecurity(null));
   }, [repo, api]);
 
   const required = useMemo(() => (model ? requiredGates(model) : []), [model]);
@@ -46,6 +49,21 @@ export function ModelView({ repo, api }: ModelViewProps) {
       </p>
       {drift.length > 0 && (
         <p className="model-drift" role="status">⚠ {drift.length} cell{drift.length === 1 ? '' : 's'} drifting (config ≠ observed)</p>
+      )}
+      {security && security.length > 0 && (
+        <section className="model-security" aria-label="Security findings">
+          <h3>Security ({security.length})</h3>
+          <ul role="list">
+            {security.map((f, i) => (
+              <li key={i} className={`sec-finding conf-${f.confidence}`} data-kind={f.kind}>
+                <span className="sec-kind">{f.kind}</span>
+                <span className="sec-conf">[{f.confidence}]</span>{' '}
+                <span className="sec-detail">{f.detail}</span>
+                {f.jobId && <span className="sec-loc"> — {f.file} · {f.jobId}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       <table className="protection-matrix" aria-label="Protection matrix">
         <thead>

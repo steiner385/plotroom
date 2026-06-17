@@ -22,6 +22,7 @@ const MODEL: DerivedModelLike = {
 
 const api = (over: Partial<WorkspaceApi> = {}): WorkspaceApi => ({
   getPipeline: vi.fn(async () => ({ repo: 'o/r', sourceSha: 'deadbeefcafe', model: MODEL })),
+  security: vi.fn(async () => ({ repo: 'o/r', sourceSha: 'deadbeefcafe', scannedFiles: 1, findings: [] })),
   simulate: vi.fn(), prompt: vi.fn(), draftPrDryRun: vi.fn(), draftPrOpen: vi.fn(), ...over,
 } as unknown as WorkspaceApi);
 
@@ -42,6 +43,21 @@ describe('ModelView (US3)', () => {
     render(<ModelView repo="o/r" api={api()} />);
     expect(await screen.findByLabelText('Protection matrix')).toBeInTheDocument();
     expect(screen.getByText(/1 cell drifting/)).toBeInTheDocument();
+  });
+
+  it('renders the security panel (Group M) with finding + confidence', async () => {
+    const withFindings = api({ security: vi.fn(async () => ({ repo: 'o/r', sourceSha: 's', scannedFiles: 1,
+      findings: [{ file: 'ci.yml', kind: 'pull_request_target', detail: 'runs on fork PRs', confidence: 'high' as const }] })) });
+    render(<ModelView repo="o/r" api={withFindings} />);
+    const panel = await screen.findByLabelText('Security findings');
+    expect(within(panel).getByText('pull_request_target')).toBeInTheDocument();
+    expect(within(panel).getByText('[high]')).toBeInTheDocument();
+  });
+
+  it('still renders the model when the security audit fails (advisory, non-blocking)', async () => {
+    const secFails = api({ security: vi.fn(async () => { throw new Error('administration:read missing'); }) });
+    render(<ModelView repo="o/r" api={secFails} />);
+    expect(await screen.findByLabelText('Protection matrix')).toBeInTheDocument(); // model still renders
   });
 
   it('surfaces a derivation error', async () => {

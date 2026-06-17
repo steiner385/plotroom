@@ -11,6 +11,7 @@ export interface SimResultDto {
   gatesLost: string[]; gatesGained: string[]; estimated: boolean;
 }
 export interface TierMoveDto { check: string; fromTierId: string; toTierId: string | null }
+export interface SecurityFindingDto { file: string; jobId?: string; kind: string; detail: string; confidence: 'high' | 'medium' | 'low' }
 export interface TierIntentDto { kind: 'tier'; check: string; jobId: string; fromTierId: string; targetEvent: string }
 
 async function json<T>(res: Response): Promise<T> {
@@ -32,6 +33,8 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
       fetchImpl(`${base}/draft-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, dryRun: true, intent }) }).then(json<{ dryRun: true; diff: string; baseSha: string }>),
     draftPrOpen: (repo: string, intent: TierIntentDto) =>
       fetchImpl(`${base}/draft-pr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, dryRun: false, intent }) }).then(json<{ opened: true; number: number; url: string }>),
+    security: (repo: string) =>
+      fetchImpl(`${base}/security?${q(repo)}`).then(json<{ repo: string; sourceSha: string; scannedFiles: number; findings: SecurityFindingDto[] }>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;
