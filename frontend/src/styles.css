@@ -885,3 +885,35 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .demotion-draft-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .demotion-draft-btn:disabled { opacity: 0.6; cursor: progress; }
 .demotion-pr-link { font-size: 11px; color: var(--accent); white-space: nowrap; }
+
+/* --- Protection map (CI/CD Designer surface) --- */
+.protection-map { padding: 4px 2px 40px; }
+.pm-header { display: flex; align-items: baseline; gap: 12px; }
+.pm-header h2 { font-size: 16px; margin: 8px 0; }
+.pm-repo { font: inherit; font-size: 12px; }
+.pm-repo-name { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pm-error { color: var(--fail); font-size: 13px; }
+.pm-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 12px; font-size: 12px; color: var(--muted); }
+.pm-chip { border-radius: 5px; padding: 1px 7px; font-weight: 600; border: 1px solid var(--border); }
+.pm-chip.pm-gate { color: var(--done); border-color: var(--done); }
+.pm-chip.pm-cond { color: var(--amber); border-color: var(--amber); }
+.pm-chip.pm-adv  { color: var(--muted); }
+.pm-chip.pm-drift { color: var(--fail); border-color: var(--fail); }
+
+.pm-grid-wrap { overflow-x: auto; }
+.pm-grid { border-collapse: collapse; font-size: 12px; }
+.pm-grid th, .pm-grid td { padding: 3px 8px; text-align: center; white-space: nowrap; }
+.pm-check-h { text-align: left; color: var(--muted); font-weight: 600; }
+.pm-tier-h { color: var(--muted); font-weight: 600; }
+.pm-check { text-align: left; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.pm-cell { font-weight: 600; border-radius: 4px; min-width: 3.2em; }
+.pm-gate   { color: var(--done);  background: color-mix(in srgb, var(--done) 14%, transparent); }
+.pm-cond   { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.pm-adv    { color: var(--muted); }
+.pm-absent { color: color-mix(in srgb, var(--muted) 45%, transparent); }
+.pm-cell.pm-has-drift { outline: 1.5px solid var(--fail); outline-offset: -1.5px; }
+.pm-legend { margin-top: 12px; font-size: 11px; color: var(--muted); }
+.pm-legend .pm-gate { color: var(--done); font-weight: 600; }
+.pm-legend .pm-cond { color: var(--amber); font-weight: 600; }
+.pm-legend .pm-adv { color: var(--muted); font-weight: 600; }
+.pm-legend .pm-drift { color: var(--fail); font-weight: 600; }

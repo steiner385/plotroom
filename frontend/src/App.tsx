@@ -7,17 +7,18 @@ import { QueueTrain } from './QueueTrain';
 import { SettingsPanel } from './SettingsPanel';
 import { LegendPanel } from './LegendPanel';
 import { MetricsView } from './MetricsView';
+import { ProtectionMap } from './ProtectionMap';
 import { DeliverySpine } from './spine/DeliverySpine';
 import { HealthHeader } from './HealthHeader';
 import { ErrorBoundary } from './ErrorBoundary';
 import type { PrView, LaneStatus } from './types';
 
-type TabId = 'delivery' | 'pipeline' | 'metrics';
+type TabId = 'delivery' | 'pipeline' | 'metrics' | 'designer';
 
 // ---- tab ↔ URL hash (#pipeline / #delivery / #metrics) ----
 // Each tab is linkable, bookmarkable, and survives a reload; back/forward step
 // through tabs via the hashchange listener in App.
-const TAB_IDS: readonly TabId[] = ['pipeline', 'delivery', 'metrics'];
+const TAB_IDS: readonly TabId[] = ['pipeline', 'delivery', 'metrics', 'designer'];
 const DEFAULT_TAB: TabId = 'pipeline';
 function tabFromHash(): TabId | null {
   const h = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#/, '');
@@ -76,6 +77,7 @@ export function App() {
   // switching tabs doesn't refetch; the panel divs always exist in the DOM so
   // every aria-controls id resolves.
   const [metricsVisited, setMetricsVisited] = useState(() => tabFromHash() === 'metrics');
+  const [designerVisited, setDesignerVisited] = useState(() => tabFromHash() === 'designer');
   const gearRef = useRef<HTMLButtonElement>(null);
   const handleSettingsClose = useCallback(() => setSettingsOpen(false), []);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -111,6 +113,7 @@ export function App() {
     setTab(next);
     if (next === 'delivery') setDeliveryVisited(true);
     if (next === 'metrics') setMetricsVisited(true);
+    if (next === 'designer') setDesignerVisited(true);
   }, []);
 
   // Global health header → richest detail for each lane (decision: best-detail
@@ -281,6 +284,12 @@ export function App() {
           onClick={() => selectTab('metrics')}>
           Metrics
         </button>
+        <button type="button" role="tab" id="tab-designer"
+          aria-selected={tab === 'designer'} aria-controls="tabpanel-designer"
+          className={tab === 'designer' ? 'tab active' : 'tab'}
+          onClick={() => selectTab('designer')}>
+          Designer
+        </button>
       </nav>
       </>
       )}
@@ -300,6 +309,12 @@ export function App() {
             not white-screen the other */}
         <ErrorBoundary>
           {metricsVisited && <MetricsView focusCostNonce={costFocusNonce} />}
+        </ErrorBoundary>
+      </div>
+      <div id="tabpanel-designer" hidden={tab !== 'designer'}
+        {...(kiosk ? {} : { role: 'tabpanel', 'aria-labelledby': 'tab-designer' })}>
+        <ErrorBoundary>
+          {designerVisited && <ProtectionMap />}
         </ErrorBoundary>
       </div>
       <div id="tabpanel-pipeline" hidden={tab !== 'pipeline'}

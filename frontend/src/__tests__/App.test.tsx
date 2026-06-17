@@ -173,11 +173,11 @@ describe('App tab bar', () => {
     expect(screen.queryByTestId('spine-lane-pr-ci')).not.toBeInTheDocument();
   });
 
-  it('renders Pipeline | Delivery | Metrics tabs with Pipeline selected by default', () => {
+  it('renders Pipeline | Delivery | Metrics | Designer tabs with Pipeline selected by default', () => {
     render(<App />);
     const tablist = screen.getByRole('tablist', { name: 'Dashboard views' });
     const tabs = within(tablist).getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Pipeline', 'Delivery', 'Metrics']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Pipeline', 'Delivery', 'Metrics', 'Designer']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     // metrics is lazy/hidden until visited
     expect(screen.queryByTestId('metrics-view-stub')).not.toBeInTheDocument();

@@ -19,6 +19,9 @@ describe('KinDash DerivedModel (assembly integration)', () => {
     if (ci == null) { console.warn('skipped — gh/ci.yml unreachable'); return; }
     const files: Record<string, string> = { 'ci.yml': ci };
     for (const n of reusableRefs(ci)) { const t = wf(n); if (t) files[n] = t; }
+    // A partial fetch (ci.yml ok but a reusable throttled under parallel load)
+    // yields an incomplete graph — can't assert, skip.
+    if (reusableRefs(ci).some((n) => !(n in files))) { console.warn('skipped — partial workflow fetch'); return; }
 
     const graph = deriveStaticGraph(files);
     // KinDash's known conditionally-required callers: skipped==pass.
