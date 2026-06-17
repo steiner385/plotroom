@@ -34,6 +34,10 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
     outcomes: vi.fn(async () => ({ outcomes: [], accuracy: { count: 0, meanCostAccuracy: 0, directionHitRate: 0, recommenderUsable: false } })),
     budgets: vi.fn(async () => ({ gauges: [], alerts: [] })),
     policy: vi.fn(async () => ({ rules: [], violations: [] })),
+    quarantineDryRun: vi.fn(async (_r: string, check: string) => {
+      if (check === 'build') throw new Error('"build" is a required merge gate — cannot quarantine it');
+      return { dryRun: true as const, diff: '@@ e2e quarantine — continue-on-error @@', baseSha: 'abc' };
+    }),
     ...over,
   };
 }
@@ -60,6 +64,20 @@ describe('OptimizeView (US4 — drives /api/workspace loop)', () => {
     fireEvent.click(buttons[1]); // build (required gate)
     expect(await screen.findByText(/not possible — required merge gate/)).toBeInTheDocument();
     expect(screen.queryByText('Preview draft PR')).not.toBeInTheDocument();
+  });
+
+  it('quarantine (K2): previews the diff for a flaky non-gate', async () => {
+    render(<OptimizeView repo="o/r" api={fakeApi()} />);
+    const btns = await screen.findAllByText('Quarantine (flaky)');
+    fireEvent.click(btns[0]); // e2e (not a required gate)
+    expect(await screen.findByLabelText('quarantine diff')).toHaveTextContent('continue-on-error');
+  });
+
+  it('quarantine (K2): shows the server refusal for a required merge gate (FR-038)', async () => {
+    render(<OptimizeView repo="o/r" api={fakeApi()} />);
+    const btns = await screen.findAllByText('Quarantine (flaky)');
+    fireEvent.click(btns[1]); // build (required gate)
+    expect(await screen.findByText(/Can’t quarantine build/)).toHaveTextContent(/required merge gate/);
   });
 
   it('surfaces a load error', async () => {

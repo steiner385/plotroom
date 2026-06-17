@@ -26,6 +26,7 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
   const [sim, setSim] = useState<SimResultDto | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [quarantine, setQuarantine] = useState<{ check: string; diff?: string; error?: string } | null>(null);
 
   useEffect(() => {
     if (!repo) return;
@@ -53,6 +54,15 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
     finally { setBusy(false); }
   }
 
+  async function doQuarantine(check: string) {
+    if (!repo || !model) return;
+    const job = model.checkMeta.find((m) => m.check === check)?.provenance[0]?.jobId ?? check;
+    setQuarantine({ check }); setBusy(true);
+    try { setQuarantine({ check, diff: (await api.quarantineDryRun(repo, check, job)).diff }); }
+    catch (e) { setQuarantine({ check, error: (e as Error).message }); } // server refuses a required gate (FR-038)
+    finally { setBusy(false); }
+  }
+
   if (!repo) return <div className="optimize-view empty">Select a pipeline to optimize.</div>;
   if (error) return <div className="optimize-view error" role="alert">Couldn’t load the model: {error}</div>;
   if (!model) return <div className="optimize-view" role="status">Deriving the pipeline model…</div>;
@@ -65,9 +75,19 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
           <li key={c} className={c === selected ? 'optimize-check active' : 'optimize-check'}>
             <span className="optimize-check-name">{c}</span>
             <button type="button" disabled={busy} onClick={() => simulate(c)}>Simulate demote</button>
+            <button type="button" className="quarantine-btn" disabled={busy} onClick={() => doQuarantine(c)}>Quarantine (flaky)</button>
           </li>
         ))}
       </ul>
+      {quarantine && (
+        <section className="optimize-quarantine" aria-label={`Quarantine ${quarantine.check}`}>
+          {quarantine.error
+            ? <p className="quarantine-blocked" role="status">Can’t quarantine {quarantine.check}: {quarantine.error}</p>
+            : quarantine.diff
+              ? <><p role="status">Quarantine {quarantine.check} (adds continue-on-error):</p><pre className="quarantine-diff" aria-label="quarantine diff">{quarantine.diff}</pre></>
+              : <p role="status">Preparing quarantine for {quarantine.check}…</p>}
+        </section>
+      )}
       {selected && sim && (
         <section className="optimize-sim" aria-label={`Simulation for ${selected}`}>
           <p className={sim.legal ? 'sim-note legal' : 'sim-note illegal'} role="status">{sim.note}</p>
