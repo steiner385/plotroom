@@ -5,6 +5,7 @@
 // lost mid-rebuild. This is mounted behind the workspace flag; the classic App
 // stays the default until parity.
 import { useMemo } from 'react';
+import './workspace.css';
 import { useDashboard } from '../useDashboard';
 import { WorkspaceShell } from './WorkspaceShell';
 import { PipelineSwitcher, useFocusedPipeline } from './PipelineSwitcher';
