@@ -9,12 +9,15 @@ import { simulateTierMove, type TierMove } from '../model/simulate';
 import { buildPrompt, type PromptInput } from '../actions/prompt';
 import { prepareDraftEdit, openDraftPr, type PrClient, type TierAssignIntent } from '../actions/draftPr';
 import { auditWorkflowSecurity } from '../model/security';
+import { buildSelfHealth, type ApiRateLimit } from '../model/selfHealth';
 
 export interface WorkspaceRouterDeps {
   deriver: ModelDeriver;
   prClient: PrClient;
   /** live-ruleset required checks for a repo (FR-035a union binding); [] if unreadable. */
   liveRequired?: (repo: string) => Promise<readonly string[]>;
+  /** self-observability inputs (Group O): ingestion freshness + API rate-limit budget. */
+  selfHealth?: () => { ingestionFreshnessSecs: number | null; apiRateLimit: ApiRateLimit | null };
 }
 
 function repoOf(req: Request, res: Response): string | null {
@@ -53,6 +56,12 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     const pinned = await deps.deriver.deriveAtHead(repo);
     if (!pinned) return res.status(404).json({ error: 'no derivable model' });
     res.json({ prompt: buildPrompt(repo, pinned.model, finding) });
+  });
+
+  // GET /self — the tool's own health (Group O / FR-043). Always available; no repo.
+  r.get('/self', (_req, res) => {
+    const ext = deps.selfHealth?.() ?? { ingestionFreshnessSecs: null, apiRateLimit: null };
+    res.json(buildSelfHealth({ ...ext, derivationCache: deps.deriver.cacheStats() }));
   });
 
   // GET /security?repo= — CI security audit (Group M) of the model's workflow

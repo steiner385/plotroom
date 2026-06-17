@@ -43,15 +43,24 @@ interface CacheEntry { at: number; pinned: PinnedModel }
  */
 export class ModelDeriver {
   private cache = new Map<string, CacheEntry>();
+  private hits = 0;
+  private misses = 0;
   constructor(private deps: ModelDeriveDeps, private ttlMs = 5 * 60_000, private now: () => number = () => Date.now()) {}
 
   private key(repo: string, sha: string): string { return `${repo}@${sha}`; }
+
+  /** Cache effectiveness for self-observability (Group O). */
+  cacheStats(): { hits: number; misses: number; hitRate: number; size: number } {
+    const total = this.hits + this.misses;
+    return { hits: this.hits, misses: this.misses, hitRate: total ? this.hits / total : 0, size: this.cache.size };
+  }
 
   /** Derive the model for `repo` at an explicit SHA — cached by (repo, sha). */
   async deriveAtSha(repo: string, sha: string): Promise<PinnedModel | null> {
     const k = this.key(repo, sha);
     const hit = this.cache.get(k);
-    if (hit && this.now() - hit.at < this.ttlMs) return hit.pinned;
+    if (hit && this.now() - hit.at < this.ttlMs) { this.hits++; return hit.pinned; }
+    this.misses++;
     const since = this.deps.since ?? new Date(this.now() - 30 * 86_400_000).toISOString();
     const model = await computeProtectionMap(repo, since, {
       fetchWorkflow: (r, name) => this.deps.fetchWorkflowAtSha(r, name, sha),

@@ -90,6 +90,16 @@ describe('ModelDeriver (Tier-2 SHA-pinned deriver)', () => {
     expect(await d.deriveAtSha('o/r', 'sha-x')).toBeNull();
   });
 
+  it('cacheStats tracks hits/misses/hitRate (Group O)', async () => {
+    const d = new ModelDeriver(makeDeps());
+    await d.deriveAtSha('o/r', 'sha-1'); // miss
+    await d.deriveAtSha('o/r', 'sha-1'); // hit
+    await d.deriveAtSha('o/r', 'sha-2'); // miss
+    const s = d.cacheStats();
+    expect(s).toMatchObject({ hits: 1, misses: 2, size: 2 });
+    expect(s.hitRate).toBeCloseTo(1 / 3);
+  });
+
   it('invalidate drops cached entries for a repo', async () => {
     const deps = makeDeps();
     const d = new ModelDeriver(deps);

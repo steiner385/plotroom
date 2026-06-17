@@ -87,6 +87,13 @@ describe('workspace-router (integration, contracts/api.md)', () => {
     expect(res.status).toBe(409);
   });
 
+  it('GET /self reports tool health incl. derivation-cache stats (Group O)', async () => {
+    const res = await request(app()).get('/api/workspace/self');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok'); // no selfHealth dep → nulls → ok
+    expect(res.body.derivationCache).toMatchObject({ hits: expect.any(Number), misses: expect.any(Number) });
+  });
+
   it('GET /security audits the model workflow files and reports findings + confidence', async () => {
     const VULN = `name: CI
 on: { pull_request: {}, pull_request_target: {}, merge_group: {} }
