@@ -27,6 +27,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
     draftPrDryRun: vi.fn(async () => ({ dryRun: true as const, diff: '@@ e2e → merge_group @@', baseSha: 'abc' })),
     draftPrOpen: vi.fn(async () => ({ opened: true as const, number: 5, url: 'u' })),
     security: vi.fn(async () => ({ repo: 'o/r', sourceSha: 's', scannedFiles: 0, findings: [] })),
+    self: vi.fn(async () => ({ ingestionFreshnessSecs: 0, derivationCache: { hits: 0, misses: 0, hitRate: 0, size: 0 }, apiRateLimit: null, status: 'ok' as const, reasons: [] })),
     ...over,
   };
 }

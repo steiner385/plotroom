@@ -13,6 +13,7 @@ import { DiagnoseView } from '../sections/diagnose/DiagnoseView';
 import { OptimizeView } from '../sections/optimize/OptimizeView';
 import { ModelView } from '../sections/model/ModelView';
 import { makeWorkspaceApi } from './workspaceApi';
+import { SelfHealthDot } from './SelfHealthDot';
 import type { SectionId } from './sections';
 
 // workspace section → legacy tab hash (where its capability lives until rebuilt)
@@ -44,6 +45,7 @@ export function WorkspaceApp() {
       <span className={connected ? 'liveness live' : 'liveness down'} title={connected ? 'live' : 'reconnecting'}>
         {connected ? '● live' : '○ reconnecting'}
       </span>
+      <SelfHealthDot api={api} />
     </div>
   );
 
