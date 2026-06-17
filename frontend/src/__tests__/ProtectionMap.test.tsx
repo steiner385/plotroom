@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import { ProtectionMap, type DerivedModel } from '../ProtectionMap';
 
 const MODEL: DerivedModel = {
@@ -78,6 +78,19 @@ describe('ProtectionMap', () => {
     expect(rail.querySelector('[data-goal="cost"]')).toBeTruthy();
     expect(rail.querySelector('[data-goal="quality"]')).toBeTruthy();
     expect(rail.querySelector('[data-goal="drift"]')).toBeTruthy();
+  });
+
+  it('applies a cost overlay tint to cells with observed runtime', async () => {
+    mockFetch(MODEL);
+    render(<ProtectionMap />);
+    await screen.findByTestId('pm-grid');
+    const queue = screen.getByTestId('pm-cell-build: production-queue'); // observed minutes: 1000
+    expect(queue.getAttribute('style') ?? '').not.toMatch(/background/); // no tint under States
+    fireEvent.click(screen.getByTestId('pm-overlay-cost'));
+    expect(screen.getByTestId('pm-overlay-cost')).toHaveAttribute('aria-pressed', 'true');
+    expect(queue.getAttribute('style') ?? '').toMatch(/background/); // tinted under Cost
+    // a cell with no observed data stays untinted
+    expect(screen.getByTestId('pm-cell-build: production-pr').getAttribute('style') ?? '').not.toMatch(/background/);
   });
 
   it('shows an error when the map cannot be derived', async () => {

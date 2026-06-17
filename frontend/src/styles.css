@@ -932,3 +932,13 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .pm-finding-check { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 .pm-finding-detail { color: var(--muted); font-size: 11px; }
 .pm-finding-drift .pm-finding-check { color: var(--fail); }
+
+/* --- Protection map: overlay toggle --- */
+.pm-overlay-toggle { display: inline-flex; gap: 0; margin-left: auto; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.pm-ov { font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; border: none;
+  background: var(--surface); color: var(--muted); padding: 2px 9px; }
+.pm-ov + .pm-ov { border-left: 1px solid var(--border); }
+.pm-ov:hover { color: var(--text); }
+.pm-ov.active { background: var(--accent-strong); color: #fff; }
+/* under an overlay the heat carries the signal — dim the state glyph so the tint reads */
+.pm-cell.pm-overlaid { color: color-mix(in srgb, var(--muted) 70%, transparent); }
