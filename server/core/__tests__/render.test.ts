@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from 'yaml';
-import { renderTierAssign, renderQuarantine, renderTimeout, renderRunnerRoute, pinActionSha, addConcurrency } from '../edit/render';
+import { renderTierAssign, renderQuarantine, renderTimeout, renderRunnerRoute, pinActionSha, addConcurrency, renderShiftLeft, renderRemoveCheck } from '../edit/render';
 
 const WF = `name: CI
 on:
@@ -197,5 +197,36 @@ describe('addConcurrency (workflow-level concurrency block)', () => {
 
   it('refuses text with no top-level jobs:', () => {
     expect(addConcurrency(`on: push\n`, 'x').ok).toBe(false);
+  });
+});
+
+describe('renderShiftLeft (relax a simple event guard — inverse of G2)', () => {
+  const GUARDED = `on:\n  pull_request:\n  merge_group:\njobs:\n  heavy:\n    if: \${{ github.event_name == 'merge_group' }}\n    runs-on: x\n    steps: []\n`;
+
+  it('removes the simple event-guard if: and round-trips (job now has no if:)', () => {
+    const r = renderShiftLeft(GUARDED, 'heavy');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const after = parse(r.newText);
+    expect(after.jobs.heavy.if).toBeUndefined();
+    expect(after.jobs.heavy['runs-on']).toBe('x');
+    expect(r.diff).toMatch(/shift left/);
+  });
+
+  it('refuses a job with no if: (already shifts left)', () => {
+    const wf = `on: push\njobs:\n  a:\n    runs-on: x\n    steps: []\n`;
+    expect(renderShiftLeft(wf, 'a').ok).toBe(false);
+  });
+
+  it('refuses an if: that is not a simple event guard (refuse-not-merge)', () => {
+    const wf = `on: push\njobs:\n  a:\n    if: \${{ github.event_name == 'merge_group' && needs.x.result == 'success' }}\n    runs-on: x\n    steps: []\n`;
+    const r = renderShiftLeft(wf, 'a');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toMatch(/not a simple event guard/);
+  });
+
+  it('refuses a missing job', () => {
+    expect(renderShiftLeft(GUARDED, 'nope').ok).toBe(false);
   });
 });

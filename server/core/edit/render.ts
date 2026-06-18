@@ -167,3 +167,30 @@ export function addConcurrency(yamlText: string, group: string): EditResult {
   const diff = [`@@ add workflow concurrency @@`, ...added.map((l) => `+${l}`), ` ${lines[jobsIdx]}`].join('\n');
   return { ok: true, newText, addedLine: added.join('\n'), diff };
 }
+
+// A whole-expression simple event guard (mirrors pipeline-model/narrow-events SIMPLE).
+const SIMPLE_EVENT_GUARD = /^\s*(?:\$\{\{)?\s*github\.event_name\s*(?:==|!=)\s*'[a-z_]+'\s*(?:\}\})?\s*$/;
+
+/** Shift a check left (inverse of G2): remove a job's *simple* event-guard `if:`
+ *  so it runs on all the workflow's events (incl. pull_request). Refuse-not-merge:
+ *  any `if:` beyond a single `github.event_name` comparison is refused (→ scaffold),
+ *  never textually merged. Refuses a missing job or a job with no `if:`. */
+export function renderShiftLeft(yamlText: string, jobId: string): EditResult {
+  const lines = yamlText.split('\n');
+  const loc = locateJobBlock(lines, jobId);
+  if (!loc) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
+  if (loc.propIndent === null) return { ok: false, reason: `job "${jobId}" has no body to edit` };
+  const { jobLine, end, propIndent } = loc;
+  let ifIdx = -1;
+  for (let i = jobLine + 1; i < end; i++) {
+    if (lines[i].match(/^(\s*)/)![1] === propIndent && /^if\s*:/.test(lines[i].trim())) { ifIdx = i; break; }
+  }
+  if (ifIdx < 0) return { ok: false, reason: `job "${jobId}" has no \`if:\` event guard to relax — already shifts left` };
+  const ifVal = lines[ifIdx].slice(lines[ifIdx].indexOf(':') + 1).trim();
+  if (!SIMPLE_EVENT_GUARD.test(ifVal)) {
+    return { ok: false, reason: `job "${jobId}" \`if:\` is not a simple event guard — edit by hand (use the prompt)` };
+  }
+  const newText = [...lines.slice(0, ifIdx), ...lines.slice(ifIdx + 1)].join('\n');
+  const diff = [`@@ job ${jobId} — shift left (remove event guard) @@`, `-${lines[ifIdx]}`, ...lines.slice(jobLine, jobLine + 1).map((l) => ` ${l}`)].join('\n');
+  return { ok: true, newText, addedLine: '', diff };
+}
