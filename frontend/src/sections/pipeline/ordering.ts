@@ -30,3 +30,16 @@ export function splitCohort(prs: PrView[]): { lead: PrView[]; cohort: PrView[] }
     cohort: prs.filter(inCohort),
   };
 }
+
+/** Split a deploy cohort into its disjoint stages so the two aren't lumped under
+ *  one "awaiting prod" label: a PR still rolling out to QA (`qa-deploy`) is
+ *  awaiting QA; one live on QA but not prod (`awaiting-prod`) is awaiting prod. */
+export function deployBreakdown(prs: PrView[]): { awaitingQa: number; awaitingProd: number } {
+  let awaitingQa = 0;
+  let awaitingProd = 0;
+  for (const p of prs) {
+    if (p.stage.stage === 'qa-deploy') awaitingQa += 1;
+    else if (p.stage.stage === 'awaiting-prod') awaitingProd += 1;
+  }
+  return { awaitingQa, awaitingProd };
+}

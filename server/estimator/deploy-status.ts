@@ -73,13 +73,18 @@ export function computeRepoDeploy(
     const liveSha = envShas.get(`${repo}/${env.name}`) ?? null;
     return { name: env.name, liveSha, reachable: liveSha != null };
   });
+  // Partition the merged-but-not-fully-deployed set by where each SHA actually
+  // sits, so a PR awaiting QA isn't ALSO counted as awaiting prod (the two
+  // metrics must be disjoint): prod-live → done; QA-live-only → awaiting prod;
+  // neither → awaiting QA.
   let awaitingQa = 0;
   let awaitingProd = 0;
   const repoMerged: ChainInput[] = [];
   for (const rec of history.listTrackedMerged(retentionDays, now)) {
     if (rec.repo !== repo) continue;
-    if (rec.qaLiveAt == null) awaitingQa += 1;
-    if (rec.prodLiveAt == null) awaitingProd += 1;
+    if (rec.prodLiveAt != null) { /* fully deployed — counts toward neither */ }
+    else if (rec.qaLiveAt != null) awaitingProd += 1; // on QA, awaiting prod
+    else awaitingQa += 1;                              // not yet on QA
     repoMerged.push({ number: rec.number, mergeCommitSha: rec.mergeCommitSha,
       mergedAt: rec.mergedAt, qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt });
   }

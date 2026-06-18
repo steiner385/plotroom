@@ -8,7 +8,7 @@ import type { DashboardState, PrView } from '../../types';
 import { PrRow } from '../../PrRow';
 import { QueueTrain } from '../../QueueTrain';
 import { StatusStrip, bucketPr, type Bucket } from '../../StatusStrip';
-import { splitCohort } from './ordering';
+import { splitCohort, deployBreakdown } from './ordering';
 import { nextToMerge } from './queueFront';
 
 /** Compact ETA like "~5m" / "~1h"; null when unknown. */
@@ -88,14 +88,23 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
                   })()}
                   {visiblePrs.length === 0 && hiddenCount === 0 && <p className="empty">no active PRs</p>}
                   {lead.map((pr) => row(pr, r))}
-                  {cohort.length > 0 && (
-                    <div className="pipeline-cohort">
-                      <button type="button" className="cohort-toggle" aria-expanded={cohortOpen} onClick={() => toggleCohort(r.repo)}>
-                        <span aria-hidden="true">{cohortOpen ? '▾' : '▸'}</span> {cohort.length} merged · awaiting prod deploy
-                      </button>
-                      {cohortOpen && cohort.map((pr) => row(pr, r))}
-                    </div>
-                  )}
+                  {cohort.length > 0 && (() => {
+                    // Disjoint deploy stages — never lump awaiting-QA into "awaiting prod".
+                    const { awaitingQa, awaitingProd } = deployBreakdown(cohort);
+                    const parts = [
+                      awaitingQa > 0 ? `${awaitingQa} awaiting QA` : null,
+                      awaitingProd > 0 ? `${awaitingProd} awaiting prod` : null,
+                    ].filter(Boolean);
+                    const label = parts.length ? parts.join(' · ') : 'deploying';
+                    return (
+                      <div className="pipeline-cohort">
+                        <button type="button" className="cohort-toggle" aria-expanded={cohortOpen} onClick={() => toggleCohort(r.repo)}>
+                          <span aria-hidden="true">{cohortOpen ? '▾' : '▸'}</span> {cohort.length} merged · {label}
+                        </button>
+                        {cohortOpen && cohort.map((pr) => row(pr, r))}
+                      </div>
+                    );
+                  })()}
                   {r.deploy?.chain && (r.deploy.chain.inFlight || r.deploy.chain.supersededCount > 0) && (
                     <p className="deploy-chain" role="status" aria-label="Deploy chain">
                       {r.deploy.chain.inFlight && (

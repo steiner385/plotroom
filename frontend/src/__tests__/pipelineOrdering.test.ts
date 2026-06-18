@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { attentionSort, splitCohort } from '../sections/pipeline/ordering';
+import { attentionSort, splitCohort, deployBreakdown } from '../sections/pipeline/ordering';
 import type { PrView } from '../types';
 
 const pr = (number: number, stage: string, substate: string | null = null, overdue = false): PrView =>
@@ -42,5 +42,18 @@ describe('splitCohort (collapse the awaiting-prod herd, keep the ones that need 
     const { lead, cohort } = splitCohort([pr(1, 'qa-deploy', null, true), pr(2, 'qa-deploy')]);
     expect(lead.map((p) => p.number)).toEqual([1]);
     expect(cohort.map((p) => p.number)).toEqual([2]);
+  });
+});
+
+describe('deployBreakdown (awaiting-QA vs awaiting-prod must not be lumped)', () => {
+  it('separates qa-deploy (awaiting QA) from awaiting-prod', () => {
+    const b = deployBreakdown([
+      pr(1, 'qa-deploy'), pr(2, 'qa-deploy'), pr(3, 'awaiting-prod'),
+    ]);
+    expect(b).toEqual({ awaitingQa: 2, awaitingProd: 1 });
+  });
+
+  it('is all-zero for a non-deploy set', () => {
+    expect(deployBreakdown([pr(1, 'ci'), pr(2, 'queue')])).toEqual({ awaitingQa: 0, awaitingProd: 0 });
   });
 });

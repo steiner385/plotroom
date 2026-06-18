@@ -65,9 +65,21 @@ describe('PipelineView (the PR pipeline view, ported into the workspace)', () =>
     // the running PR stays visible; the 2 awaiting-prod collapse behind a toggle
     expect(screen.getByText('running pr')).toBeInTheDocument();
     expect(screen.queryByText('merged a')).not.toBeInTheDocument();
-    const toggle = screen.getByRole('button', { name: /2 merged · awaiting prod/i });
+    // qa-deploy PRs are awaiting QA — must NOT be lumped under "awaiting prod"
+    const toggle = screen.getByRole('button', { name: /2 merged · 2 awaiting QA/i });
+    expect(toggle.textContent).not.toMatch(/awaiting prod/i);
     fireEvent.click(toggle);
     expect(screen.getByText('merged a')).toBeInTheDocument();
+  });
+
+  it('splits the cohort label into awaiting-QA and awaiting-prod (no lumping)', () => {
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null, prs: [
+      pr('acme/alpha', 1, 'to qa', 'qa-deploy'),
+      pr('acme/alpha', 2, 'to prod a', 'awaiting-prod'),
+      pr('acme/alpha', 3, 'to prod b', 'awaiting-prod'),
+    ] }] } as never);
+    render(<PipelineView state={st} focusedRepo={null} />);
+    expect(screen.getByRole('button', { name: /3 merged · 1 awaiting QA · 2 awaiting prod/i })).toBeInTheDocument();
   });
 
   it('surfaces the deploy chain: the in-flight SHA + superseded count (roadmap 4.4c)', () => {

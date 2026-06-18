@@ -5896,7 +5896,8 @@ describe('per-repo laneHealth on DashboardState', () => {
 describe('per-repo deploy status on DashboardState (Deploy lane, Spec 2)', () => {
   const NO_DEPLOY: AppConfig = { ...DEFAULTS, ancestrySource: 'clone', owners: ['acme', 'octo'] };
   it('caches the live sha per env from the deploy cycle and counts awaiting drift', async () => {
-    // a merged PR not yet live on qa OR prod → awaitingQa=1, awaitingProd=1
+    // a merged PR not yet live on qa → awaiting QA only (NOT also awaiting prod —
+    // the two are disjoint: it can't be awaiting prod before it's even on QA)
     history.upsertMergedPr({ repo: 'acme/widgets', number: 8951, title: 'feat: allowance', url: 'u8951',
       mergedAt: '2026-06-10T11:40:00Z', mergeCommitSha: 'squash8951' });
     // health() returns a sha but ancestry is 'no' → env reachable, PR stays not-live
@@ -5909,7 +5910,7 @@ describe('per-repo deploy status on DashboardState (Deploy lane, Spec 2)', () =>
     const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!;
     expect(repo.deploy).toBeDefined();
     expect(repo.deploy!.awaitingQa).toBe(1);
-    expect(repo.deploy!.awaitingProd).toBe(1);
+    expect(repo.deploy!.awaitingProd).toBe(0); // awaiting QA, not prod (disjoint)
     const qa = repo.deploy!.envs.find((e) => e.name === 'qa')!;
     expect(qa.liveSha).toBe('liveSha-qa');
     expect(qa.reachable).toBe(true);
