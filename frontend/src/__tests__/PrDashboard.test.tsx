@@ -1,5 +1,5 @@
 // frontend/src/__tests__/PrDashboard.test.tsx
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { PrDashboard } from '../embed';
 
 // Reuse the MockEventSource pattern (see useDashboard.test.tsx).
@@ -26,6 +26,10 @@ it('renders no banner/navigation/main landmark', () => {
   expect(container.querySelector('[role="banner"]')).toBeNull();
   expect(container.querySelector('[role="navigation"]')).toBeNull();
   expect(container.querySelector('[role="main"]')).toBeNull();
+  // Assert that implicit ARIA landmark roles are also absent
+  expect(screen.queryByRole('banner')).toBeNull();
+  expect(screen.queryByRole('navigation')).toBeNull();
+  expect(screen.queryByRole('main')).toBeNull();
 });
 
 it('wraps content in .prdash-root and does not style document.body', () => {
