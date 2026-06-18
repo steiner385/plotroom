@@ -283,6 +283,68 @@ jobs:
     expect(ok.body.diff).toMatch(/continue-on-error/);
   });
 
+  it('registers a 48h quarantine on apply and exposes it via GET /quarantines (roadmap 4.5)', async () => {
+    const QCI = `name: CI
+on: { pull_request: {}, merge_group: {} }
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm lint
+`;
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? QCI : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(), flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const registered: { repo: string; check: string; until: string; reason: string | null }[] = [];
+    const a = express(); a.use(express.json());
+    a.use('/api/workspace', createWorkspaceRouter({
+      deriver: new ModelDeriver(deps),
+      prClient: { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn(async () => ({ number: 88, url: 'u' })) as unknown as PrClient['openDraftPr'] },
+      recordQuarantine: (repo, check, until, reason) => registered.push({ repo, check, until, reason }),
+      activeQuarantines: (repo) => registered.filter((q) => q.repo === repo).map((q) => ({ check: q.check, until: q.until, reason: q.reason })),
+    }));
+    const apply = await request(a).post('/api/workspace/quarantine').send({ repo: 'o/r', check: 'lint', jobId: 'lint', dryRun: false });
+    expect(apply.status).toBe(200);
+    expect(apply.body).toMatchObject({ opened: true, number: 88 });
+    // a 48h window was registered
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).toMatchObject({ repo: 'o/r', check: 'lint' });
+    const dt = new Date(apply.body.quarantinedUntil).getTime() - Date.now();
+    expect(dt).toBeGreaterThan(47 * 3600_000);
+    expect(dt).toBeLessThan(49 * 3600_000);
+    // and the read endpoint surfaces it
+    const list = await request(a).get('/api/workspace/quarantines?repo=o/r');
+    expect(list.status).toBe(200);
+    expect(list.body.quarantines).toEqual([{ check: 'lint', until: apply.body.quarantinedUntil, reason: 'quarantine via #88' }]);
+  });
+
+  it('a dry-run quarantine does NOT register (preview only, roadmap 4.5)', async () => {
+    const QCI = `name: CI
+on: { pull_request: {}, merge_group: {} }
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm lint
+`;
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? QCI : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(), flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const registered: unknown[] = [];
+    const a = express(); a.use(express.json());
+    a.use('/api/workspace', createWorkspaceRouter({
+      deriver: new ModelDeriver(deps),
+      prClient: { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn() as unknown as PrClient['openDraftPr'] },
+      recordQuarantine: () => registered.push(true),
+    }));
+    await request(a).post('/api/workspace/quarantine').send({ repo: 'o/r', check: 'lint', jobId: 'lint', dryRun: true });
+    expect(registered).toHaveLength(0);
+  });
+
   it('GET /budgets returns gauges + alert-worthy subset (Group J2/J3)', async () => {
     const deps: ModelDeriveDeps = {
       resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? CI : null)),

@@ -1012,6 +1012,46 @@ describe('group failures (issue #38)', () => {
   });
 });
 
+// Flake-quarantine registry (roadmap 4.5) — auto-unquarantine via `until` expiry
+// ---------------------------------------------------------------------------
+
+describe('quarantine registry (roadmap 4.5)', () => {
+  const REPO2 = 'acme/widgets';
+
+  it('records a quarantine and returns it while active (now < until)', () => {
+    expect(h.recordQuarantine(REPO2, 'flaky-e2e', '2026-06-20T00:00:00Z', 'flaky 8/10', '2026-06-18T00:00:00Z')).toBe(true);
+    const active = h.activeQuarantines('2026-06-19T00:00:00Z');
+    expect(active).toEqual([{ repo: REPO2, checkName: 'flaky-e2e', until: '2026-06-20T00:00:00Z',
+      reason: 'flaky 8/10', createdAt: '2026-06-18T00:00:00Z' }]);
+  });
+
+  it('AUTO-unquarantines: an expired quarantine (now >= until) is no longer active', () => {
+    h.recordQuarantine(REPO2, 'flaky-e2e', '2026-06-20T00:00:00Z', null, '2026-06-18T00:00:00Z');
+    expect(h.activeQuarantines('2026-06-21T00:00:00Z')).toHaveLength(0); // window passed
+  });
+
+  it('re-quarantine UPSERTs (extends the window, one row per repo×check)', () => {
+    h.recordQuarantine(REPO2, 'flaky-e2e', '2026-06-20T00:00:00Z', 'first', '2026-06-18T00:00:00Z');
+    h.recordQuarantine(REPO2, 'flaky-e2e', '2026-06-25T00:00:00Z', 'extended', '2026-06-19T00:00:00Z');
+    const active = h.activeQuarantines('2026-06-21T00:00:00Z'); // active only under the extension
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({ until: '2026-06-25T00:00:00Z', reason: 'extended' });
+  });
+
+  it('scopes by repo when one is given; fleet-wide with ""', () => {
+    h.recordQuarantine(REPO2, 'a', '2026-06-25T00:00:00Z', null, '2026-06-18T00:00:00Z');
+    h.recordQuarantine('other/repo', 'b', '2026-06-25T00:00:00Z', null, '2026-06-18T00:00:00Z');
+    expect(h.activeQuarantines('2026-06-19T00:00:00Z', REPO2).map((q) => q.checkName)).toEqual(['a']);
+    expect(h.activeQuarantines('2026-06-19T00:00:00Z')).toHaveLength(2);
+  });
+
+  it('rejects empty identity fields', () => {
+    expect(h.recordQuarantine('', 'c', '2026-06-25T00:00:00Z', null, '2026-06-18T00:00:00Z')).toBe(false);
+    expect(h.recordQuarantine(REPO2, '', '2026-06-25T00:00:00Z', null, '2026-06-18T00:00:00Z')).toBe(false);
+    expect(h.recordQuarantine(REPO2, 'c', '', null, '2026-06-18T00:00:00Z')).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Issues #39/#40: queue ops counts + train-duration samples
 // ---------------------------------------------------------------------------

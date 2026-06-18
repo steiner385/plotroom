@@ -80,6 +80,8 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
     policy: (repo: string) => fetchImpl(`${base}/policy?${q(repo)}`).then(json<PolicyDto>),
     quarantineDryRun: (repo: string, check: string, jobId: string) =>
       fetchImpl(`${base}/quarantine`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, check, jobId, dryRun: true }) }).then(json<{ dryRun: true; diff: string; baseSha: string }>),
+    quarantines: (repo: string) =>
+      fetchImpl(`${base}/quarantines?${q(repo)}`).then(json<{ repo: string; quarantines: { check: string; until: string; reason: string | null }[] }>),
     plan: (repo: string, moves: TierMoveDto[]) =>
       fetchImpl(`${base}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, moves }) }).then(json<{ combinedCostDeltaMinutes: number; legal: boolean; reason?: string; results: SimResultDto[] }>),
     candidate: (repo: string, mutations: CandidateMutationDto[], baseSha?: string) =>

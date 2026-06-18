@@ -38,6 +38,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
       if (check === 'build') throw new Error('"build" is a required merge gate — cannot quarantine it');
       return { dryRun: true as const, diff: '@@ e2e quarantine — continue-on-error @@', baseSha: 'abc' };
     }),
+    quarantines: vi.fn(async (repo: string) => ({ repo, quarantines: [] })),
     plan: vi.fn(async (_r: string, moves: { check: string }[]) => ({
       combinedCostDeltaMinutes: -5000, legal: !moves.some((m) => m.check === 'build'),
       reason: moves.some((m) => m.check === 'build') ? 'build: required-gate' : undefined, results: [],

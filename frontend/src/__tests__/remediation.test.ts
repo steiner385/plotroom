@@ -58,6 +58,15 @@ describe('remediationProposals (roadmap 5.5 — auto-remediation proposals)', ()
     expect(remediationProposals(s)).toHaveLength(0);
   });
 
+  it('suppresses a check that is already quarantined (closes the WS4.5↔5.5 loop)', () => {
+    const s = state([
+      pr('o/r', 1, [chk('flaky-e2e', 'failure', { likelyFlake: true })]),
+      pr('o/r', 2, [chk('flaky-e2e', 'failure', { likelyFlake: true })]),
+    ]);
+    expect(remediationProposals(s)).toHaveLength(1);
+    expect(remediationProposals(s, 2, new Set(['flaky-e2e']))).toHaveLength(0); // already quarantined → no re-propose
+  });
+
   it('ranks by blast radius (most PRs blocked first) and reports cross-repo spread', () => {
     const s = state([
       pr('o/a', 1, [chk('small', 'failure', { likelyFlake: true }), chk('big', 'failure', { likelyFlake: true })]),

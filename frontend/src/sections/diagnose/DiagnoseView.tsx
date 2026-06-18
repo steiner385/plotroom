@@ -2,8 +2,9 @@
 // check without leaving its context. Lists open PRs (focused-repo first) and, for
 // the selected PR, surfaces the blocker + the per-check Gantt (the existing
 // CheckGantt, re-delivered under the new IA). Pure blocker helper + thin view.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { DashboardState, PrView, CheckView } from '../../types';
+import type { WorkspaceApi } from '../../shell/workspaceApi';
 import { CheckGantt } from '../../CheckGantt';
 import { clusterFailures } from './clustering';
 import { queueIncidents } from './incidents';
@@ -35,13 +36,26 @@ export function prsForDiagnose(state: DashboardState, focusedRepo?: string | nul
   return focusedRepo ? [...flat].sort((a, b) => (a.repo === focusedRepo ? -1 : b.repo === focusedRepo ? 1 : 0)) : flat;
 }
 
-export interface DiagnoseViewProps { state: DashboardState; focusedRepo?: string | null }
+export interface DiagnoseViewProps { state: DashboardState; focusedRepo?: string | null; api?: WorkspaceApi }
 
-export function DiagnoseView({ state, focusedRepo }: DiagnoseViewProps) {
+export function DiagnoseView({ state, focusedRepo, api }: DiagnoseViewProps) {
   const prs = useMemo(() => prsForDiagnose(state, focusedRepo), [state, focusedRepo]);
   const clusters = useMemo(() => clusterFailures(state, 3), [state]);
   const incidents = useMemo(() => queueIncidents(state), [state]);
-  const remediations = useMemo(() => remediationProposals(state), [state]);
+
+  // Already-quarantined checks (roadmap 4.5) — fetched for the focused repo so the
+  // remediation composer doesn't re-propose a flake that's already in quarantine.
+  const [quarantined, setQuarantined] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    if (!api || !focusedRepo) { setQuarantined(new Set()); return; }
+    let cancelled = false;
+    api.quarantines(focusedRepo)
+      .then((r) => { if (!cancelled) setQuarantined(new Set(r.quarantines.map((q) => q.check))); })
+      .catch(() => { if (!cancelled) setQuarantined(new Set()); });
+    return () => { cancelled = true; };
+  }, [api, focusedRepo]);
+
+  const remediations = useMemo(() => remediationProposals(state, 2, quarantined), [state, quarantined]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const key = (p: PrView) => `${p.repo}#${p.number}`;
   const selected = prs.find((p) => key(p) === selectedKey) ?? prs[0] ?? null;

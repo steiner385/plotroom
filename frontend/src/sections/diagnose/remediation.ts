@@ -30,7 +30,8 @@ export interface RemediationProposal {
  * (c) failing as a likely flake on a MAJORITY of those — so a genuinely-failing
  * gate is never proposed for quarantine. Ranked by blast radius (PRs blocked).
  */
-export function remediationProposals(state: DashboardState, minBlocked = 2): RemediationProposal[] {
+export function remediationProposals(state: DashboardState, minBlocked = 2,
+  quarantined?: ReadonlySet<string>): RemediationProposal[] {
   const byCheck = new Map<string, { prs: Set<string>; flake: number; required: boolean; repos: Set<string> }>();
   for (const r of state.repos) {
     for (const pr of r.prs) {
@@ -50,6 +51,7 @@ export function remediationProposals(state: DashboardState, minBlocked = 2): Rem
 
   const proposals: RemediationProposal[] = [];
   for (const [check, e] of byCheck) {
+    if (quarantined?.has(check)) continue; // already quarantined (roadmap 4.5) — don't re-propose
     const blocked = e.prs.size;
     if (!e.required || blocked < minBlocked) continue;
     if (e.flake < 2 || e.flake / blocked < 0.5) continue; // majority must look flaky

@@ -43,9 +43,18 @@ export interface WorkspaceRouterDeps {
   budgets?: () => Promise<{ budgets: Budget[]; current: Partial<Record<BudgetKind, number>> }>;
   /** write path (Group L2): record an action the tool actually opened into the audit log. */
   recordAction?: (row: AuditRow) => void;
+  /** flake-quarantine registry (roadmap 4.5): register a quarantine (with its
+   *  auto-unquarantine `until`) when a quarantine PR is opened, and read the
+   *  still-active set for a repo so the surface stops re-proposing it. */
+  recordQuarantine?: (repo: string, check: string, until: string, reason: string | null) => void;
+  activeQuarantines?: (repo: string) => { check: string; until: string; reason: string | null }[];
   /** multi-file governed draft-PR opener (Build apply exit, Inc 3b); absent → apply unwired. */
   openMultiFileDraftPr?: (input: MultiFileDraftInput) => Promise<{ number: number; url: string }>;
 }
+
+/** Auto-unquarantine window (roadmap 4.5): a quarantine expires 48h after it's
+ *  opened — matching the remediation proposal's "quarantine 48h" recommendation. */
+const QUARANTINE_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 function repoOf(req: Request, res: Response): string | null {
   const repo = String(req.query.repo ?? req.body?.repo ?? '');
@@ -209,11 +218,22 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     if (req.body?.dryRun !== false) return res.json({ dryRun: true, diff: prep.prepared.diff, baseSha: prep.prepared.baseSha });
     const out = await openDraftPr(deps.deriver, deps.prClient, prep.prepared, check);
     if (out.opened) {
-      deps.recordAction?.({ at: new Date().toISOString(), repo, action: 'quarantine', target: check, result: `opened #${out.number}` });
-      return res.json({ opened: true, number: out.number, url: out.url });
+      const now = new Date();
+      deps.recordAction?.({ at: now.toISOString(), repo, action: 'quarantine', target: check, result: `opened #${out.number}` });
+      // Register the quarantine with a 48h auto-unquarantine window (roadmap 4.5).
+      const until = new Date(now.getTime() + QUARANTINE_WINDOW_MS).toISOString();
+      deps.recordQuarantine?.(repo, check, until, `quarantine via #${out.number}`);
+      return res.json({ opened: true, number: out.number, url: out.url, quarantinedUntil: until });
     }
     if (out.stale) return res.status(409).json({ error: 'HEAD drifted — re-derive and re-confirm', headSha: out.headSha });
     return res.status(502).json({ error: out.reason });
+  });
+
+  // GET /quarantines — the still-active flake quarantines for a repo (roadmap 4.5).
+  // Auto-unquarantine is implicit: expired entries simply drop out of the read.
+  r.get('/quarantines', (req, res) => {
+    const repo = repoOf(req, res); if (!repo) return;
+    res.json({ repo, quarantines: deps.activeQuarantines?.(repo) ?? [] });
   });
 
   // GET /budgets — quota/budget gauges + the alert-worthy subset (Group J2/J3).

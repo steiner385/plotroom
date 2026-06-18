@@ -355,6 +355,10 @@ async function main() {
           auditLog: async (repo) => wsStore.auditLog(repo),
           policyStore: { get: async (repo) => wsStore.getPolicies(repo), put: async (repo, rules) => wsStore.putPolicies(repo, rules) },
           recordAction: (row) => wsStore.recordAction(row), // write path: opened actions → audit log
+          // Flake-quarantine registry (roadmap 4.5): persist on open, read active set.
+          recordQuarantine: (repo, check, until, reason) => history.recordQuarantine(repo, check, until, reason, new Date().toISOString()),
+          activeQuarantines: (repo) => history.activeQuarantines(new Date().toISOString(), repo)
+            .map((q) => ({ check: q.checkName, until: q.until, reason: q.reason })),
           // Group I1 liveRuleset: read the EVALUATED branch rules (GET /rules/branches/{b})
           // — readable without administration:read (unlike the /rulesets listing) — and
           // extract required-status-check contexts. Returns null on any error → the

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { DiagnoseView, blockingCheck, prsForDiagnose } from '../sections/diagnose/DiagnoseView';
 import type { DashboardState, PrView, CheckView } from '../types';
 
@@ -89,6 +89,18 @@ describe('DiagnoseView', () => {
   it('shows NO remediation card when there is nothing to remediate', () => {
     render(<DiagnoseView state={s} />); // build fails on one PR, not flaky
     expect(screen.queryByRole('region', { name: /auto-remediation proposals/i })).not.toBeInTheDocument();
+  });
+
+  it('suppresses the remediation proposal for an already-quarantined check (roadmap 4.5)', async () => {
+    const flaky = state([
+      pr('o/a', 1, [check('flaky-e2e', { conclusion: 'failure', likelyFlake: true })]),
+      pr('o/a', 2, [check('flaky-e2e', { conclusion: 'failure', likelyFlake: true })]),
+    ]);
+    const api = { quarantines: vi.fn(async () => ({ repo: 'o/a', quarantines: [{ check: 'flaky-e2e', until: '2026-12-01T00:00:00Z', reason: 'q' }] })) } as unknown as import('../shell/workspaceApi').WorkspaceApi;
+    render(<DiagnoseView state={flaky} focusedRepo="o/a" api={api} />);
+    // wait for the quarantine fetch to resolve and the card to disappear
+    await waitFor(() => expect(screen.queryByRole('region', { name: /auto-remediation proposals/i })).not.toBeInTheDocument());
+    expect(api.quarantines).toHaveBeenCalledWith('o/a');
   });
 
   it('PR-list rows are keyboard-operable buttons (roadmap 2.2 a11y)', () => {

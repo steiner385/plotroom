@@ -127,7 +127,7 @@ export function WorkspaceApp() {
         content={{
           health: <><ForecastBanner api={api} repo={focused} /><HealthView state={state} connected={connected} onFocusRepo={focus} onJumpToLane={(laneId) => { location.hash = hashForSection(laneToSection(laneId)); }} /></>,
           pipeline: <PipelineView state={state} focusedRepo={focused} />,
-          diagnose: <DiagnoseView state={state} focusedRepo={focused} />,
+          diagnose: <DiagnoseView state={state} focusedRepo={focused} api={api} />,
           'model-edit': <ModelEditView repo={focused} api={api} />,
           insights: <InsightsView repo={focused} api={api} />,
         }}

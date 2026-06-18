@@ -79,6 +79,12 @@ export interface GroupFailureRow {
   conclusion: string | null;
 }
 
+/** One active flake-quarantine (roadmap 4.5). `until` is the auto-unquarantine
+ *  expiry (ISO); a row is active only while now < until. */
+export interface QuarantineRow {
+  repo: string; checkName: string; until: string; reason: string | null; createdAt: string;
+}
+
 /** One completed merge_group check (queue-efficiency panel, #23). */
 export interface MergeGroupCheckRow {
   repo: string; checkName: string; conclusion: string;
@@ -157,6 +163,8 @@ export class HistoryStore {
   private readonly stmtInsertConfigChange: Database.Statement;
   private readonly stmtSelectConfigChangesSince: Database.Statement;
   private readonly stmtLatestConfigValues: Database.Statement;
+  private readonly stmtUpsertQuarantine: Database.Statement;
+  private readonly stmtSelectActiveQuarantines: Database.Statement;
   private readonly stmtUpsertPr: Database.Statement;
   private readonly stmtMarkQaLive: Database.Statement;
   private readonly stmtMarkProdLive: Database.Statement;
@@ -291,6 +299,16 @@ export class HistoryStore {
         UNIQUE(repo, observed_at, field)
       );
       CREATE INDEX IF NOT EXISTS idx_config_changes ON config_changes(observed_at);
+      -- Flake-quarantine registry (roadmap 4.5): one row per quarantined check,
+      -- with an until expiry that drives AUTO-unquarantine — a quarantine is
+      -- active only while now < until, so the surface can flag auto-expiry and
+      -- stop re-proposing it. Re-quarantine UPSERTs (extends the window).
+      CREATE TABLE IF NOT EXISTS quarantines (
+        repo TEXT NOT NULL, check_name TEXT NOT NULL,
+        until TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL,
+        PRIMARY KEY (repo, check_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_quarantines_until ON quarantines(until);
       -- Cost actuals import (cost explorer phase 2): operator-pushed ACTUAL
       -- daily spend per scope ('fleet', or a single pool label) — deliberately
       -- provider-agnostic: anything that can curl POST /api/cost/actuals can
@@ -424,6 +442,16 @@ export class HistoryStore {
     this.stmtSelectConfigChangesSince = this.db.prepare(
       `SELECT repo, observed_at AS at, field, old_value, new_value
        FROM config_changes WHERE observed_at >= ? ORDER BY repo, observed_at`
+    );
+    // Flake-quarantine registry (roadmap 4.5). UPSERT extends an existing
+    // quarantine's window; active reads filter on until > now (auto-unquarantine).
+    this.stmtUpsertQuarantine = this.db.prepare(
+      `INSERT INTO quarantines (repo, check_name, until, reason, created_at) VALUES (?,?,?,?,?)
+       ON CONFLICT(repo, check_name) DO UPDATE SET until=excluded.until, reason=excluded.reason`
+    );
+    this.stmtSelectActiveQuarantines = this.db.prepare(
+      `SELECT repo, check_name, until, reason, created_at FROM quarantines
+       WHERE until > ? AND (? = '' OR repo = ?) ORDER BY repo, check_name`
     );
     // Latest new_value per (repo, field) — seeds the poller's in-memory baseline
     // on restart so the first cycle doesn't re-emit unchanged config as a change.
@@ -990,6 +1018,25 @@ export class HistoryStore {
   recordConfigChange(repo: string, observedAt: string, field: string,
     oldValue: string | null, newValue: string | null): boolean {
     return this.stmtInsertConfigChange.run(repo, observedAt, field, oldValue, newValue).changes > 0;
+  }
+
+  /** Register (or extend) a flake quarantine (roadmap 4.5). `until` is the
+   *  auto-unquarantine expiry; re-quarantine UPSERTs the window. Rejects empties. */
+  recordQuarantine(repo: string, checkName: string, until: string, reason: string | null,
+    createdAt: string): boolean {
+    if (!repo || !checkName || !until || !createdAt) return false;
+    this.stmtUpsertQuarantine.run(repo, checkName, until, reason, createdAt);
+    return true;
+  }
+
+  /** Quarantines still active at `now` (now < until) — expired ones auto-drop out.
+   *  Pass a repo to scope, or '' for the whole fleet. */
+  activeQuarantines(now: string, repo = ''): QuarantineRow[] {
+    const rows = this.stmtSelectActiveQuarantines.all(now, repo, repo) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      repo: r.repo as string, checkName: r.check_name as string, until: r.until as string,
+      reason: (r.reason as string | null) ?? null, createdAt: r.created_at as string,
+    }));
   }
 
   /** Config-change rows at/after `since`, ordered repo → observed_at. */
