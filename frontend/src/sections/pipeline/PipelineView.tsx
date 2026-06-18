@@ -73,6 +73,15 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
               return (
                 <>
                   <QueueTrain queue={r.queue} />
+                  {r.deploy && (r.deploy.awaitingQa > 0 || r.deploy.awaitingProd > 0) && (
+                    <p className="deploy-backlog" role="status" aria-label="Deploy backlog">
+                      📦 Deploy backlog:{' '}
+                      {[
+                        r.deploy.awaitingQa > 0 ? `${r.deploy.awaitingQa} awaiting QA` : null,
+                        r.deploy.awaitingProd > 0 ? `${r.deploy.awaitingProd} awaiting prod` : null,
+                      ].filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                   {(() => {
                     const next = nextToMerge(r.queue);
                     if (!next) return null;

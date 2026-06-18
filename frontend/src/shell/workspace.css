@@ -158,6 +158,8 @@
 .cohort-toggle { width: 100%; text-align: left; background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; color: var(--text); font-size: 13px; }
 .cohort-toggle:hover { border-style: solid; }
 .next-to-merge { font-size: 13px; margin: 4px 0 8px; padding: 6px 10px; border-radius: 8px; background: color-mix(in srgb, var(--accent, #6af) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent, #6af) 30%, transparent); }
+/* deploy backlog metric: awaiting-QA vs awaiting-prod, kept distinct */
+.deploy-backlog { font-size: 12px; margin: 4px 0 6px; padding: 4px 8px; border-radius: 6px; background: color-mix(in srgb, var(--accent, #6af) 6%, transparent); }
 /* deploy chain (roadmap 4.4c): in-flight SHA progression + supersession */
 .deploy-chain { font-size: 12px; margin: 4px 0 8px; color: var(--muted); }
 .deploy-superseded { color: var(--amber); }
