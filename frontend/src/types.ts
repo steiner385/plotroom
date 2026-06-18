@@ -148,7 +148,11 @@ export interface DashboardState {
      *  /health) + awaiting-QA/awaiting-prod drift. Absent for repos with no
      *  deploy config. Mirror of server estimator/deploy-status.ts. */
     deploy?: { envs: { name: string; liveSha: string | null; reachable: boolean }[];
-      awaitingQa: number; awaitingProd: number };
+      awaitingQa: number; awaitingProd: number;
+      /** QA→prod chain with SHA supersession (roadmap 4.4c). */
+      chain?: { entries: { prNumber: number; sha: string | null; mergedAt: string;
+        stage: 'merged' | 'qa' | 'prod'; qaLiveAt: string | null; prodLiveAt: string | null; superseded: boolean }[];
+        inFlight: { prNumber: number; sha: string | null; stage: string } | null; supersededCount: number } };
     /** Advisory Scheduled-lane snapshot (Spec 4): the newest run per
      *  cron-scheduled workflow + the discovered-workflow count. Absent for
      *  repos with no scheduled workflows. Mirror of server poller.ts

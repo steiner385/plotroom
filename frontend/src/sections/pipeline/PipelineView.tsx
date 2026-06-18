@@ -96,6 +96,19 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
                       {cohortOpen && cohort.map((pr) => row(pr, r))}
                     </div>
                   )}
+                  {r.deploy?.chain && (r.deploy.chain.inFlight || r.deploy.chain.supersededCount > 0) && (
+                    <p className="deploy-chain" role="status" aria-label="Deploy chain">
+                      {r.deploy.chain.inFlight && (
+                        <>⤴ Deploying <strong>#{r.deploy.chain.inFlight.prNumber}</strong> — at {r.deploy.chain.inFlight.stage}, flowing to prod</>
+                      )}
+                      {r.deploy.chain.supersededCount > 0 && (
+                        <span className="deploy-superseded">
+                          {r.deploy.chain.inFlight ? ' · ' : ''}
+                          {r.deploy.chain.supersededCount} superseded (rolled into a newer deploy)
+                        </span>
+                      )}
+                    </p>
+                  )}
                 </>
               );
             })()}

@@ -69,4 +69,24 @@ describe('PipelineView (the PR pipeline view, ported into the workspace)', () =>
     fireEvent.click(toggle);
     expect(screen.getByText('merged a')).toBeInTheDocument();
   });
+
+  it('surfaces the deploy chain: the in-flight SHA + superseded count (roadmap 4.4c)', () => {
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      prs: [pr('acme/alpha', 1, 'running pr', 'ci')],
+      deploy: { envs: [], awaitingQa: 0, awaitingProd: 2, chain: {
+        entries: [], supersededCount: 1,
+        inFlight: { prNumber: 7, sha: 'sha7', stage: 'qa' } } } }] } as never);
+    render(<PipelineView state={st} focusedRepo={null} />);
+    const chain = screen.getByRole('status', { name: /deploy chain/i });
+    expect(chain).toHaveTextContent(/Deploying #7 — at qa/);
+    expect(chain).toHaveTextContent(/1 superseded/);
+  });
+
+  it('shows no deploy-chain line when nothing is in flight or superseded', () => {
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      prs: [pr('acme/alpha', 1, 'running pr', 'ci')],
+      deploy: { envs: [], awaitingQa: 0, awaitingProd: 0, chain: { entries: [], supersededCount: 0, inFlight: null } } }] } as never);
+    render(<PipelineView state={st} focusedRepo={null} />);
+    expect(screen.queryByRole('status', { name: /deploy chain/i })).not.toBeInTheDocument();
+  });
 });
