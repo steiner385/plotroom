@@ -40,6 +40,12 @@ describe('simulateTierMove (server-side, FR-011/FR-012)', () => {
     expect(r.note).toMatch(/saves 600 min/);
   });
 
+  it('reports a best-case PR-latency delta when a check leaves the PR tier (roadmap 4.2)', () => {
+    const r = simulateTierMove(MODEL, { check: 'lint', fromTierId: 'pr', toTierId: null });
+    expect(r.latencyDeltaSeconds).toBe(-120); // 2 min/run off the PR critical path
+    expect(r.note).toMatch(/~2m faster PR/);
+  });
+
   it('binds to the legality validator: refuses removing the required build gate from the queue', () => {
     const r = simulateTierMove(MODEL, { check: 'build', fromTierId: 'queue', toTierId: null });
     expect(r.legal).toBe(false);

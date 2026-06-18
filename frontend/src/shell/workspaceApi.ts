@@ -8,6 +8,7 @@ type Fetch = typeof fetch;
 export interface SimResultDto {
   legal: boolean; reason?: string; note: string;
   costDeltaMinutes: number; direction: string;
+  latencyDeltaSeconds?: number;
   gatesLost: string[]; gatesGained: string[]; estimated: boolean;
 }
 export interface TierMoveDto { check: string; fromTierId: string; toTierId: string | null }

@@ -11,6 +11,10 @@ export interface TierMove { check: string; fromTierId: string; toTierId: string 
 export interface SimResult {
   check: string; fromTierId: string; toTierId: string | null;
   costDeltaMinutes: number;
+  /** Best-case PR-latency delta (roadmap 4.2): the check's typical duration moved
+   *  on/off the PR (pull_request) tier. Negative = a faster PR; an upper bound,
+   *  realised only if the check is on the PR critical path. */
+  latencyDeltaSeconds: number;
   gatesLost: string[];
   gatesGained: string[];
   estimated: boolean;
@@ -60,13 +64,24 @@ export function simulateTierMove(model: DerivedModel, move: TierMove, liveRequir
     if (!to?.intent.gates) gatesGained.push(move.toTierId);
   }
   const costDeltaMinutes = costAdded - costRemoved;
+
+  // Latency (critical-path, roadmap 4.2): the check's typical duration moved on/off
+  // the PR tier — an upper bound on how much faster/slower a PR gets.
+  const prTierId = model.tiers.find((t) => t.event === 'pull_request')?.id;
+  const durSec = Math.round(perRunMinutes(model, move.check) * 60);
+  let latencyDeltaSeconds = 0;
+  if (prTierId && move.fromTierId === prTierId) latencyDeltaSeconds -= durSec;
+  if (prTierId && move.toTierId === prTierId) latencyDeltaSeconds += durSec;
+
   const cost = costDeltaMinutes < 0 ? `saves ${(-costDeltaMinutes).toLocaleString()} min`
     : costDeltaMinutes > 0 ? `adds ${costDeltaMinutes.toLocaleString()} min` : 'no cost change';
   const cov = gatesLost.length ? ` · loses gate at ${gatesLost.join(', ')}`
     : gatesGained.length ? ` · adds gate at ${gatesGained.join(', ')}` : '';
-  const note = verdict.legal ? `${cost}${estimated ? ' (est.)' : ''}${cov}` : `not possible — ${verdict.detail ?? verdict.reason}`;
+  const lat = latencyDeltaSeconds < 0 ? ` · up to ~${Math.round(-latencyDeltaSeconds / 60)}m faster PR`
+    : latencyDeltaSeconds > 0 ? ` · up to ~${Math.round(latencyDeltaSeconds / 60)}m slower PR` : '';
+  const note = verdict.legal ? `${cost}${estimated ? ' (est.)' : ''}${lat}${cov}` : `not possible — ${verdict.detail ?? verdict.reason}`;
 
-  return { check: move.check, fromTierId: move.fromTierId, toTierId: move.toTierId, costDeltaMinutes, gatesLost, gatesGained, estimated, direction, legal: verdict.legal, reason: verdict.reason, note };
+  return { check: move.check, fromTierId: move.fromTierId, toTierId: move.toTierId, costDeltaMinutes, latencyDeltaSeconds, gatesLost, gatesGained, estimated, direction, legal: verdict.legal, reason: verdict.reason, note };
 }
 
 export interface PlanResult {
