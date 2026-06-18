@@ -10,9 +10,10 @@ import type { DerivedModel } from '../../pipeline-model/derived';
 import type { GatingResult } from '../../pipeline-model/types';
 
 export interface CandidateValidation { gatingRegressed: boolean; lostGates: string[]; lowConfidence: boolean }
+export interface CandidateFile { file: string; diff: string; newText: string }
 export interface CandidateResult {
   ok: boolean; reason?: string; baseSha: string;
-  files: { file: string; diff: string }[];
+  files: CandidateFile[];
   validation: CandidateValidation;
   model: DerivedModel | null;
 }
@@ -61,7 +62,7 @@ export async function projectCandidate(
 
   // 2. Apply mutations per file (refuse on any renderer refusal); collect overrides + diffs.
   const overrides: Record<string, string> = {};
-  const files: { file: string; diff: string }[] = [];
+  const files: CandidateFile[] = [];
   for (const [file, ms] of byFile) {
     let text = await fetchAt(file);
     if (text == null) return { ...base, reason: `workflow ${file} not found at ${baseline.sourceSha.slice(0, 7)}` };
@@ -72,7 +73,7 @@ export async function projectCandidate(
       text = edit.newText; diffs.push(edit.diff);
     }
     overrides[file] = text;
-    files.push({ file, diff: diffs.join('\n') });
+    files.push({ file, diff: diffs.join('\n'), newText: text });
   }
 
   // 3. Re-derive the candidate from the mutated YAML.

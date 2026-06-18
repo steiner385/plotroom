@@ -366,3 +366,43 @@ describe('POST /candidate', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('POST /candidate apply (Inc 3b)', () => {
+  function appWithApply(open?: ReturnType<typeof vi.fn>) {
+    const deps: ModelDeriveDeps = {
+      resolveHeadSha: vi.fn(async () => 'sha-1'), fetchWorkflowAtSha: vi.fn(async (_r, n) => (n === 'ci.yml' ? CI : null)),
+      successStatsByRepo: () => new Map<string, SuccessStat[]>(), flakeStatsByRepo: () => new Map<string, FlakeStat[]>(), since: '2026-01-01T00:00:00Z',
+    };
+    const deriver = new ModelDeriver(deps);
+    const a = express(); a.use(express.json());
+    a.use('/api/workspace', createWorkspaceRouter({
+      deriver,
+      prClient: { fetchWorkflowAtSha: deps.fetchWorkflowAtSha as PrClient['fetchWorkflowAtSha'], openDraftPr: vi.fn() as unknown as PrClient['openDraftPr'] },
+      openMultiFileDraftPr: open as never,
+    }));
+    return a;
+  }
+
+  it('501 when apply is requested but no multi-file opener is wired', async () => {
+    const res = await request(appWithApply()).post('/api/workspace/candidate')
+      .send({ repo: 'o/r', apply: true, mutations: [{ op: 'timeout', jobId: 'e2e', minutes: 10 }] });
+    expect(res.status).toBe(501);
+  });
+
+  it('opens a multi-file draft PR for a clean apply', async () => {
+    const open = vi.fn(async () => ({ number: 12, url: 'u12' }));
+    const res = await request(appWithApply(open)).post('/api/workspace/candidate')
+      .send({ repo: 'o/r', apply: true, mutations: [{ op: 'timeout', jobId: 'e2e', minutes: 10 }] });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, number: 12, url: 'u12' });
+    expect(open).toHaveBeenCalled();
+  });
+
+  it('409 (no PR) when apply would drop a required gate', async () => {
+    const open = vi.fn(async () => ({ number: 1, url: 'u' }));
+    const res = await request(appWithApply(open)).post('/api/workspace/candidate')
+      .send({ repo: 'o/r', apply: true, mutations: [{ op: 'remove', jobId: 'e2e' }] });
+    expect(res.status).toBe(409);
+    expect(open).not.toHaveBeenCalled();
+  });
+});

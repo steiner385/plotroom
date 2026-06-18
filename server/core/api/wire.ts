@@ -67,6 +67,28 @@ async function openWorkspaceDraftPr(
   return { number: pr.createPullRequest.pullRequest.number, url: pr.createPullRequest.pullRequest.url };
 }
 
+/** Open a multi-file workspace draft PR (one commit, N file additions) — the
+ *  Build apply exit (Inc 3b). Same branch→verified-bot-commit→draft-PR path. */
+async function openWorkspaceMultiFileDraftPr(
+  client: GitHubClientLike, uniq: () => string,
+  input: { repo: string; baseSha: string; files: { filePath: string; newText: string }[]; title: string; body: string },
+): Promise<{ number: number; url: string }> {
+  const repository = await resolveHead(client, input.repo);
+  const repositoryId = repository!.id;
+  const baseRef = repository!.defaultBranchRef!.name;
+  const branch = `workspace/ci-edit-${input.baseSha.slice(0, 7)}-${uniq()}`;
+  await client.graphql(CREATE_REF, { repositoryId, name: `refs/heads/${branch}`, oid: input.baseSha });
+  await client.graphql(CREATE_COMMIT, {
+    branch: { repositoryNameWithOwner: input.repo, branchName: branch },
+    message: { headline: input.title },
+    additions: input.files.map((f) => ({ path: f.filePath, contents: Buffer.from(f.newText, 'utf8').toString('base64') })),
+    oid: input.baseSha,
+  });
+  const pr = await client.graphql<{ createPullRequest: { pullRequest: { number: number; url: string } } }>(
+    CREATE_PR, { repositoryId, base: baseRef, head: branch, title: input.title, body: input.body });
+  return { number: pr.createPullRequest.pullRequest.number, url: pr.createPullRequest.pullRequest.url };
+}
+
 /** Build the workspace router deps from the real client + history stats. */
 export function workspaceDepsFromClient(
   client: GitHubClientLike, stats: StatsProviders,
@@ -84,5 +106,8 @@ export function workspaceDepsFromClient(
     fetchWorkflowAtSha: (repo, name, sha) => fetchWorkflowAtSha(client, repo, name, sha),
     openDraftPr: (i) => openWorkspaceDraftPr(client, uniq, i),
   };
-  return { deriver, prClient, liveRequired: opts.liveRequired };
+  return {
+    deriver, prClient, liveRequired: opts.liveRequired,
+    openMultiFileDraftPr: (i) => openWorkspaceMultiFileDraftPr(client, uniq, i),
+  };
 }

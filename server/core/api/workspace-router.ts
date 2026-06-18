@@ -17,6 +17,7 @@ import { attributeOutcome, summarizeAccuracy, type AppliedChange } from '../anal
 import { evaluatePolicies, type PolicyRule } from '../analytics/policy';
 import { evaluateBudgets, alertsFrom, type Budget, type BudgetKind } from '../analytics/budgets';
 import { projectCandidate } from '../model/candidate';
+import { applyCandidate, type MultiFileDraftInput } from '../actions/applyCandidate';
 
 export interface WorkspaceRouterDeps {
   deriver: ModelDeriver;
@@ -42,6 +43,8 @@ export interface WorkspaceRouterDeps {
   budgets?: () => Promise<{ budgets: Budget[]; current: Partial<Record<BudgetKind, number>> }>;
   /** write path (Group L2): record an action the tool actually opened into the audit log. */
   recordAction?: (row: AuditRow) => void;
+  /** multi-file governed draft-PR opener (Build apply exit, Inc 3b); absent → apply unwired. */
+  openMultiFileDraftPr?: (input: MultiFileDraftInput) => Promise<{ number: number; url: string }>;
 }
 
 function repoOf(req: Request, res: Response): string | null {
@@ -74,6 +77,17 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     const baseline = baseSha ? await deps.deriver.deriveAtSha(repo, baseSha) : await deps.deriver.deriveAtHead(repo);
     if (!baseline) return res.status(404).json({ error: 'no derivable model' });
     const fetchAt = (file: string) => deps.prClient.fetchWorkflowAtSha(repo, file, baseline.sourceSha);
+    // apply:true → governed multi-file DRAFT PR (Inc 3b); else dry-run projection.
+    if (req.body?.apply === true) {
+      if (!deps.openMultiFileDraftPr) return res.status(501).json({ error: 'multi-file apply is not wired' });
+      const out = await applyCandidate(deps.deriver, fetchAt, deps.openMultiFileDraftPr, baseline, mutations);
+      if (out.ok) {
+        deps.recordAction?.({ at: new Date().toISOString(), repo, action: 'candidate-apply', result: `opened #${out.number}` });
+        return res.json(out);
+      }
+      if (out.stale) return res.status(409).json({ error: 'HEAD drifted — re-derive and re-confirm', headSha: out.headSha });
+      return res.status(409).json({ error: out.reason });
+    }
     const result = await projectCandidate(deps.deriver, fetchAt, baseline, mutations);
     res.json({ repo, ...result });
   });

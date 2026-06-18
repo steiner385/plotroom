@@ -17,10 +17,11 @@ const MODEL: DerivedModelLike = {
 const clean: CandidateDto = { ok: true, baseSha: 'sha', files: [{ file: 'ci.yml', diff: '@@ job e2e — timeout 15m @@\n+    timeout-minutes: 15' }], validation: { gatingRegressed: false, lostGates: [], lowConfidence: false }, model: null };
 const regressed: CandidateDto = { ok: true, baseSha: 'sha', files: [{ file: 'ci.yml', diff: '@@ remove job build @@' }], validation: { gatingRegressed: true, lostGates: ['build'], lowConfidence: false }, model: null };
 
-function api(candidate = vi.fn(async () => clean)): WorkspaceApi {
+function api(candidate = vi.fn(async () => clean), candidateApply = vi.fn(async () => ({ ok: true as const, number: 9, url: 'https://example/pr/9' }))): WorkspaceApi {
   return {
     getPipeline: vi.fn(async () => ({ repo: 'o/r', sourceSha: 'sha', model: MODEL })),
     candidate,
+    candidateApply,
   } as unknown as WorkspaceApi;
 }
 
@@ -46,6 +47,15 @@ describe('BuildView (Increment 3 — the no-code loop)', () => {
     expect(await screen.findByTestId('candidate-verdict')).toHaveTextContent(/blocked/i);
     expect(screen.getByTestId('candidate-verdict')).toHaveTextContent('build');
     expect(screen.queryByText('Open draft PR')).not.toBeInTheDocument();
+  });
+
+  it('a safe candidate offers a real Open draft PR button that applies and shows the PR link', async () => {
+    const apply = vi.fn(async () => ({ ok: true as const, number: 9, url: 'https://example/pr/9' }));
+    render(<BuildView repo="o/r" api={api(vi.fn(async () => clean), apply)} />);
+    fireEvent.click((await screen.findAllByText('Add timeout'))[0]);
+    fireEvent.click(await screen.findByText('Open draft PR'));
+    expect(apply).toHaveBeenCalledWith('o/r', [{ op: 'timeout', jobId: 'e2e', minutes: 15 }], 'sha');
+    expect(await screen.findByRole('link', { name: /#9/ })).toHaveAttribute('href', 'https://example/pr/9');
   });
 
   it('removing the only pending mutation clears the candidate', async () => {

@@ -43,6 +43,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
       reason: moves.some((m) => m.check === 'build') ? 'build: required-gate' : undefined, results: [],
     })),
     candidate: vi.fn(async () => ({ ok: true, baseSha: 's', files: [], validation: { gatingRegressed: false, lostGates: [], lowConfidence: false }, model: null })),
+    candidateApply: vi.fn(async () => ({ ok: true as const, number: 1, url: 'u' })),
     ...over,
   };
 }

@@ -36,6 +36,8 @@ export function BuildView({ repo, api }: BuildViewProps) {
   const [stack, setStack] = useState<CandidateMutationDto[]>([]);
   const [candidate, setCandidate] = useState<CandidateDto | null>(null);
   const [busy, setBusy] = useState(false);
+  const [opened, setOpened] = useState<{ number: number; url: string } | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!repo) return;
@@ -55,8 +57,16 @@ export function BuildView({ repo, api }: BuildViewProps) {
     return () => { cancelled = true; };
   }, [repo, api, stack, baseSha]);
 
-  const add = (m: CandidateMutationDto) => setStack((s) => [...s, m]);
-  const removeAt = (i: number) => setStack((s) => s.filter((_, j) => j !== i));
+  const add = (m: CandidateMutationDto) => { setOpened(null); setApplyError(null); setStack((s) => [...s, m]); };
+  const removeAt = (i: number) => { setOpened(null); setApplyError(null); setStack((s) => s.filter((_, j) => j !== i)); };
+
+  async function openDraftPr() {
+    if (!repo || stack.length === 0) return;
+    setBusy(true); setApplyError(null);
+    try { setOpened(await api.candidateApply(repo, stack, baseSha ?? undefined)); }
+    catch (e) { setApplyError((e as Error).message); }
+    finally { setBusy(false); }
+  }
 
   const lanes = useMemo(() => (model ? laneLayout(model) : []), [model]);
 
@@ -114,12 +124,16 @@ export function BuildView({ repo, api }: BuildViewProps) {
           {candidate?.ok && candidate.files.length > 0 && (
             <pre className="build-diff" aria-label="generated diff">{candidate.files.map((f) => `# ${f.file}\n${f.diff}`).join('\n\n')}</pre>
           )}
-          {verdict.kind === 'safe' && (
-            <p className="build-exit-note">Safe to apply — {candidate?.files.length} file{candidate?.files.length === 1 ? '' : 's'}. The governed multi-file draft-PR exit lands in the next increment.</p>
+          {verdict.kind === 'safe' && !opened && (
+            <button type="button" className="build-exit" disabled={busy} onClick={openDraftPr}>Open draft PR</button>
           )}
           {verdict.kind === 'scaffold' && (
             <p className="build-exit-note">Low confidence — this would generate a review scaffold rather than a structured apply.</p>
           )}
+          {opened && (
+            <p className="build-opened" role="status">Opened draft PR <a href={opened.url}>#{opened.number}</a> — review and merge there.</p>
+          )}
+          {applyError && <p className="build-apply-error" role="alert">Couldn’t open the PR: {applyError}</p>}
         </section>
       )}
     </div>
