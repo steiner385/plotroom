@@ -144,3 +144,32 @@ describe('renderRunnerRoute (change runs-on)', () => {
     expect(renderRunnerRoute(WF, 'nope', 'self-hosted').ok).toBe(false);
   });
 });
+
+describe('pinActionSha (pin a uses: ref to a SHA)', () => {
+  const WFA = `on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo hi\n`;
+  const SHA = '1'.repeat(40);
+
+  it('replaces the ref with the SHA and keeps the tag as a comment; round-trips', () => {
+    const r = pinActionSha(WFA, 'actions/checkout@v4', SHA);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.newText).toContain(`uses: actions/checkout@${SHA}  # v4`);
+    const after = parse(r.newText);
+    expect(after.jobs.a.steps[0].uses).toBe(`actions/checkout@${SHA}`);
+    expect(after.jobs.a.steps[1]).toEqual({ run: 'echo hi' });
+    expect(r.diff).toMatch(/pin actions\/checkout/);
+  });
+
+  it('refuses a non-40-char SHA', () => {
+    expect(pinActionSha(WFA, 'actions/checkout@v4', 'deadbeef').ok).toBe(false);
+  });
+
+  it('refuses a ref that is already a SHA', () => {
+    const wf = WFA.replace('@v4', `@${SHA}`);
+    expect(pinActionSha(wf, `actions/checkout@${SHA}`, '2'.repeat(40)).ok).toBe(false);
+  });
+
+  it('refuses when the uses: line is absent', () => {
+    expect(pinActionSha(WFA, 'actions/setup-node@v4', SHA).ok).toBe(false);
+  });
+});

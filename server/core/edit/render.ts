@@ -127,3 +127,26 @@ export function renderRunnerRoute(yamlText: string, jobId: string, runsOn: strin
   const diff = [`@@ job ${jobId} — runs-on → ${runsOn} @@`, `-${lines[runsIdx]}`, `+${newLine}`].join('\n');
   return { ok: true, newText, addedLine: newLine, diff };
 }
+
+/** Pin an action `uses: owner/repo@ref` to a resolved 40-hex commit SHA, keeping
+ *  the original ref as a trailing comment. Pure — the SHA is supplied by the
+ *  caller. Refuses a bad SHA, an already-pinned ref, or a missing `uses:` line. */
+export function pinActionSha(yamlText: string, usesRef: string, sha: string): EditResult {
+  if (!/^[0-9a-f]{40}$/.test(sha)) return { ok: false, reason: `"${sha}" is not a 40-char commit SHA` };
+  const at = usesRef.lastIndexOf('@');
+  if (at < 0) return { ok: false, reason: `"${usesRef}" is not "owner/repo@ref"` };
+  const action = usesRef.slice(0, at), ref = usesRef.slice(at + 1);
+  if (/^[0-9a-f]{40}$/.test(ref)) return { ok: false, reason: `"${usesRef}" is already pinned to a SHA` };
+  const lines = yamlText.split('\n');
+  const escA = action.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escR = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^(\\s*-?\\s*uses:\\s*)${escA}@${escR}\\s*(#.*)?$`);
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) { if (re.test(lines[i])) { idx = i; break; } }
+  if (idx < 0) return { ok: false, reason: `could not find \`uses: ${usesRef}\`` };
+  const prefix = lines[idx].match(re)![1];
+  const newLine = `${prefix}${action}@${sha}  # ${ref}`;
+  const newText = [...lines.slice(0, idx), newLine, ...lines.slice(idx + 1)].join('\n');
+  const diff = [`@@ pin ${action} → ${sha.slice(0, 7)} @@`, `-${lines[idx]}`, `+${newLine}`].join('\n');
+  return { ok: true, newText, addedLine: newLine, diff };
+}
