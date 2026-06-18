@@ -151,6 +151,11 @@ button.canvas-node.selected { outline: 2px solid var(--accent, #6af); outline-of
 .node-inspector { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; }
 .node-inspector-title { margin: 0 0 8px; font-size: 13px; }
 .node-inspector-ops { display: flex; gap: 8px; flex-wrap: wrap; }
+.raw-hatch { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.raw-hatch-toggle { background: none; border: none; color: var(--text); cursor: pointer; font-size: 12px; padding: 4px 0; }
+.raw-hatch-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.raw-hatch-label { font-size: 11px; color: var(--muted, #888); }
+.raw-hatch-textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; box-sizing: border-box; }
 .optimize-diff, .quarantine-diff, .optimize-sim pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre; }
 .optimize-prompt { white-space: pre-wrap !important; }
 .sim-note.legal, .plan-note.legal { color: var(--done); }

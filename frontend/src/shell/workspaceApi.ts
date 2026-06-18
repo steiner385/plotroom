@@ -82,6 +82,8 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
       fetchImpl(`${base}/candidate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, baseSha, mutations }) }).then(json<CandidateDto>),
     candidateApply: (repo: string, mutations: CandidateMutationDto[], baseSha?: string) =>
       fetchImpl(`${base}/candidate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, baseSha, apply: true, mutations }) }).then(json<{ ok: true; number: number; url: string }>),
+    candidateRaw: (repo: string, file: string, rawYaml: string, baseSha?: string) =>
+      fetchImpl(`${base}/candidate/raw`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, baseSha, file, rawYaml }) }).then(json<CandidateDto>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;

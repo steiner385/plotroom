@@ -44,6 +44,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
     })),
     candidate: vi.fn(async () => ({ ok: true, baseSha: 's', files: [], validation: { gatingRegressed: false, lostGates: [], lowConfidence: false }, model: null })),
     candidateApply: vi.fn(async () => ({ ok: true as const, number: 1, url: 'u' })),
+    candidateRaw: vi.fn(async () => ({ ok: true, baseSha: 's', files: [], validation: { gatingRegressed: false, lostGates: [], lowConfidence: false }, model: null })),
     ...over,
   };
 }

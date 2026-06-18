@@ -43,6 +43,33 @@ function touchesLowConfidence(model: DerivedModel, mutations: Mutation[]): boole
   );
 }
 
+/**
+ * Raw-YAML escape-hatch projection (spec §2.5): re-derive from an operator-edited
+ * single file and validate it over the re-derived candidate. The model is the
+ * language server — an unparseable edit (or one that drops ci.yml) is refused, and
+ * any required-gate loss is flagged. Positive-allowlist: `file` must be a provenance
+ * file of the baseline model.
+ */
+export async function projectRawYaml(
+  deriver: ModelDeriver,
+  baseline: PinnedModel,
+  file: string,
+  rawYaml: string,
+): Promise<CandidateResult> {
+  const base: CandidateResult = { ok: false, baseSha: baseline.sourceSha, files: [], validation: { gatingRegressed: false, lostGates: [], lowConfidence: false }, model: null };
+  const allowed = new Set((baseline.model.checkMeta ?? []).flatMap((m) => m.provenance.map((p) => p.file)));
+  if (!allowed.has(file)) return { ...base, reason: `"${file}" is not a workflow file of this pipeline` };
+  const candidate = await deriver.deriveWithOverrides(baseline.repo, baseline.sourceSha, { [file]: rawYaml });
+  if (candidate == null) return { ...base, reason: 'edited YAML did not derive (unparseable, or ci.yml became invalid)' };
+  const greg = gatingRegressed(requiredAsGating(baseline.model), requiredAsGating(candidate));
+  return {
+    ok: true, baseSha: baseline.sourceSha,
+    files: [{ file, diff: `(raw edit of ${file})`, newText: rawYaml }],
+    validation: { gatingRegressed: greg.regressed, lostGates: greg.lost, lowConfidence: false },
+    model: candidate,
+  };
+}
+
 export async function projectCandidate(
   deriver: ModelDeriver,
   fetchAt: (file: string) => Promise<string | null>,

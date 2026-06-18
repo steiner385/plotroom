@@ -56,3 +56,36 @@ describe('projectCandidate', () => {
     expect(res.reason).toMatch(/pin-action/);
   });
 });
+
+describe('projectRawYaml (escape hatch)', () => {
+  it('re-derives from an edited file and reports no regression for a benign edit', async () => {
+    const { projectRawYaml } = await import('../model/candidate');
+    const d = new ModelDeriver(deps());
+    const baseline = (await d.deriveAtSha('o/r', 'sha-1'))!;
+    const edited = CI.replace('    runs-on: ubuntu-latest\n    steps: [{ run: pnpm e2e }]', '    runs-on: ubuntu-latest\n    timeout-minutes: 12\n    steps: [{ run: pnpm e2e }]');
+    const res = await projectRawYaml(d, baseline, 'ci.yml', edited);
+    expect(res.ok).toBe(true);
+    expect(res.validation.gatingRegressed).toBe(false);
+  });
+
+  it('flags gatingRegressed when the edit removes a required gate job', async () => {
+    const { projectRawYaml } = await import('../model/candidate');
+    const d = new ModelDeriver(deps());
+    const baseline = (await d.deriveAtSha('o/r', 'sha-1'))!;
+    // remove the e2e job and its needs entry
+    const edited = `name: CI\non: { pull_request: {}, merge_group: {} }\njobs:\n  ci:\n    name: ci\n    needs: []\n    runs-on: ubuntu-latest\n`;
+    const res = await projectRawYaml(d, baseline, 'ci.yml', edited);
+    expect(res.ok).toBe(true);
+    expect(res.validation.gatingRegressed).toBe(true);
+    expect(res.validation.lostGates).toContain('e2e');
+  });
+
+  it('refuses a file that is not part of the pipeline (allowlist)', async () => {
+    const { projectRawYaml } = await import('../model/candidate');
+    const d = new ModelDeriver(deps());
+    const baseline = (await d.deriveAtSha('o/r', 'sha-1'))!;
+    const res = await projectRawYaml(d, baseline, 'evil.yml', 'jobs: {}');
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/not a workflow file/);
+  });
+});

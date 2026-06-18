@@ -16,7 +16,7 @@ import { buildChangelog, buildAuditLog, type ChangelogRow, type AuditRow } from 
 import { attributeOutcome, summarizeAccuracy, type AppliedChange } from '../analytics/outcomes';
 import { evaluatePolicies, type PolicyRule } from '../analytics/policy';
 import { evaluateBudgets, alertsFrom, type Budget, type BudgetKind } from '../analytics/budgets';
-import { projectCandidate } from '../model/candidate';
+import { projectCandidate, projectRawYaml } from '../model/candidate';
 import { applyCandidate, type MultiFileDraftInput } from '../actions/applyCandidate';
 
 export interface WorkspaceRouterDeps {
@@ -90,6 +90,20 @@ export function createWorkspaceRouter(deps: WorkspaceRouterDeps): Router {
     }
     const result = await projectCandidate(deps.deriver, fetchAt, baseline, mutations);
     res.json({ repo, ...result });
+  });
+
+  // POST /candidate/raw — { repo, baseSha?, file, rawYaml } → re-derive from an
+  // operator-edited file + validate (spec §2.5 escape hatch). POST-only; read-only;
+  // allowlisted (projectRawYaml refuses a non-pipeline file); body byte-capped.
+  r.post('/candidate/raw', async (req, res) => {
+    const repo = repoOf(req, res); if (!repo) return;
+    const { file, rawYaml } = req.body ?? {};
+    if (typeof file !== 'string' || typeof rawYaml !== 'string') return res.status(400).json({ error: '{ file, rawYaml } required' });
+    if (rawYaml.length > 256 * 1024) return res.status(413).json({ error: 'rawYaml too large (max 256KB)' });
+    const baseSha = typeof req.body?.baseSha === 'string' ? req.body.baseSha : undefined;
+    const baseline = baseSha ? await deps.deriver.deriveAtSha(repo, baseSha) : await deps.deriver.deriveAtHead(repo);
+    if (!baseline) return res.status(404).json({ error: 'no derivable model' });
+    res.json({ repo, ...await projectRawYaml(deps.deriver, baseline, file, rawYaml) });
   });
 
   // POST /simulate — { repo, move } → projection + legality

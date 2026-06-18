@@ -10,6 +10,7 @@ import type { DerivedModelLike } from '../optimize/types';
 import { laneLayout } from './laneLayout';
 import { PipelineCanvas } from './PipelineCanvas';
 import { NodeInspector } from './NodeInspector';
+import { RawYamlHatch } from './RawYamlHatch';
 
 const DEFAULT_TIMEOUT = 15;
 
@@ -142,6 +143,8 @@ export function BuildView({ repo, api }: BuildViewProps) {
           {applyError && <p className="build-apply-error" role="alert">Couldn’t open the PR: {applyError}</p>}
         </section>
       )}
+
+      <RawYamlHatch repo={repo} file="ci.yml" baseSha={baseSha ?? undefined} api={api} />
     </div>
   );
 }

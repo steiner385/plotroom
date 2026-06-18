@@ -406,3 +406,19 @@ describe('POST /candidate apply (Inc 3b)', () => {
     expect(open).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /candidate/raw (escape hatch)', () => {
+  it('projects from edited YAML and flags a required-gate drop', async () => {
+    const edited = `name: CI\non: { pull_request: {}, merge_group: {} }\njobs:\n  ci:\n    name: ci\n    needs: []\n    runs-on: ubuntu-latest\n`;
+    const res = await request(app()).post('/api/workspace/candidate/raw')
+      .send({ repo: 'o/r', file: 'ci.yml', rawYaml: edited });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.validation.gatingRegressed).toBe(true);
+  });
+
+  it('400s without file/rawYaml', async () => {
+    const res = await request(app()).post('/api/workspace/candidate/raw').send({ repo: 'o/r' });
+    expect(res.status).toBe(400);
+  });
+});
