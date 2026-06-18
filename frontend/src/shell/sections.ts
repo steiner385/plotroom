@@ -43,3 +43,13 @@ export function hashForSection(id: SectionId): string {
 export function sectionDef(id: SectionId): SectionDef {
   return SECTIONS.find((s) => s.id === id)!;
 }
+
+/** Map a delivery-health lane to the workspace section that best explains it, so the
+ *  Health lane chips become live deep-links instead of a dead CTA (roadmap 2.5). */
+export function laneToSection(laneId: string | null): SectionId {
+  switch (laneId) {
+    case 'cost': return 'metrics';
+    case 'failures': case 'scheduled': return 'diagnose';
+    default: return 'pipeline'; // pr-ci / merge-queue / main / deploy → the operational view
+  }
+}

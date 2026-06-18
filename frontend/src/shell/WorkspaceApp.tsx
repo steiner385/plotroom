@@ -22,7 +22,7 @@ import { TuneView } from '../sections/tune/TuneView';
 import { makeWorkspaceApi } from './workspaceApi';
 import { SelfHealthDot } from './SelfHealthDot';
 import { ForecastBanner } from './ForecastBanner';
-import type { SectionId } from './sections';
+import { laneToSection, hashForSection, type SectionId } from './sections';
 
 // workspace section → legacy tab hash (where its capability lives until rebuilt)
 const LEGACY_TAB: Record<SectionId, string> = {
@@ -107,7 +107,7 @@ export function WorkspaceApp() {
       <WorkspaceShell
         header={header}
         content={{
-          health: <><ForecastBanner api={api} repo={focused} /><HealthView state={state} connected={connected} onFocusRepo={focus} /></>,
+          health: <><ForecastBanner api={api} repo={focused} /><HealthView state={state} connected={connected} onFocusRepo={focus} onJumpToLane={(laneId) => { location.hash = hashForSection(laneToSection(laneId)); }} /></>,
           pipeline: <PipelineView state={state} focusedRepo={focused} />,
           diagnose: <DiagnoseView state={state} focusedRepo={focused} />,
           model: <ModelView repo={focused} api={api} />,
