@@ -9,6 +9,7 @@
 // (FR-035a) — closing the gap where a statically-missed required check could be
 // demoted.
 import type { DerivedModel } from '../../pipeline-model/derived';
+import type { GatingResult } from '../../pipeline-model/types';
 
 export type LegalityReason = 'required-gate' | 'cycle' | 'orphaned-gate' | 'undeclared-event';
 export interface LegalityVerdict { legal: boolean; reason?: LegalityReason; detail?: string }
@@ -132,4 +133,16 @@ export function validateNeedsChange(
   const cycle = detectCycle(next);
   if (cycle) return { legal: false, reason: 'cycle', detail: `would create a needs cycle: ${cycle.join(' → ')}` };
   return { legal: true };
+}
+
+/**
+ * The candidate-gating safety check (spec §3/§5): the candidate's gating-check
+ * set must be a SUPERSET of the baseline's. Any gating check present in the
+ * baseline but absent in the candidate is a silent-ungating regression and must
+ * block structured apply. Pure; Increment 2 runs it over the re-derived candidate.
+ */
+export function gatingRegressed(baseline: GatingResult, candidate: GatingResult): { regressed: boolean; lost: string[] } {
+  const cand = new Set(candidate.gates.map((g) => g.checkName));
+  const lost = [...new Set(baseline.gates.map((g) => g.checkName).filter((n) => !cand.has(n)))].sort((a, b) => a.localeCompare(b));
+  return { regressed: lost.length > 0, lost };
 }

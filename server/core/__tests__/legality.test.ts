@@ -1,8 +1,28 @@
 import { describe, it, expect } from 'vitest';
 import {
-  requiredGateChecks, validateTierChange, validateGateChange, detectCycle, validateNeedsChange,
+  requiredGateChecks, validateTierChange, validateGateChange, detectCycle, validateNeedsChange, gatingRegressed,
 } from '../model/legality';
 import type { DerivedModel } from '../../pipeline-model/derived';
+import type { GatingResult } from '../../pipeline-model/types';
+
+const gr = (names: string[]): GatingResult => ({
+  gatingCallerJobs: [], conditionalCallerJobs: [],
+  gates: names.map((checkName) => ({ checkName, events: ['merge_group'] })),
+});
+
+describe('gatingRegressed (candidate required-gate set must be a superset of baseline)', () => {
+  it('no regression when the candidate keeps every baseline gate', () => {
+    expect(gatingRegressed(gr(['ci', 'build']), gr(['ci', 'build', 'extra']))).toEqual({ regressed: false, lost: [] });
+  });
+
+  it('regression (with the lost names) when a baseline gate disappears', () => {
+    expect(gatingRegressed(gr(['ci', 'build']), gr(['ci']))).toEqual({ regressed: true, lost: ['build'] });
+  });
+
+  it('reports multiple lost gates sorted', () => {
+    expect(gatingRegressed(gr(['ci', 'build', 'e2e']), gr(['ci'])).lost).toEqual(['build', 'e2e']);
+  });
+});
 
 const obs = (runs: number, minutes: number) => ({ ran: runs > 0, runs, realFailures: 0, failRatePct: 0, flakeRatePct: 0, minutes });
 const cell = (check: string, tierId: string, runs: boolean, gates: boolean, o: ReturnType<typeof obs> | null, state: string) =>
