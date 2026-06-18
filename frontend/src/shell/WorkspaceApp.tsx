@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import './workspace.css';
 import { WorkspaceShell } from './WorkspaceShell';
 import { PipelineSwitcher } from './PipelineSwitcher';
+import { liveness } from './liveness';
 import { useWorkspaceData } from '../useWorkspaceData';
 import { useFocusedRepo } from './useFocusedRepo';
 import { SectionContent } from '../SectionContent';
@@ -42,10 +43,8 @@ export function WorkspaceApp() {
       {(() => {
         // Three-state spine indicator (roadmap 5.6): live (fresh frames) · stale
         // (socket up but feed quiet) · reconnecting (socket down).
-        const liveness = !connected ? { cls: 'down', label: '○ reconnecting', title: 'reconnecting' }
-          : stale ? { cls: 'stale', label: '◐ stale', title: 'connected, but no fresh data in 90s — feed may be stalled' }
-          : { cls: 'live', label: '● live', title: 'live' };
-        return <span className={`liveness ${liveness.cls}`} title={liveness.title}>{liveness.label}</span>;
+        const live = liveness(connected, stale);
+        return <span className={`liveness ${live.cls}`} title={live.title}>{live.label}</span>;
       })()}
       <SelfHealthDot api={api} />
       <button type="button" className="cmdk-trigger" aria-label="Command palette (⌘K)"

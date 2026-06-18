@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { PipelineSwitcher } from '../shell/PipelineSwitcher';
 import { SelfHealthDot } from '../shell/SelfHealthDot';
 import { LegendPanel } from '../LegendPanel';
+import { liveness } from '../shell/liveness';
 import type { WorkspaceApi } from '../shell/workspaceApi';
 
 export interface StatusStripProps {
@@ -18,16 +19,12 @@ export interface StatusStripProps {
 export function StatusStrip({ repos, focused, onFocus, connected, stale, api }: StatusStripProps) {
   const [legendOpen, setLegendOpen] = useState(false);
   const legendRef = useRef<HTMLButtonElement>(null);
-  const liveness = !connected
-    ? { cls: 'down', label: '○ reconnecting', title: 'reconnecting' }
-    : stale
-      ? { cls: 'stale', label: '◐ stale', title: 'connected, but no fresh data in 90s — feed may be stalled' }
-      : { cls: 'live', label: '● live', title: 'live' };
+  const live = liveness(connected, stale);
   return (
     <div className="prdash-status-strip">
       <span className="pipeline-strip-label" id="prdash-pipeline-label">Pipeline:</span>
       <PipelineSwitcher repos={repos} focused={focused} onFocus={onFocus} />
-      <span className={`liveness ${liveness.cls}`} title={liveness.title}>{liveness.label}</span>
+      <span className={`liveness ${live.cls}`} title={live.title}>{live.label}</span>
       <SelfHealthDot api={api} />
       <button type="button" ref={legendRef} className="legend-btn" aria-label="Legend"
         aria-haspopup="dialog" aria-expanded={legendOpen} onClick={() => setLegendOpen(true)}>

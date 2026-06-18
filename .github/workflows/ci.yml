@@ -35,7 +35,7 @@ jobs:
 
       - name: Gate — no absolute /api literals in frontend
         run: |
-          if grep -rn "fetch('/api\|fetch(\"/api\|new EventSource('/api\|new EventSource(\"/api" frontend/src --include='*.ts' --include='*.tsx' | grep -v __tests__; then
+          if grep -rn "fetch('/api\|fetch(\"/api\|fetch(\`/api\|new EventSource('/api\|new EventSource(\"/api\|new EventSource(\`/api" frontend/src --include='*.ts' --include='*.tsx' | grep -v __tests__; then
             echo "Found absolute /api literal — use useApiBase().apiUrl()"; exit 1
           fi
 

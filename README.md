@@ -748,7 +748,7 @@ import 'pr-dashboard/embed/style.css';
 - Add the host origin to the backend's `allowedOriginHosts` **or** strip the inbound `Origin` at the proxy — otherwise the backend's `originGuard` 403s every mutating call (ready-merge, draft-PR levers).
 - Point the backend's `bindHosts` at an address the proxy can reach (default is loopback-only).
 - Allow-list the proxied paths; **exclude `/admin/*`** (`/api/admin/restart` exits the process) and decide whether `/config` and the write levers are exposed to host-authed users.
-- SSE: inject credentials server-side at the proxy (native `EventSource` can't set headers) or use a cookie + `withCredentials`; disable proxy buffering (the backend already sends `X-Accel-Buffering: no`); keep the proxy read-timeout above the 25s server ping.
+- SSE: inject credentials server-side at the proxy (native `EventSource` can't set headers) or use a cookie + `withCredentials`; disable proxy buffering (the backend already sends `X-Accel-Buffering: no`); keep the proxy read-timeout above the 25s server ping. Note: `withCredentials` affects only the SSE `EventSource` (cookie-mode fallback, since native EventSource can't set headers); the mutating fetch calls do NOT send browser cookies — fetch-path auth must be injected by the host proxy (same-origin proxy or server-side credential injection).
 
 ---
 
