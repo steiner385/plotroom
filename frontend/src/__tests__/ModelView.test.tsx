@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { ModelView, requiredGates, driftCells } from '../sections/model/ModelView';
 import type { WorkspaceApi } from '../shell/workspaceApi';
 import type { DerivedModelLike } from '../sections/optimize/types';
@@ -33,17 +33,32 @@ describe('requiredGates / driftCells (pure)', () => {
 });
 
 describe('ModelView (US3)', () => {
-  it('shows the merge contract + the pinned sha', async () => {
+  it('leads with a compact summary (gate count + pinned sha); the full gate list is behind a disclosure', async () => {
     render(<ModelView repo="o/r" api={api()} />);
-    expect(await screen.findByText(/Merge contract:/)).toBeInTheDocument();
-    expect(screen.getByText(/1 required gate — build/)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /1 required gate/ })).toBeInTheDocument();
     expect(screen.getByText(/@deadbee/)).toBeInTheDocument();
+    // the comma list is NOT shown up front (no prose wall)
+    expect(screen.queryByText(/required gates:/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /1 required gate/ }));
+    expect(screen.getByText(/required gates:/)).toHaveTextContent('build');
   });
 
-  it('renders the matrix and flags drift', async () => {
+  it('renders the matrix with a legend and flags drift', async () => {
     render(<ModelView repo="o/r" api={api()} />);
     expect(await screen.findByLabelText('Protection matrix')).toBeInTheDocument();
     expect(screen.getByText(/1 cell drifting/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Matrix legend')).toBeInTheDocument();
+  });
+
+  it('the drift count filters the matrix to only the drifting checks', async () => {
+    render(<ModelView repo="o/r" api={api()} />);
+    await screen.findByLabelText('Protection matrix');
+    // before: both checks present as row headers
+    expect(screen.getByRole('rowheader', { name: /build/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /1 cell drifting/ }));
+    // after: only the drifting check (lint) remains
+    expect(screen.queryByRole('rowheader', { name: /^build/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('rowheader', { name: /lint/ })).toBeInTheDocument();
   });
 
   it('renders the security panel (Group M) with finding + confidence', async () => {

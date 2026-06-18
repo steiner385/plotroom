@@ -148,6 +148,14 @@
 .pipeline-cohort { margin: 8px 0; }
 .cohort-toggle { width: 100%; text-align: left; background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; color: var(--text); font-size: 13px; }
 .cohort-toggle:hover { border-style: solid; }
+.model-summary { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.model-chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+button.model-chip { cursor: pointer; }
+.model-chip.drift { color: var(--amber); border-color: var(--amber); }
+.model-chip.drift.active { background: var(--amber); color: var(--bg); }
+.model-chip.ruleset.mismatch, .model-chip.ruleset.unreadable { color: var(--amber); border-color: var(--amber); }
+.model-chip.ruleset.in-sync { color: var(--done); border-color: var(--done); }
+.matrix-legend { font-size: 11px; color: var(--text); opacity: 0.7; margin: 4px 0; }
 .canvas-node-gate { font-size: 10px; text-transform: uppercase; color: var(--text); opacity: 0.75; white-space: nowrap; }
 .canvas-lane-event { font-size: 11px; color: var(--text); opacity: 0.6; }
 button.canvas-node { width: 100%; cursor: pointer; background: var(--bg); text-align: left; }

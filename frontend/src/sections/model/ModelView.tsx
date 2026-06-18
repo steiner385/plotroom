@@ -34,32 +34,77 @@ export function ModelView({ repo, api }: ModelViewProps) {
     api.ruleset(repo).then(setRuleset).catch(() => setRuleset(null));
   }, [repo, api]);
 
+  const [showGates, setShowGates] = useState(false);
+  const [driftOnly, setDriftOnly] = useState(false);
   const required = useMemo(() => (model ? requiredGates(model) : []), [model]);
   const drift = useMemo(() => (model ? driftCells(model) : []), [model]);
+  const driftChecks = useMemo(() => new Set(drift.map((c) => c.check)), [drift]);
   const cellAt = (check: string, tier: string) => model!.cells.find((c) => c.check === check && c.tierId === tier);
 
   if (!repo) return <div className="model-view empty">Select a pipeline to inspect its model.</div>;
   if (error) return <div className="model-view error" role="alert">Couldn’t derive the model: {error}</div>;
   if (!model) return <div className="model-view" role="status">Deriving the pipeline model…</div>;
 
+  const rows = driftOnly ? model.checks.filter((c) => driftChecks.has(c)) : model.checks;
+
   return (
     <div className="model-view">
       <h2>Model — {repo} <span className="model-sha" title="derived from this commit">@{sha?.slice(0, 7)}</span></h2>
-      <p className="merge-contract" role="status">
-        <strong>Merge contract:</strong>{' '}
-        {required.length ? `${required.length} required gate${required.length === 1 ? '' : 's'} — ${required.join(', ')}` : 'no required gates detected'}
-      </p>
-      {drift.length > 0 && (
-        <p className="model-drift" role="status">⚠ {drift.length} cell{drift.length === 1 ? '' : 's'} drifting (config ≠ observed)</p>
+
+      {/* Compact summary bar — counts + toggles, not prose walls (roadmap 2.4) */}
+      <div className="model-summary">
+        <button type="button" className="model-chip" aria-expanded={showGates} onClick={() => setShowGates((s) => !s)}>
+          🔒 {required.length} required gate{required.length === 1 ? '' : 's'}
+        </button>
+        {drift.length > 0 && (
+          <button type="button" className={`model-chip drift${driftOnly ? ' active' : ''}`} aria-pressed={driftOnly} onClick={() => setDriftOnly((d) => !d)}>
+            ⚠ {drift.length} cell{drift.length === 1 ? '' : 's'} drifting
+          </button>
+        )}
+        {ruleset && (
+          <span className={`model-chip ruleset ${ruleset.readable ? (ruleset.inSync ? 'in-sync' : 'mismatch') : 'unreadable'}`}>
+            {!ruleset.readable ? '🔐 ruleset unreadable' : ruleset.inSync ? '✓ ruleset in sync' : '⚠ ruleset mismatch'}
+          </span>
+        )}
+      </div>
+      {showGates && (
+        <p className="merge-contract" role="status">required gates: {required.length ? required.join(', ') : 'none detected'}</p>
       )}
-      {ruleset && (
-        <p className={`model-ruleset ${ruleset.readable ? (ruleset.inSync ? 'in-sync' : 'mismatch') : 'unreadable'}`} role="status">
-          {!ruleset.readable
-            ? '🔐 Ruleset unreadable — grant administration:read to verify required-gate parity'
-            : ruleset.inSync
-              ? '✓ Required gates match the branch-protection ruleset'
-              : `⚠ Ruleset mismatch — ${ruleset.missingFromModel.length ? `ruleset requires ${ruleset.missingFromModel.join(', ')} not enforced by config` : ''}${ruleset.missingFromModel.length && ruleset.extraInModel.length ? '; ' : ''}${ruleset.extraInModel.length ? `config gates ${ruleset.extraInModel.join(', ')} the ruleset doesn’t` : ''}`}
+
+      <p className="matrix-legend" aria-label="Matrix legend">{GLYPH.gate} gate · {GLYPH.conditional} conditional · {GLYPH.advisory} advisory · {GLYPH.absent} absent · ⚠ drift</p>
+
+      <table className="protection-matrix" aria-label="Protection matrix">
+        <thead>
+          <tr><th scope="col">Check</th>{model.tiers.map((t) => <th key={t.id} scope="col">{t.label}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((check) => (
+            <tr key={check}>
+              <th scope="row">{check}{required.includes(check) && <span title="required merge gate"> 🔒</span>}</th>
+              {model.tiers.map((t) => {
+                const cell = cellAt(check, t.id);
+                const state = cell?.state ?? 'absent';
+                return (
+                  <td key={t.id} className={`cell state-${state}${cell?.drift ? ' drift' : ''}`} title={`${state}${cell?.drift ? ' — drift' : ''}`}>
+                    {GLYPH[state] ?? '·'}{cell?.drift ? '⚠' : ''}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* Details below the matrix — ruleset specifics + security (roadmap 2.4) */}
+      {ruleset && ruleset.readable && !ruleset.inSync && (
+        <p className="model-ruleset-detail mismatch" role="status">
+          ⚠ Ruleset mismatch — {ruleset.missingFromModel.length ? `ruleset requires ${ruleset.missingFromModel.join(', ')} not enforced by config` : ''}
+          {ruleset.missingFromModel.length && ruleset.extraInModel.length ? '; ' : ''}
+          {ruleset.extraInModel.length ? `config gates ${ruleset.extraInModel.join(', ')} the ruleset doesn’t` : ''}
         </p>
+      )}
+      {ruleset && !ruleset.readable && (
+        <p className="model-ruleset-detail unreadable" role="status">🔐 Ruleset unreadable — grant administration:read to verify required-gate parity</p>
       )}
       {security && security.length > 0 && (
         <section className="model-security" aria-label="Security findings">
@@ -76,27 +121,6 @@ export function ModelView({ repo, api }: ModelViewProps) {
           </ul>
         </section>
       )}
-      <table className="protection-matrix" aria-label="Protection matrix">
-        <thead>
-          <tr><th scope="col">Check</th>{model.tiers.map((t) => <th key={t.id} scope="col">{t.label}</th>)}</tr>
-        </thead>
-        <tbody>
-          {model.checks.map((check) => (
-            <tr key={check}>
-              <th scope="row">{check}{required.includes(check) && <span title="required merge gate"> 🔒</span>}</th>
-              {model.tiers.map((t) => {
-                const cell = cellAt(check, t.id);
-                const state = cell?.state ?? 'absent';
-                return (
-                  <td key={t.id} className={`cell state-${state}${cell?.drift ? ' drift' : ''}`} title={`${state}${cell?.drift ? ' — drift' : ''}`}>
-                    {GLYPH[state] ?? '·'}{cell?.drift ? '⚠' : ''}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
