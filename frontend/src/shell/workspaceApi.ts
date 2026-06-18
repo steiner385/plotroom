@@ -33,6 +33,18 @@ export interface ToolHealthDto {
   reasons: string[];
 }
 export interface TierIntentDto { kind: 'tier'; check: string; jobId: string; fromTierId: string; targetEvent: string }
+export type CandidateMutationDto =
+  | { op: 'timeout'; jobId: string; minutes: number }
+  | { op: 'runner'; jobId: string; runsOn: string }
+  | { op: 'concurrency'; group: string }
+  | { op: 'shift-left'; jobId: string }
+  | { op: 'remove'; jobId: string };
+export interface CandidateDto {
+  ok: boolean; reason?: string; baseSha: string;
+  files: { file: string; diff: string }[];
+  validation: { gatingRegressed: boolean; lostGates: string[]; lowConfidence: boolean };
+  model: DerivedModelLike | null;
+}
 
 async function json<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => ({}));
@@ -66,6 +78,8 @@ export function makeWorkspaceApi(fetchImpl: Fetch = fetch, base = '/api/workspac
       fetchImpl(`${base}/quarantine`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, check, jobId, dryRun: true }) }).then(json<{ dryRun: true; diff: string; baseSha: string }>),
     plan: (repo: string, moves: TierMoveDto[]) =>
       fetchImpl(`${base}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, moves }) }).then(json<{ combinedCostDeltaMinutes: number; legal: boolean; reason?: string; results: SimResultDto[] }>),
+    candidate: (repo: string, mutations: CandidateMutationDto[], baseSha?: string) =>
+      fetchImpl(`${base}/candidate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo, baseSha, mutations }) }).then(json<CandidateDto>),
   };
 }
 export type WorkspaceApi = ReturnType<typeof makeWorkspaceApi>;

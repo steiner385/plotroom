@@ -125,6 +125,16 @@
 .optimize-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 10px; border-bottom: 1px solid var(--border); }
 .optimize-check-name { flex: 1; min-width: 140px; font-size: 13px; word-break: break-word; }
 .optimize-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.build-checks { list-style: none; margin: 0; padding: 0; }
+.build-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.build-check-name { flex: 1; min-width: 140px; font-size: 13px; word-break: break-word; }
+.build-stack ol { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.build-stack li { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.build-diff { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre; }
+.candidate-verdict { font-weight: 600; }
+.candidate-verdict.safe { color: var(--done); }
+.candidate-verdict.scaffold { color: var(--amber); }
+.candidate-verdict.blocked, .candidate-verdict.refused { color: var(--fail); }
 .optimize-diff, .quarantine-diff, .optimize-sim pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre; }
 .optimize-prompt { white-space: pre-wrap !important; }
 .sim-note.legal, .plan-note.legal { color: var(--done); }

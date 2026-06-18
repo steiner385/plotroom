@@ -3,7 +3,7 @@
 // on-demand contract from the persona review). Pure — hash routing is testable
 // without the DOM.
 
-export type SectionId = 'health' | 'diagnose' | 'model' | 'optimize' | 'tune';
+export type SectionId = 'health' | 'diagnose' | 'model' | 'optimize' | 'build' | 'tune';
 
 export interface SectionDef {
   id: SectionId;
@@ -19,6 +19,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: 'diagnose', label: 'Diagnose',            mode: 'drill',     blurb: 'Why is this PR stuck?' },
   { id: 'model',    label: 'Model',               mode: 'read',      blurb: 'What gates a merge, and where is it drifting?' },
   { id: 'optimize', label: 'Optimize',            mode: 'act',       blurb: 'Findings → simulate → edit → draft PR.' },
+  { id: 'build',    label: 'Build',               mode: 'act',       blurb: 'Shape the pipeline visually — compose changes, validate, draft PR.' },
   { id: 'tune',     label: 'Tune & Investigate',  mode: 'configure', blurb: 'Knobs, forecasts, history, outcomes.' },
 ];
 

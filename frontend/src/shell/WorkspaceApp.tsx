@@ -12,6 +12,7 @@ import { PipelineSwitcher, useFocusedPipeline } from './PipelineSwitcher';
 import { HealthView } from '../sections/health/HealthView';
 import { DiagnoseView } from '../sections/diagnose/DiagnoseView';
 import { OptimizeView } from '../sections/optimize/OptimizeView';
+import { BuildView } from '../sections/build/BuildView';
 import { ModelView } from '../sections/model/ModelView';
 import { TuneView } from '../sections/tune/TuneView';
 import { makeWorkspaceApi } from './workspaceApi';
@@ -21,7 +22,7 @@ import type { SectionId } from './sections';
 
 // workspace section → legacy tab hash (where its capability lives until rebuilt)
 const LEGACY_TAB: Record<SectionId, string> = {
-  health: '#delivery', diagnose: '#pipeline', model: '#designer', optimize: '#designer', tune: '#metrics',
+  health: '#delivery', diagnose: '#pipeline', model: '#designer', optimize: '#designer', build: '#designer', tune: '#metrics',
 };
 
 function LegacyBridge({ id }: { id: SectionId }) {
@@ -70,6 +71,7 @@ export function WorkspaceApp() {
         diagnose: <DiagnoseView state={state} focusedRepo={focused} />,
         model: <ModelView repo={focused} api={api} />,
         optimize: <OptimizeView repo={focused} api={api} />,
+        build: <BuildView repo={focused} api={api} />,
         tune: <TuneView repo={focused} api={api} />,
       }}
       legacyBridge={(id) => <LegacyBridge id={id} />}
