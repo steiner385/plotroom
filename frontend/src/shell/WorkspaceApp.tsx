@@ -1,48 +1,24 @@
 // The unified-workspace entry composition (spec 001, Increment 1 MVP): wires the
-// shell + the spine (pipeline switcher + liveness) + the Health section over the
-// live DashboardState. Sections not yet rebuilt (Diagnose/Model/Optimize/Tune)
-// deep-link into the legacy tabs via the bridge — strangler-fig, so nothing is
-// lost mid-rebuild. This is mounted behind the workspace flag; the classic App
-// stays the default until parity.
-import { useEffect, useMemo, useRef, useState } from 'react';
+// shell + the spine (pipeline switcher + liveness) + section views via the shared
+// core (useWorkspaceData + SectionContent). Mounted behind the workspace flag; the
+// classic App stays the default until parity.
+import { useEffect, useRef, useState } from 'react';
 import './workspace.css';
-import { useDashboard } from '../useDashboard';
 import { WorkspaceShell } from './WorkspaceShell';
-import { PipelineSwitcher, useFocusedPipeline } from './PipelineSwitcher';
-import { HealthView } from '../sections/health/HealthView';
-import { DiagnoseView } from '../sections/diagnose/DiagnoseView';
-import { PipelineView } from '../sections/pipeline/PipelineView';
-import { InsightsView } from '../sections/insights/InsightsView';
+import { PipelineSwitcher } from './PipelineSwitcher';
+import { useWorkspaceData } from '../useWorkspaceData';
+import { useFocusedRepo } from './useFocusedRepo';
+import { SectionContent } from '../SectionContent';
+import { useSectionRoute } from '../embed/RouterContext';
 import { SettingsPanel } from '../SettingsPanel';
 import { LegendPanel } from '../LegendPanel';
-import { ModelEditView } from '../sections/modelEdit/ModelEditView';
-import { makeWorkspaceApi } from './workspaceApi';
 import { SelfHealthDot } from './SelfHealthDot';
 import { CommandPalette } from './CommandPalette';
-import { ForecastBanner } from './ForecastBanner';
-import { laneToSection, hashForSection, type SectionId } from './sections';
-
-// workspace section → legacy tab hash (where its capability lives until rebuilt)
-const LEGACY_TAB: Record<SectionId, string> = {
-  health: '#delivery', pipeline: '#pipeline', diagnose: '#pipeline', 'model-edit': '#designer', insights: '#metrics',
-};
-
-function LegacyBridge({ id }: { id: SectionId }) {
-  return (
-    <div className="legacy-bridge" role="region" aria-label={`${id} (classic)`}>
-      <p>This section isn’t rebuilt yet. Its capability still lives in the classic dashboard.</p>
-      <a className="legacy-bridge-link" href={`/${LEGACY_TAB[id]}`} target="_blank" rel="noreferrer">
-        Open classic dashboard ↗
-      </a>
-    </div>
-  );
-}
 
 export function WorkspaceApp() {
-  const { state, connected, stale, notifySupported, notifyEnabled, toggleNotify } = useDashboard();
-  const repos = useMemo(() => (state ? state.repos.map((r) => r.repo) : []), [state]);
-  const [focused, focus] = useFocusedPipeline(repos);
-  const api = useMemo(() => makeWorkspaceApi(), []);
+  const { state, connected, stale, repos, api, notifySupported, notifyEnabled, toggleNotify } = useWorkspaceData();
+  const [focused, focus] = useFocusedRepo({ repos });
+  const { active } = useSectionRoute();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -109,32 +85,18 @@ export function WorkspaceApp() {
     </>
   );
 
-  if (!state) {
-    return (
-      <>
-        <WorkspaceShell
-          header={header}
-          content={{ health: <div className="workspace-loading" role="status">Connecting to the live feed…</div> }}
-          legacyBridge={(id) => <LegacyBridge id={id} />}
-        />
-        {modals}
-      </>
-    );
-  }
-
   return (
     <>
-      <WorkspaceShell
-        header={header}
-        content={{
-          health: <><ForecastBanner api={api} repo={focused} /><HealthView state={state} connected={connected} onFocusRepo={focus} onJumpToLane={(laneId) => { location.hash = hashForSection(laneToSection(laneId)); }} /></>,
-          pipeline: <PipelineView state={state} focusedRepo={focused} />,
-          diagnose: <DiagnoseView state={state} focusedRepo={focused} api={api} />,
-          'model-edit': <ModelEditView repo={focused} api={api} />,
-          insights: <InsightsView repo={focused} api={api} />,
-        }}
-        legacyBridge={(id) => <LegacyBridge id={id} />}
-      />
+      <WorkspaceShell header={header}>
+        <SectionContent
+          active={active}
+          state={state}
+          connected={connected}
+          api={api}
+          focused={focused}
+          onFocusRepo={focus}
+        />
+      </WorkspaceShell>
       {modals}
     </>
   );

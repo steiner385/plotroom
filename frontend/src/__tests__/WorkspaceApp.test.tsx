@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { DashboardState } from '../types';
+import { ApiBaseProvider } from '../embed/ApiBaseContext';
+import { RouterProvider } from '../embed/RouterContext';
 
 // Mock the live-data hook so the composition is deterministic.
 const mockHook = vi.fn();
@@ -21,12 +23,16 @@ const STATE = {
   ],
 } as unknown as DashboardState;
 
+const renderApp = () => render(
+  <ApiBaseProvider><RouterProvider mode="hash"><WorkspaceApp /></RouterProvider></ApiBaseProvider>,
+);
+
 describe('WorkspaceApp (Increment 1 MVP composition)', () => {
   beforeEach(() => { location.hash = ''; mockHook.mockReset(); });
 
   it('renders the shell + spine + Health fleet over live state', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     expect(screen.getByText('CI/CD Workspace')).toBeInTheDocument();
     expect(screen.getByText('● live')).toBeInTheDocument();
     // Health is the default section; the down repo sorts first in the fleet
@@ -36,14 +42,14 @@ describe('WorkspaceApp (Increment 1 MVP composition)', () => {
 
   it('shows the connecting state before the first live frame (state null)', () => {
     mockHook.mockReturnValue({ state: null, connected: false });
-    render(<WorkspaceApp />);
+    renderApp();
     expect(screen.getByRole('status')).toHaveTextContent(/connecting/i);
     expect(screen.getByText('○ reconnecting')).toBeInTheDocument();
   });
 
   it('every section is built — no legacy bridge link, and Insights replaces Tune/Metrics (WS3a)', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     expect(screen.queryByRole('link', { name: /open classic dashboard/i })).not.toBeInTheDocument();
     // the consolidated nav: Insights present, the retired tabs gone
     expect(screen.getByText('Insights')).toBeInTheDocument();
@@ -53,14 +59,14 @@ describe('WorkspaceApp (Increment 1 MVP composition)', () => {
 
   it('offers the legacy back-door link (workspace is the default now)', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     const link = screen.getByRole('link', { name: /classic/i });
     expect(link).toHaveAttribute('href', '?legacy=1');
   });
 
   it('surfaces the Insights section (Metrics + Tune folded together — WS3a)', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     fireEvent.click(screen.getByText('Insights'));
     expect(screen.getByTestId('metrics-view')).toBeInTheDocument();
     // the Tune panels are folded in too
@@ -69,7 +75,7 @@ describe('WorkspaceApp (Increment 1 MVP composition)', () => {
 
   it('the gear opens Settings and the ? opens the Legend', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
@@ -79,7 +85,7 @@ describe('WorkspaceApp (Increment 1 MVP composition)', () => {
 
   it('opens the command palette via ⌘K and via the header trigger (WS5.3)', () => {
     mockHook.mockReturnValue({ state: STATE, connected: true });
-    render(<WorkspaceApp />);
+    renderApp();
     expect(screen.queryByRole('dialog', { name: /command palette/i })).not.toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'k', metaKey: true });
     expect(screen.getByRole('dialog', { name: /command palette/i })).toBeInTheDocument();
@@ -92,7 +98,7 @@ describe('WorkspaceApp (Increment 1 MVP composition)', () => {
   it('shows the notifications bell when supported and toggles it', () => {
     const toggleNotify = vi.fn();
     mockHook.mockReturnValue({ state: STATE, connected: true, notifySupported: true, notifyEnabled: false, toggleNotify });
-    render(<WorkspaceApp />);
+    renderApp();
     fireEvent.click(screen.getByRole('button', { name: /Browser notifications/i }));
     expect(toggleNotify).toHaveBeenCalledTimes(1);
   });
