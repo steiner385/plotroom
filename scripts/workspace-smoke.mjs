@@ -52,6 +52,7 @@ async function main() {
     probe('POST /plan (N2)', async () => { const r = await json('/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo: REPO, moves: [{ check: 'ci', fromTierId: 'pr', toTierId: null }] }) }); return { ok: r.status < 500 && (r.status >= 400 || 'legal' in r.body), detail: `status=${r.status}` }; }),
     probe('POST /quarantine dryRun (K2)', async () => { const r = await json('/quarantine', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo: REPO, check: 'ci', jobId: 'ci', dryRun: true }) }); return { ok: r.status < 500, detail: `status=${r.status} (409=correctly refused gate)` }; }),
     probe('POST /draft-pr dryRun (FR-026)', async () => { const r = await json('/draft-pr', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo: REPO, dryRun: true, intent: { kind: 'tier', check: 'ci', jobId: 'ci', fromTierId: 'pr', targetEvent: 'merge_group' } }) }); return { ok: r.status < 500, detail: `status=${r.status}` }; }),
+    probe('POST /candidate (Build)', async () => { const r = await json('/candidate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo: REPO, mutations: [{ op: 'timeout', jobId: 'ci', minutes: 30 }] }) }); return { ok: r.status < 500, detail: `status=${r.status} ok=${r.body.ok} regressed=${r.body.validation?.gatingRegressed}` }; }),
   ]);
 
   const s = summarize(results);
