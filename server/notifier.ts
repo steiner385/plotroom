@@ -20,7 +20,7 @@ import type { StageResult } from './types';
 
 export const NOTIFICATION_EVENT_TYPES = [
   'ci-failed', 'group-failed', 'queue-blocked', 'ready', 'overdue', 'prod-live',
-  'queue-stalled', 'duration-regression', 'runner-starvation',
+  'queue-stalled', 'duration-regression', 'runner-starvation', 'budget-breach',
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
@@ -32,7 +32,7 @@ export type NotificationKind = NotificationEventType | 'digest';
 /** Repo-level event types: prNumber 0, debounce keys outside the PR lifecycle
  *  (prune() must not touch them), and the rendered subject is the repo. */
 const REPO_LEVEL_TYPES: ReadonlySet<NotificationEventType> =
-  new Set(['queue-stalled', 'duration-regression', 'runner-starvation']);
+  new Set(['queue-stalled', 'duration-regression', 'runner-starvation', 'budget-breach']);
 
 /** Daily-digest knobs (issue #51) — file-only, like the rest of the block. */
 export interface DigestConfig {
@@ -72,8 +72,8 @@ export const DEFAULT_NOTIFICATIONS: NotificationsConfig = {
   digest: { enabled: false, hourLocal: 8 },
   events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
     ready: false, overdue: false, 'prod-live': true, 'queue-stalled': true,
-    // alert types, not status types — ON by default (issues #41/#45)
-    'duration-regression': true, 'runner-starvation': true },
+    // alert types, not status types — ON by default (issues #41/#45, roadmap 5.6c)
+    'duration-regression': true, 'runner-starvation': true, 'budget-breach': true },
 };
 
 /**
@@ -126,6 +126,7 @@ const LABELS: Record<NotificationEventType, string> = {
   'queue-stalled': 'merge queue STALLED',
   'duration-regression': 'duration regression',
   'runner-starvation': 'runner pool starving',
+  'budget-breach': 'budget breach',
 };
 
 /** Render an event to the {title}/{body} strings both sinks display. */
@@ -141,7 +142,7 @@ export function renderNotification(ev: NotificationEvent): { title: string; body
 }
 
 type StageEventType = Exclude<NotificationEventType,
-  'prod-live' | 'queue-stalled' | 'duration-regression' | 'runner-starvation'>;
+  'prod-live' | 'queue-stalled' | 'duration-regression' | 'runner-starvation' | 'budget-breach'>;
 
 interface Condition {
   /** Whether the condition holds for a classify result (drives debounce clearing). */
@@ -278,6 +279,24 @@ export class Notifier extends EventEmitter {
   }
 
   /**
+   * Budget-breach feed (roadmap 5.6c): a tool-global alert when a configured
+   * budget crosses its threshold. `scope` is the budget scope ('fleet' or a pool
+   * label) and renders as the subject; `kind` (minutes/cost/flake/…) is the title.
+   * Fires once per breach ENTRY; `active=false` (spend fell back under threshold,
+   * or the budget was removed) clears the debounce key so a re-breach re-fires.
+   */
+  budgetBreach(scope: string, kind: string, active: boolean, detail: string): void {
+    const key = `${scope} ${kind}|budget-breach`;
+    if (!active) {
+      this.active.delete(key);
+      return;
+    }
+    if (this.active.has(key)) return; // already fired for this breach
+    this.active.add(key);
+    this.fire({ repo: scope, prNumber: 0, title: kind, type: 'budget-breach', detail });
+  }
+
+  /**
    * Runner-starvation feed (issue #45): the poller's hourly scan reports every
    * evaluated (repo, pool) with its current starving flag. Fires once per pool
    * ENTRY; `starving=false` (hysteresis cleared, or the pool left the
@@ -311,7 +330,7 @@ export class Notifier extends EventEmitter {
   prune(livePrKeys: ReadonlySet<string>): void {
     for (const key of this.active) {
       if (key.endsWith('|queue-stalled') || key.endsWith('|duration-regression')
-        || key.endsWith('|runner-starvation')) continue;
+        || key.endsWith('|runner-starvation') || key.endsWith('|budget-breach')) continue;
       if (!livePrKeys.has(key.slice(0, key.lastIndexOf('|')))) this.active.delete(key);
     }
   }

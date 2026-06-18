@@ -4016,7 +4016,7 @@ describe('Poller notifier wiring (issue #19)', () => {
     digest: { enabled: false, hourLocal: 8 },
     events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
       ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-      'duration-regression': true, 'runner-starvation': true },
+      'duration-regression': true, 'runner-starvation': true, 'budget-breach': true},
   };
 
   function notifierHarness() {
@@ -4126,7 +4126,7 @@ describe('Poller notifier wiring (issue #19)', () => {
         digest: { enabled: false, hourLocal: 8 },
         events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
           ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-          'duration-regression': true, 'runner-starvation': true } } });
+          'duration-regression': true, 'runner-starvation': true, 'budget-breach': true} } });
     const execCalls: string[] = [];
     // index.ts wiring shape: the notifier reads the POLLER's live config, so a
     // PUT /api/config → reconfigure() flips the command sink with no restart
@@ -4362,7 +4362,7 @@ describe('Poller queue cycle records group failures (issue #38)', () => {
     const notifier = new Notifier({ config: () => ({ enabled: false, command: [], digest: { enabled: false, hourLocal: 8 },
       events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
         ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-        'duration-regression': true, 'runner-starvation': true } }) });
+        'duration-regression': true, 'runner-starvation': true, 'budget-breach': true} }) });
     notifier.on('notification', (ev: NotificationEvent) => events.push(ev));
     (p as unknown as { deps: { notifier?: Notifier } }).deps.notifier = notifier;
     p.buildState();
@@ -4451,7 +4451,7 @@ describe('Poller queue ops console (#39) + merge ETA simulation (#40)', () => {
     enabled: false, command: [], digest: { enabled: false, hourLocal: 8 },
     events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
       ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-      'duration-regression': true, 'runner-starvation': true },
+      'duration-regression': true, 'runner-starvation': true, 'budget-breach': true},
   };
 
   const opsSweep = (n: number) => ({
@@ -4850,7 +4850,7 @@ describe('Poller duration-regression scan (issue #41)', () => {
     enabled: false, command: [], digest: { enabled: false, hourLocal: 8 },
     events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
       ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-      'duration-regression': true, 'runner-starvation': true },
+      'duration-regression': true, 'runner-starvation': true, 'budget-breach': true},
   };
   const REG_CHECK = 'fast-checks / ESLint';
 
@@ -5164,7 +5164,7 @@ describe('Poller runner-starvation scan (issue #45)', () => {
     const notifier = new Notifier({ config: () => ({ enabled: false, command: [], digest: { enabled: false, hourLocal: 8 },
       events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
         ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
-        'duration-regression': true, 'runner-starvation': true } }) });
+        'duration-regression': true, 'runner-starvation': true, 'budget-breach': true} }) });
     notifier.on('notification', (ev: NotificationEvent) => events.push(ev));
     const p = new Poller({ router: asRouter(fakeClient()), history,
       deploy: noDeploy(), config: CONFIG, notifier, now: () => now });

@@ -17,11 +17,12 @@ const NOTIFY_LABELS: Record<NotificationEventType, string> = {
   'queue-stalled': 'merge queue STALLED',
   'duration-regression': 'duration regression',
   'runner-starvation': 'runner pool starving',
+  'budget-breach': 'budget breach',
 };
 
 /** Repo-level event types carry prNumber 0 — render the repo, never "repo#0". */
 const REPO_LEVEL_TYPES = new Set<NotificationEventType>(
-  ['queue-stalled', 'duration-regression', 'runner-starvation']);
+  ['queue-stalled', 'duration-regression', 'runner-starvation', 'budget-breach']);
 
 function notifySupported(): boolean {
   return typeof Notification !== 'undefined';

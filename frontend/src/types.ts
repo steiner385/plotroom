@@ -183,7 +183,7 @@ export interface DashboardState {
 
 export type NotificationEventType =
   | 'ci-failed' | 'group-failed' | 'queue-blocked' | 'ready' | 'overdue' | 'prod-live'
-  | 'queue-stalled' | 'duration-regression' | 'runner-starvation';
+  | 'queue-stalled' | 'duration-regression' | 'runner-starvation' | 'budget-breach';
 
 /** Event types plus 'digest' (issue #51) — the daily summary frame, gated by
  *  `notifications.digest.enabled` rather than the per-event toggles. */

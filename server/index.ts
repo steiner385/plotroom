@@ -19,6 +19,8 @@ import { backfillRepo } from './backfill';
 import { computeMetrics } from './metrics';
 import { computeProtectionMap } from './protection-map';
 import { createWorkspaceRouter } from './core/api/workspace-router';
+import { evaluateBudgets } from './core/analytics/budgets';
+import { notifyBudgetBreaches } from './core/analytics/budget-notify';
 import { workspaceDepsFromClient } from './core/api/wire';
 import { WorkspaceStore } from './core/store/workspaceStore';
 import { LiveSnapshotStore } from './core/live/snapshot';
@@ -28,6 +30,9 @@ import { dataDir, staticDir, configPath } from './paths';
 
 /** Re-list the App's installations this often (new installs appear without a restart). */
 const REGISTRY_REFRESH_MS = 24 * 3600_000;
+/** How often to re-evaluate fleet budgets and push a breach alert (roadmap 5.6c).
+ *  Cost actuals are operator-pushed (infrequent), so a few minutes is ample. */
+const BUDGET_CHECK_MS = 5 * 60_000;
 
 const pexec = promisify(execFile);
 
@@ -313,6 +318,19 @@ async function main() {
         // Durable workspace store (Groups H/L2/I2) — real persistence outliving the
         // rolling telemetry retention. Wires outcomes/audit/policy from real data.
         const wsStore = new WorkspaceStore(join(dataDir(), 'workspace.db'));
+        // Budget-breach alerting (roadmap 5.6c): re-evaluate fleet budgets on a
+        // timer and push a notification when one crosses its threshold — the same
+        // evaluator the /budgets endpoint uses (cost from trailing-30d actuals).
+        const checkBudgets = () => {
+          const budgets = wsStore.getBudgets('fleet');
+          if (budgets.length === 0) return;
+          const sinceDate = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+          const cost = history.costActualsSince(sinceDate).filter((r) => r.scope === 'fleet').reduce((s, r) => s + r.dollars, 0);
+          const gauges = evaluateBudgets({ cost }, budgets);
+          notifyBudgetBreaches('fleet', gauges, (sc, kind, active, detail) => notifier.budgetBreach(sc, kind, active, detail));
+        };
+        setInterval(checkBudgets, BUDGET_CHECK_MS).unref();
+        checkBudgets();
         // Tier-1 live store, fed by the poller — the workspace's live source + the
         // authoritative ingestion-freshness clock for self-obs (wall-clock of the
         // last frame, not the debounced generatedAt).
