@@ -1,77 +1,107 @@
-// Tune & Investigate section (spec 001, US5 — the 5th section). The configure +
-// retrospect home: budgets/quota gauges (J3), policy violations (I2), closed-loop
-// outcomes (H), and the changelog + action audit (L). Each panel loads independently
-// and is advisory (a failed/empty panel never blocks the others — FR-022). Deep
-// historical metrics stay behind an explicit affordance, not the default. API injected.
-import { useEffect, useState } from 'react';
+// Tune & Investigate section (spec 001, US5). Budgets/quota gauges (J3), policy
+// violations (I2), closed-loop outcomes (H), and the changelog + action audit (L).
+// Each panel loads independently and is advisory (FR-022) — and now each renders an
+// explicit loading / empty / error state so an empty-but-healthy pipeline never shows
+// a void (roadmap 1.1). API injected.
+import { useEffect, useState, type ReactNode } from 'react';
 import type { WorkspaceApi, BudgetsDto, PolicyDto, OutcomesDto, ChangelogDto } from '../../shell/workspaceApi';
 
-export function TuneView({ repo, api }: { repo: string | null; api: WorkspaceApi }) {
-  const [budgets, setBudgets] = useState<BudgetsDto | null>(null);
-  const [policy, setPolicy] = useState<PolicyDto | null>(null);
-  const [outcomes, setOutcomes] = useState<OutcomesDto | null>(null);
-  const [log, setLog] = useState<ChangelogDto | null>(null);
+type Loadable<T> = { status: 'loading' } | { status: 'error' } | { status: 'ok'; data: T };
 
+/** Load a value into a Loadable, mapping a rejection to the error state. */
+function useLoadable<T>(load: (() => Promise<T>) | null, deps: unknown[]): Loadable<T> {
+  const [v, setV] = useState<Loadable<T>>({ status: 'loading' });
   useEffect(() => {
-    api.budgets().then(setBudgets).catch(() => setBudgets(null));
-  }, [api]);
-  useEffect(() => {
-    if (!repo) { setPolicy(null); setOutcomes(null); setLog(null); return; }
-    api.policy(repo).then(setPolicy).catch(() => setPolicy(null));
-    api.outcomes(repo).then(setOutcomes).catch(() => setOutcomes(null));
-    api.changelog(repo).then(setLog).catch(() => setLog(null));
-  }, [repo, api]);
+    if (!load) { setV({ status: 'loading' }); return; }
+    let cancelled = false;
+    setV({ status: 'loading' });
+    load().then((data) => { if (!cancelled) setV({ status: 'ok', data }); })
+      .catch(() => { if (!cancelled) setV({ status: 'error' }); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  return v;
+}
+
+/** A panel that always renders its labelled region, with loading / error / empty /
+ *  content states — never a silent void. `isEmpty` decides the empty state. */
+function Panel<T>({ label, title, value, isEmpty, empty, children }: {
+  label: string; title: string; value: Loadable<T>;
+  isEmpty: (d: T) => boolean; empty: string; children: (d: T) => ReactNode;
+}) {
+  return (
+    <section className="tune-panel" aria-label={label}>
+      <h3>{title}</h3>
+      {value.status === 'loading' && <p className="tune-loading" role="status">Loading…</p>}
+      {value.status === 'error' && <p className="tune-error" role="status">Couldn’t load — the provider may be offline.</p>}
+      {value.status === 'ok' && (isEmpty(value.data)
+        ? <p className="tune-empty">{empty}</p>
+        : children(value.data))}
+    </section>
+  );
+}
+
+export function TuneView({ repo, api }: { repo: string | null; api: WorkspaceApi }) {
+  const budgets = useLoadable<BudgetsDto>(() => api.budgets(), [api]);
+  const policy = useLoadable<PolicyDto>(repo ? () => api.policy(repo) : null, [repo, api]);
+  const outcomes = useLoadable<OutcomesDto>(repo ? () => api.outcomes(repo) : null, [repo, api]);
+  const log = useLoadable<ChangelogDto>(repo ? () => api.changelog(repo) : null, [repo, api]);
 
   return (
     <div className="tune-view">
       <h2>Tune &amp; Investigate{repo ? ` — ${repo}` : ''}</h2>
 
-      {budgets && budgets.gauges.length > 0 && (
-        <section className="tune-budgets" aria-label="Budgets">
-          <h3>Budgets</h3>
+      <Panel label="Budgets" title="Budgets" value={budgets}
+        isEmpty={(d) => d.gauges.length === 0} empty="No budget breaches in this window ✓">
+        {(d) => (
           <ul role="list">
-            {budgets.gauges.map((g) => (
+            {d.gauges.map((g) => (
               <li key={g.kind} className={`budget-gauge state-${g.state}`}>
                 <span className="budget-kind">{g.kind}</span>
                 <span className="budget-value">{g.current}{g.unit ? ` ${g.unit}` : ''} / {g.threshold} ({Math.round(g.fractionUsed * 100)}%)</span>
-                <span className="budget-state">{g.state === 'breach' ? '⛔' : g.state === 'warn' ? '⚠' : '✓'}</span>
+                <span className="budget-state" aria-hidden="true">{g.state === 'breach' ? '⛔' : g.state === 'warn' ? '⚠' : '✓'}</span>
               </li>
             ))}
           </ul>
-        </section>
-      )}
+        )}
+      </Panel>
 
-      {policy && policy.violations.length > 0 && (
-        <section className="tune-policy" aria-label="Policy violations">
-          <h3>Policy violations ({policy.violations.length})</h3>
-          <ul role="list">{policy.violations.map((v, i) => <li key={i}><strong>{v.check}</strong>: {v.detail}</li>)}</ul>
-        </section>
-      )}
+      {!repo ? (
+        <p className="tune-hint">Select a pipeline to see its policy, outcomes, and changelog.</p>
+      ) : (
+        <>
+          <Panel label="Policy" title="Policy" value={policy}
+            isEmpty={(d) => d.violations.length === 0} empty="No policy violations ✓">
+            {(d) => <ul role="list">{d.violations.map((v, i) => <li key={i}><strong>{v.check}</strong>: {v.detail}</li>)}</ul>}
+          </Panel>
 
-      {outcomes && outcomes.outcomes.length > 0 && (
-        <section className="tune-outcomes" aria-label="Outcomes">
-          <h3>Applied-change outcomes — {Math.round(outcomes.accuracy.meanCostAccuracy * 100)}% mean accuracy{outcomes.accuracy.recommenderUsable ? '' : ' (advisory)'}</h3>
-          <ul role="list">
-            {outcomes.outcomes.map((o) => (
-              <li key={o.prNumber} className={`outcome conf-${o.confidence}`}>
-                #{o.prNumber} {o.check}: {Math.round(o.costAccuracy * 100)}% accurate {o.directionCorrect ? '✓' : '✗ wrong direction'} <em>[{o.confidence}]</em>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+          <Panel label="Outcomes" title="Applied-change outcomes" value={outcomes}
+            isEmpty={(d) => d.outcomes.length === 0} empty="No applied-change outcomes yet — apply a change to start the closed loop.">
+            {(d) => (
+              <>
+                <p className="outcomes-accuracy">{Math.round(d.accuracy.meanCostAccuracy * 100)}% mean accuracy{d.accuracy.recommenderUsable ? '' : ' (advisory)'}</p>
+                <ul role="list">
+                  {d.outcomes.map((o) => (
+                    <li key={o.prNumber} className={`outcome conf-${o.confidence}`}>
+                      #{o.prNumber} {o.check}: {Math.round(o.costAccuracy * 100)}% accurate {o.directionCorrect ? '✓' : '✗ wrong direction'} <em>[{o.confidence}]</em>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </Panel>
 
-      {log && (log.changelog.length > 0 || log.audit.length > 0) && (
-        <section className="tune-changelog" aria-label="Changelog and audit">
-          <h3>Changelog &amp; audit</h3>
-          <ul role="list">
-            {log.changelog.map((c, i) => <li key={`c${i}`} className="changelog-entry">{c.at.slice(0, 10)} · {c.summary} <em>({c.actor})</em></li>)}
-            {log.audit.map((a, i) => <li key={`a${i}`} className="audit-entry">{a.at.slice(0, 10)} · tool {a.action} {a.target ?? ''} {a.result ? `→ ${a.result}` : ''}</li>)}
-          </ul>
-        </section>
+          <Panel label="Changelog and audit" title="Changelog & audit" value={log}
+            isEmpty={(d) => d.changelog.length === 0 && d.audit.length === 0} empty="No config changes or tool actions recorded in this window.">
+            {(d) => (
+              <ul role="list">
+                {d.changelog.map((c, i) => <li key={`c${i}`} className="changelog-entry">{c.at.slice(0, 10)} · {c.summary} <em>({c.actor})</em></li>)}
+                {d.audit.map((a, i) => <li key={`a${i}`} className="audit-entry">{a.at.slice(0, 10)} · tool {a.action} {a.target ?? ''} {a.result ? `→ ${a.result}` : ''}</li>)}
+              </ul>
+            )}
+          </Panel>
+        </>
       )}
-
-      {!repo && <p className="tune-hint">Select a pipeline to see its policy, outcomes, and changelog.</p>}
     </div>
   );
 }

@@ -156,6 +156,11 @@ button.canvas-node.selected { outline: 2px solid var(--accent, #6af); outline-of
 .raw-hatch-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .raw-hatch-label { font-size: 11px; color: var(--muted, #888); }
 .raw-hatch-textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; box-sizing: border-box; }
+.tune-panel { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.tune-panel h3 { margin: 0 0 8px; font-size: 13px; }
+.tune-empty { color: var(--done); font-size: 12px; margin: 0; }
+.tune-loading { color: var(--muted, #888); font-size: 12px; margin: 0; }
+.tune-error { color: var(--amber); font-size: 12px; margin: 0; }
 .optimize-diff, .quarantine-diff, .optimize-sim pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre; }
 .optimize-prompt { white-space: pre-wrap !important; }
 .sim-note.legal, .plan-note.legal { color: var(--done); }

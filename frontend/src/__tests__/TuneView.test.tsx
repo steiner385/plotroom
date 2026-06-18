@@ -19,7 +19,7 @@ describe('TuneView (US5 — 5th section, aggregates J3/I2/H/L)', () => {
 
   it('renders policy violations and outcomes accuracy', async () => {
     render(<TuneView repo="o/r" api={api()} />);
-    expect(await screen.findByLabelText('Policy violations')).toHaveTextContent(/build.*caught late/);
+    expect(await screen.findByLabelText('Policy')).toHaveTextContent(/build.*caught late/);
     expect(await screen.findByLabelText('Outcomes')).toHaveTextContent(/92% mean accuracy \(advisory\)/);
   });
 
@@ -30,9 +30,30 @@ describe('TuneView (US5 — 5th section, aggregates J3/I2/H/L)', () => {
     expect(log).toHaveTextContent(/tool draft-pr/);
   });
 
-  it('a failing panel does not block the others (advisory, FR-022)', async () => {
+  it('a failing panel shows an error state and does not block the others (advisory, FR-022)', async () => {
     render(<TuneView repo="o/r" api={api({ policy: vi.fn(async () => { throw new Error('boom'); }) })} />);
-    expect(await screen.findByLabelText('Budgets')).toBeInTheDocument(); // budgets still render
-    expect(screen.queryByLabelText('Policy violations')).not.toBeInTheDocument();
+    expect(await screen.findByLabelText('Budgets')).toHaveTextContent(/minutes/); // budgets still render
+    const policy = await screen.findByLabelText('Policy');
+    expect(policy).toHaveTextContent(/couldn.t load|error/i); // error state, not a silent void
+  });
+
+  it('renders designed empty states (not a void) when a focused repo has no data', async () => {
+    const empty = api({
+      budgets: vi.fn(async () => ({ gauges: [], alerts: [] })),
+      policy: vi.fn(async () => ({ rules: [], violations: [] })),
+      outcomes: vi.fn(async () => ({ outcomes: [], accuracy: { count: 0, meanCostAccuracy: 0, directionHitRate: 0, recommenderUsable: false } })),
+      changelog: vi.fn(async () => ({ changelog: [], audit: [] })),
+    });
+    render(<TuneView repo="o/r" api={empty} />);
+    // each panel still renders its region with a clear "nothing here" message
+    expect(await screen.findByLabelText('Budgets')).toHaveTextContent(/no budget/i);
+    expect(screen.getByLabelText('Policy')).toHaveTextContent(/no policy violation/i);
+    expect(screen.getByLabelText('Outcomes')).toHaveTextContent(/no applied-change/i);
+    expect(screen.getByLabelText('Changelog and audit')).toHaveTextContent(/no .*chang|nothing recorded/i);
+  });
+
+  it('shows the no-repo hint but still loads the cross-cutting budgets panel', async () => {
+    render(<TuneView repo={null} api={api({ budgets: vi.fn(async () => ({ gauges: [], alerts: [] })) })} />);
+    expect(await screen.findByText(/select a pipeline/i)).toBeInTheDocument();
   });
 });
