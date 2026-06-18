@@ -178,7 +178,7 @@ export function SettingsPanel({ open, onClose, returnFocusRef, connected }: Sett
     if (!open) return;
     let cancelled = false;
     fetch(apiUrl('/repos'))
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`GET /api/repos → ${r.status}`))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`GET ${apiUrl('/repos')} → ${r.status}`))))
       .then((body: { repos: { repo: string; excluded: boolean }[] }) => {
         if (!cancelled) setRepoNames(body.repos.map((r) => r.repo));
       })
@@ -193,7 +193,7 @@ export function SettingsPanel({ open, onClose, returnFocusRef, connected }: Sett
     void (async () => {
       try {
         const res = await fetch(apiUrl('/config'));
-        if (!res.ok) throw new Error(`GET /api/config → ${res.status}`);
+        if (!res.ok) throw new Error(`GET ${apiUrl('/config')} → ${res.status}`);
         const body = (await res.json()) as ConfigResponse;
         if (cancelled) return;
         setConfig(body);
@@ -281,7 +281,7 @@ export function SettingsPanel({ open, onClose, returnFocusRef, connected }: Sett
         }
         return;
       }
-      if (!res.ok) throw new Error(`PUT /api/config → ${res.status}`);
+      if (!res.ok) throw new Error(`PUT ${apiUrl('/config')} → ${res.status}`);
       const result = (await res.json()) as ConfigPutResult;
       const applied = result.applied.length ? result.applied.join(', ') : 'nothing changed';
       setAppliedMsg(`applied: ${applied}`);
