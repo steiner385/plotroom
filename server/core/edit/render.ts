@@ -103,3 +103,27 @@ export function renderTimeout(yamlText: string, jobId: string, minutes: number):
   const diff = [`@@ job ${jobId} — timeout ${minutes}m @@`, ` ${lines[jobLine]}`, `+${addedLine}`, ...block.slice(0, 2).map((l) => ` ${l}`)].join('\n');
   return { ok: true, newText, addedLine, diff };
 }
+
+/** Change a job's `runs-on:` (runner routing). Refuses a missing job, a job
+ *  with no `runs-on:` (e.g. a reusable-workflow `uses:` caller), or a `runs-on:`
+ *  that is a matrix/expression (cannot route safely). */
+export function renderRunnerRoute(yamlText: string, jobId: string, runsOn: string): EditResult {
+  const lines = yamlText.split('\n');
+  const loc = locateJobBlock(lines, jobId);
+  if (!loc) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
+  if (loc.propIndent === null) return { ok: false, reason: `job "${jobId}" has no body to edit` };
+  const { jobLine, end, propIndent } = loc;
+  let runsIdx = -1;
+  for (let i = jobLine + 1; i < end; i++) {
+    if (lines[i].match(/^(\s*)/)![1] === propIndent && /^runs-on\s*:/.test(lines[i].trim())) { runsIdx = i; break; }
+  }
+  if (runsIdx < 0) return { ok: false, reason: `job "${jobId}" has no \`runs-on:\` (reusable-workflow caller?) — cannot route` };
+  const value = lines[runsIdx].slice(lines[runsIdx].indexOf(':') + 1).trim();
+  if (value.includes('${{') || value.startsWith('[')) {
+    return { ok: false, reason: `job "${jobId}" runs-on is an expression/matrix — edit by hand` };
+  }
+  const newLine = `${propIndent}runs-on: ${runsOn}`;
+  const newText = [...lines.slice(0, runsIdx), newLine, ...lines.slice(runsIdx + 1)].join('\n');
+  const diff = [`@@ job ${jobId} — runs-on → ${runsOn} @@`, `-${lines[runsIdx]}`, `+${newLine}`].join('\n');
+  return { ok: true, newText, addedLine: newLine, diff };
+}

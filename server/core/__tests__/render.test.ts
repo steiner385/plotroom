@@ -113,3 +113,34 @@ describe('renderTimeout (add timeout-minutes)', () => {
     expect(renderTimeout(WF, 'nope', 10).ok).toBe(false);
   });
 });
+
+describe('renderRunnerRoute (change runs-on)', () => {
+  it('replaces runs-on for a job and round-trips, nothing else changed', () => {
+    const r = renderRunnerRoute(WF, 'lint', 'self-hosted');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const before = parse(WF), after = parse(r.newText);
+    expect(after.jobs.lint['runs-on']).toBe('self-hosted');
+    expect(before.jobs.lint['runs-on']).toBe('ubuntu-latest');
+    expect(after.jobs.lint.steps).toEqual(before.jobs.lint.steps);
+    expect(after.jobs.guarded).toEqual(before.jobs.guarded);
+    expect(r.diff).toMatch(/runs-on → self-hosted/);
+  });
+
+  it('refuses when runs-on is a matrix/expression (cannot route safely)', () => {
+    const wf = `on: push\njobs:\n  a:\n    runs-on: \${{ matrix.os }}\n    steps: []\n`;
+    const r = renderRunnerRoute(wf, 'a', 'self-hosted');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toMatch(/expression|matrix/);
+  });
+
+  it('refuses a job with no runs-on (e.g. a `uses:` caller)', () => {
+    const wf = `on: push\njobs:\n  a:\n    uses: ./.github/workflows/_x.yml\n`;
+    expect(renderRunnerRoute(wf, 'a', 'self-hosted').ok).toBe(false);
+  });
+
+  it('refuses a missing job', () => {
+    expect(renderRunnerRoute(WF, 'nope', 'self-hosted').ok).toBe(false);
+  });
+});
