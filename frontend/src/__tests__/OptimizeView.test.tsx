@@ -52,7 +52,7 @@ function fakeApi(over: Partial<WorkspaceApi> = {}): WorkspaceApi {
 describe('OptimizeView (US4 — drives /api/workspace loop)', () => {
   it('loads the model and lists checks', async () => {
     render(<OptimizeView repo="o/r" api={fakeApi()} />);
-    expect(await screen.findByText('e2e')).toBeInTheDocument();
+    expect((await screen.findAllByText('e2e')).length).toBeGreaterThan(0);
     expect(screen.getByText('build')).toBeInTheDocument();
   });
 
