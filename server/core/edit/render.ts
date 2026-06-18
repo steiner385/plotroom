@@ -13,19 +13,22 @@ export type EditResult =
   | { ok: true; newText: string; addedLine: string; diff: string }
   | { ok: false; reason: string };
 
-/** Restrict `jobId` to run only on `event` (G2), or refuse with a reason. */
-export function renderTierAssign(yamlText: string, jobId: string, event: string): EditResult {
-  const lines = yamlText.split('\n');
+interface JobBlock {
+  jobLine: number; jobIndent: string; end: number; block: string[];
+  /** indent of the job's first body property, or null when the job has no body */
+  propIndent: string | null;
+}
+
+/** Locate a job's header line and body block by indentation. Pure; null when absent. */
+function locateJobBlock(lines: string[], jobId: string): JobBlock | null {
   const esc = jobId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const jobRe = new RegExp(`^(\\s+)${esc}:\\s*(#.*)?$`);
-
   let jobLine = -1, jobIndent = '';
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(jobRe);
     if (m) { jobLine = i; jobIndent = m[1]; break; }
   }
-  if (jobLine < 0) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
-
+  if (jobLine < 0) return null;
   let end = lines.length;
   for (let i = jobLine + 1; i < lines.length; i++) {
     if (lines[i].trim() === '') continue;
@@ -34,8 +37,17 @@ export function renderTierAssign(yamlText: string, jobId: string, event: string)
   }
   const block = lines.slice(jobLine + 1, end);
   const firstProp = block.find((l) => l.trim() !== '');
-  if (!firstProp) return { ok: false, reason: `job "${jobId}" has no body to edit` };
-  const propIndent = firstProp.match(/^(\s*)/)![1];
+  const propIndent = firstProp ? firstProp.match(/^(\s*)/)![1] : null;
+  return { jobLine, jobIndent, end, block, propIndent };
+}
+
+/** Restrict `jobId` to run only on `event` (G2), or refuse with a reason. */
+export function renderTierAssign(yamlText: string, jobId: string, event: string): EditResult {
+  const lines = yamlText.split('\n');
+  const loc = locateJobBlock(lines, jobId);
+  if (!loc) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
+  if (loc.propIndent === null) return { ok: false, reason: `job "${jobId}" has no body to edit` };
+  const { jobLine, block, propIndent } = loc;
 
   const hasIf = block.some((l) => {
     const ind = l.match(/^(\s*)/)![1];
@@ -62,25 +74,10 @@ export function renderTierAssign(yamlText: string, jobId: string, event: string)
  */
 export function renderQuarantine(yamlText: string, jobId: string): EditResult {
   const lines = yamlText.split('\n');
-  const esc = jobId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const jobRe = new RegExp(`^(\\s+)${esc}:\\s*(#.*)?$`);
-  let jobLine = -1, jobIndent = '';
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(jobRe);
-    if (m) { jobLine = i; jobIndent = m[1]; break; }
-  }
-  if (jobLine < 0) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
-
-  let end = lines.length;
-  for (let i = jobLine + 1; i < lines.length; i++) {
-    if (lines[i].trim() === '') continue;
-    const ind = lines[i].match(/^(\s*)/)![1].length;
-    if (ind <= jobIndent.length) { end = i; break; }
-  }
-  const block = lines.slice(jobLine + 1, end);
-  const firstProp = block.find((l) => l.trim() !== '');
-  if (!firstProp) return { ok: false, reason: `job "${jobId}" has no body to edit` };
-  const propIndent = firstProp.match(/^(\s*)/)![1];
+  const loc = locateJobBlock(lines, jobId);
+  if (!loc) return { ok: false, reason: `could not locate job "${jobId}" in the workflow` };
+  if (loc.propIndent === null) return { ok: false, reason: `job "${jobId}" has no body to edit` };
+  const { jobLine, block, propIndent } = loc;
   if (block.some((l) => l.match(/^(\s*)/)![1] === propIndent && /^continue-on-error\s*:/.test(l.trim()))) {
     return { ok: false, reason: `job "${jobId}" already sets continue-on-error — edit by hand` };
   }
