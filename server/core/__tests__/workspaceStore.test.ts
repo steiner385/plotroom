@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { WorkspaceStore } from '../store/workspaceStore';
 import type { AppliedChange } from '../analytics/outcomes';
 
@@ -54,7 +56,9 @@ describe('WorkspaceStore (durable persistence — in-memory SQLite)', () => {
   });
 
   it('survives a reopen (real on-disk durability)', () => {
-    const path = `${process.env.CLAUDE_JOB_DIR ?? '/tmp'}/tmp/ws-store-${Math.floor(Math.random() * 1e9)}.db`;
+    // os.tmpdir() always exists (portable across local + CI); a bare `/tmp/tmp`
+    // path does not, which failed CI when CLAUDE_JOB_DIR was unset.
+    const path = join(tmpdir(), `ws-store-${Math.floor(Math.random() * 1e9)}.db`);
     const a = new WorkspaceStore(path);
     a.putPolicies('o/r', [{ id: 'p1', kind: 'required-gate-runs-on-pr' }]);
     a.close();
