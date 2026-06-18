@@ -69,6 +69,17 @@ export const PROMOTION_DEFAULTS: PromotionConfig = {
 };
 
 interface Ladder { currentTier: string; suggestedTier: string; }
+/** Shard suffix — `(1/8)`, `(shard 2 of 4)`, etc. Stripped when matching coverage
+ *  so a check sharded DIFFERENTLY across tiers (e.g. unit (1/3) on PR vs (1/8) in
+ *  the queue) still counts as covered (#150.1). NOT the caller prefix — that
+ *  distinguishes genuinely different jobs and carries meaning. A configured
+ *  logical-equivalence map (affected-slice ↔ full-suite) is the heavier follow-on. */
+const SHARD_SUFFIX = /\s*\((?:shard\s+)?\d+\s*(?:\/|of)\s*\d+\)\s*$/i;
+/** Normalized identity for coverage matching — shard-insensitive. */
+export function coverageKey(name: string): string {
+  return name.replace(SHARD_SUFFIX, '');
+}
+
 /**
  * The earlier tier to shift a late-failing check to, or null when there is no
  * safe/useful promotion:
@@ -76,14 +87,15 @@ interface Ladder { currentTier: string; suggestedTier: string; }
  *  - merge_group: promote to PR UNLESS it already runs on PRs (remaining
  *    failures are merge-emergent — unpreventable upstream).
  *  - pull_request (and anything else): already earliest — nothing to promote.
+ * Coverage is matched on the shard-insensitive key (#150.1).
  */
 function promotionTarget(stat: PromotionStat, onMergeGroup: Set<string>, onPr: Set<string>): Ladder | null {
   if (stat.event === 'push') {
-    if (onMergeGroup.has(stat.name)) return null;
+    if (onMergeGroup.has(coverageKey(stat.name))) return null;
     return { currentTier: 'every push to main (post-merge)', suggestedTier: 'merge queue (pre-merge gate)' };
   }
   if (stat.event === 'merge_group') {
-    if (onPr.has(stat.name)) return null;
+    if (onPr.has(coverageKey(stat.name))) return null;
     return { currentTier: 'merge queue only', suggestedTier: 'every PR push (catch pre-enqueue)' };
   }
   return null;
@@ -94,8 +106,8 @@ export function computePromotionCandidates(
 ): PromotionCandidate[] {
   // Earlier-tier presence — a check already running there can't be promoted into
   // it. Built from the FULL stats list (presence, not pass/fail).
-  const onMergeGroup = new Set(stats.filter((s) => s.event === 'merge_group' && s.totalRuns > 0).map((s) => s.name));
-  const onPr = new Set(stats.filter((s) => s.event === 'pull_request' && s.totalRuns > 0).map((s) => s.name));
+  const onMergeGroup = new Set(stats.filter((s) => s.event === 'merge_group' && s.totalRuns > 0).map((s) => coverageKey(s.name)));
+  const onPr = new Set(stats.filter((s) => s.event === 'pull_request' && s.totalRuns > 0).map((s) => coverageKey(s.name)));
 
   const out: PromotionCandidate[] = [];
   for (const s of stats) {

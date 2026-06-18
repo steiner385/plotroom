@@ -44,6 +44,22 @@ describe('computePromotionCandidates — signal & bounds', () => {
     const cands = computePromotionCandidates([stat({ name: 'lint', event: 'pull_request', realFailures: 9 })]);
     expect(cands).toEqual([]);
   });
+
+  it('treats a check sharded DIFFERENTLY across tiers as covered (#150.1 shard-insensitive)', () => {
+    // unit sharded /8 in the queue, /3 on PRs — same check, different shard count.
+    const cands = computePromotionCandidates([
+      stat({ name: 'static-checks / test: unit (1/8)', event: 'merge_group', realFailures: 7 }),
+      stat({ name: 'static-checks / test: unit (1/3)', event: 'pull_request', totalRuns: 200, realFailures: 0 }),
+    ]);
+    expect(cands).toEqual([]); // covered on PRs despite the different shard suffix
+  });
+
+  it('still promotes a queue-only check with no PR coverage even when sharded', () => {
+    const [c] = computePromotionCandidates([
+      stat({ name: 'integration (2/4)', event: 'merge_group', realFailures: 5 }),
+    ]);
+    expect(c).toMatchObject({ suggestedTier: 'every PR push (catch pre-enqueue)' });
+  });
 });
 
 describe('computePromotionCandidates — thresholds & ranking', () => {
