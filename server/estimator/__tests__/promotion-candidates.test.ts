@@ -60,6 +60,28 @@ describe('computePromotionCandidates — signal & bounds', () => {
     ]);
     expect(c).toMatchObject({ suggestedTier: 'every PR push (catch pre-enqueue)' });
   });
+
+  it('ranks by distinct INCIDENTS, not raw failures (#150.3 — a long outage ranks low)', () => {
+    const cands = computePromotionCandidates([
+      // a week-long outage: 40 reds but ONE root cause
+      stat({ name: 'outage', event: 'merge_group', realFailures: 40, incidents: 1 }),
+      // genuinely recurring-late: fewer reds but many distinct problems
+      stat({ name: 'recurring', event: 'merge_group', realFailures: 12, incidents: 9 }),
+    ]);
+    expect(cands.map((c) => c.name)).toEqual(['recurring', 'outage']); // incidents win over raw count
+    expect(cands[0].reason).toMatch(/12 real .*across 9 incidents/);
+  });
+
+  it('omits the incident note when every failure is its own incident', () => {
+    const [c] = computePromotionCandidates([stat({ name: 'x', event: 'push', realFailures: 4, incidents: 4 })]);
+    expect(c.incidents).toBe(4);
+    expect(c.reason).not.toMatch(/incident/);
+  });
+
+  it('falls back to realFailures as incidents when not supplied', () => {
+    const [c] = computePromotionCandidates([stat({ name: 'x', event: 'push', realFailures: 5 })]);
+    expect(c.incidents).toBe(5);
+  });
 });
 
 describe('computePromotionCandidates — thresholds & ranking', () => {

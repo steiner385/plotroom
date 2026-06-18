@@ -346,6 +346,8 @@ export interface PromotionCandidate {
   currentTier: string;
   suggestedTier: string;
   realFailures: number;
+  /** Distinct real-failure incidents (consecutive reds collapsed, #150.3) — the rank key. */
+  incidents: number;
   failRatePct: number;
   runsInWindow: number;
   minutesInWindow: number;

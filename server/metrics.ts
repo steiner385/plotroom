@@ -895,6 +895,7 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   // checks whose success rate clears the bar over enough distinct runs, ranked by
   // runner-minutes spent (cost × greenness). Advisory; disjoint from flakiness.
   const successByRepo = history.successStatsByRepo(since);
+  const incidentsByRepo = history.failureIncidentsByRepo(since); // #150.3 — distinct red streaks per check
   const demotionCandidates = [...successByRepo]
     .filter(([repo]) => !dropped.has(repo))
     .sort(([a], [b]) => a.localeCompare(b))
@@ -911,9 +912,11 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
       const flakeOf = new Map(
         (flakeByRepo.get(repo) ?? []).map((f) => [`${f.name}${SEP}${f.event}`, f.flakeEvents]),
       );
+      const incidentOf = incidentsByRepo.get(repo) ?? new Map<string, number>();
       const promoStats = stats.map((s) => ({
         name: s.name, event: s.event, totalRuns: s.totalRuns, sumDurationSecs: s.sumDurationSecs,
         realFailures: Math.max(0, s.failingRuns - (flakeOf.get(`${s.name}${SEP}${s.event}`) ?? 0)),
+        incidents: incidentOf.get(`${s.name}${SEP}${s.event}`),
       }));
       return { repo, candidates: computePromotionCandidates(promoStats) };
     })

@@ -11,6 +11,7 @@ const cand = (over: Partial<PromotionCandidate> = {}): PromotionCandidate => ({
   currentTier: 'merge queue only',
   suggestedTier: 'every PR push (catch pre-enqueue)',
   realFailures: 3,
+  incidents: 2,
   failRatePct: 5.3,
   runsInWindow: 57,
   minutesInWindow: 1820,

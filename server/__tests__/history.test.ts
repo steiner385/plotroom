@@ -1690,3 +1690,37 @@ describe('successStatsByRepo', () => {
     expect(m.has(REPO2)).toBe(false);
   });
 });
+
+// Real-failure incident counting (#150.3) — consecutive reds collapse to one incident
+// ---------------------------------------------------------------------------
+describe('failureIncidentsByRepo (#150.3)', () => {
+  const SINCE = '2026-06-01T00:00:00Z';
+  // completed 1 min after started so the row has a positive duration (it's stored)
+  const done = (at: string) => new Date(Date.parse(at) + 60_000).toISOString();
+  const fail = (sha: string, at: string) =>
+    h.recordCheckDuration(REPO, 'e2e', 'merge_group', at, done(at), 'FAILURE', sha, 1);
+  const pass = (sha: string, at: string) =>
+    h.recordCheckDuration(REPO, 'e2e', 'merge_group', at, done(at), 'SUCCESS', sha, 1);
+  const incidents = () => h.failureIncidentsByRepo(SINCE).get(REPO)?.get('e2e merge_group') ?? 0;
+
+  it('collapses a stretch of consecutive real-failing shas into ONE incident', () => {
+    fail('s1', '2026-06-10T01:00:00Z');
+    fail('s2', '2026-06-10T02:00:00Z');
+    fail('s3', '2026-06-10T03:00:00Z'); // 3 reds in a row, one root cause
+    expect(incidents()).toBe(1);
+  });
+
+  it('counts separate incidents when a green sha breaks the streak', () => {
+    fail('s1', '2026-06-10T01:00:00Z');
+    pass('s2', '2026-06-10T02:00:00Z'); // fixed
+    fail('s3', '2026-06-10T03:00:00Z'); // broke again — distinct problem
+    fail('s4', '2026-06-10T04:00:00Z');
+    expect(incidents()).toBe(2);
+  });
+
+  it('a sha that failed then SUCCEEDED on the same sha is a flake — not a real failure', () => {
+    fail('s1', '2026-06-10T01:00:00Z');
+    pass('s1', '2026-06-10T01:30:00Z'); // same sha resolved → flake, excluded
+    expect(incidents()).toBe(0);
+  });
+});

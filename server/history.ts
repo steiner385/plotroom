@@ -194,6 +194,7 @@ export class HistoryStore {
   private readonly stmtSelectRunnerWaitsSince: Database.Statement;
   private readonly stmtSelectDurationsSince: Database.Statement;
   private readonly stmtSelectSuccessStatsSince: Database.Statement;
+  private readonly stmtSelectFailureIncidentsSince: Database.Statement;
   private readonly stmtSelectQueueWaitsSince: Database.Statement;
   private readonly stmtSelectGroupRunsSince: Database.Statement;
   private readonly stmtSelectMergedSince: Database.Statement;
@@ -610,6 +611,30 @@ export class HistoryStore {
        FROM check_durations
        WHERE completed_at >= ? AND head_sha IS NOT NULL AND conclusion != 'CANCELLED'
        GROUP BY repo, check_name, event`
+    );
+    // Real-failure INCIDENTS per (repo, check, event) over the window (#150.3):
+    // collapse a stretch of CONSECUTIVE real-failing shas (one root cause, fixed on
+    // a later sha) into one incident, so a week-long red doesn't read as N separate
+    // failures. A sha is a real failure if it failed and never SUCCEEDED on that sha
+    // (same same-sha-resolved-flake exclusion as realFailures). Counts a new
+    // incident at each non-failing→failing transition in time order.
+    this.stmtSelectFailureIncidentsSince = this.db.prepare(
+      `WITH sv AS (
+         SELECT repo, check_name, event, head_sha,
+                MAX(CASE WHEN conclusion IN ('FAILURE','TIMED_OUT','STARTUP_FAILURE') THEN 1 ELSE 0 END) AS any_fail,
+                MAX(CASE WHEN conclusion = 'SUCCESS' THEN 1 ELSE 0 END) AS any_succ,
+                MIN(completed_at) AS first_at
+         FROM check_durations
+         WHERE completed_at >= ? AND head_sha IS NOT NULL AND conclusion != 'CANCELLED'
+         GROUP BY repo, check_name, event, head_sha
+       ),
+       r AS (SELECT repo, check_name, event, first_at,
+                    CASE WHEN any_fail = 1 AND any_succ = 0 THEN 1 ELSE 0 END AS rf FROM sv),
+       s AS (SELECT repo, check_name, event, rf,
+                    LAG(rf, 1, 0) OVER (PARTITION BY repo, check_name, event ORDER BY first_at) AS prf FROM r)
+       SELECT repo, check_name AS name, event,
+              SUM(CASE WHEN rf = 1 AND prf = 0 THEN 1 ELSE 0 END) AS incidents
+       FROM s GROUP BY repo, check_name, event`
     );
     this.stmtInsertGroupFailure = this.db.prepare(
       'INSERT OR IGNORE INTO group_failures (repo, check_name, group_sha, observed_at, conclusion) VALUES (?,?,?,?,?)'
@@ -1475,6 +1500,21 @@ export class HistoryStore {
         sumDurationSecs: (r.sum_secs as number) ?? 0,
       });
       out.set(repo, list);
+    }
+    return out;
+  }
+
+  /** Real-failure incident counts per (repo, check, event) since `since` (#150.3):
+   *  `${name}\0${event}` → number of distinct consecutive-real-failing streaks.
+   *  Keyed for a cheap join in the promotion lane. */
+  failureIncidentsByRepo(since: string): Map<string, Map<string, number>> {
+    const rows = this.stmtSelectFailureIncidentsSince.all(since) as Record<string, unknown>[];
+    const out = new Map<string, Map<string, number>>();
+    for (const r of rows) {
+      const repo = r.repo as string;
+      const m = out.get(repo) ?? new Map<string, number>();
+      m.set(`${r.name as string} ${r.event as string}`, (r.incidents as number) ?? 0);
+      out.set(repo, m);
     }
     return out;
   }

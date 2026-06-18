@@ -130,9 +130,9 @@ const PAYLOAD: MetricsPayload = {
   promotionCandidates: [
     { repo: 'acme/widgets', candidates: [
       { name: 'e2e', event: 'push', currentTier: 'every push to main (post-merge)',
-        suggestedTier: 'merge queue (pre-merge gate)', realFailures: 6, failRatePct: 5,
+        suggestedTier: 'merge queue (pre-merge gate)', realFailures: 6, incidents: 4, failRatePct: 5,
         runsInWindow: 120, minutesInWindow: 600,
-        reason: '6 real (non-flaky) failures in 120 runs (5%) — caught late' },
+        reason: '6 real (non-flaky) failures across 4 incidents in 120 runs (5%) — caught late' },
     ] },
   ],
   trainKillers: [

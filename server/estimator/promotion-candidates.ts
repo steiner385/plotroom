@@ -47,6 +47,9 @@ export interface PromotionStat {
   totalRuns: number;
   realFailures: number;
   sumDurationSecs: number;
+  /** Distinct real-failure incidents (consecutive reds collapsed, #150.3). When
+   *  omitted, falls back to realFailures (each failure its own incident). */
+  incidents?: number;
 }
 
 export interface PromotionCandidate {
@@ -54,8 +57,11 @@ export interface PromotionCandidate {
   event: string;
   currentTier: string;
   suggestedTier: string;
-  /** Real (non-flaky) failures in the window — the rank key. */
+  /** Real (non-flaky) failures in the window. */
   realFailures: number;
+  /** Distinct real-failure incidents (consecutive reds collapsed) — the rank key
+   *  (#150.3), so a long single outage doesn't outrank many distinct problems. */
+  incidents: number;
   /** Real-failure rate over the window, 1-decimal percent. */
   failRatePct: number;
   runsInWindow: number;
@@ -116,20 +122,27 @@ export function computePromotionCandidates(
     const ladder = promotionTarget(s, onMergeGroup, onPr);
     if (!ladder) continue;
     const failRatePct = s.totalRuns ? Math.round((s.realFailures / s.totalRuns) * 1000) / 10 : 0;
+    // Distinct incidents (consecutive reds collapsed). Fall back to realFailures
+    // (each failure its own incident) when the caller didn't supply it.
+    const incidents = s.incidents ?? s.realFailures;
+    const incidentNote = incidents !== s.realFailures ? ` across ${incidents} incident${incidents === 1 ? '' : 's'}` : '';
     out.push({
       name: s.name,
       event: s.event,
       currentTier: ladder.currentTier,
       suggestedTier: ladder.suggestedTier,
       realFailures: s.realFailures,
+      incidents,
       failRatePct,
       runsInWindow: s.totalRuns,
       minutesInWindow: Math.round(s.sumDurationSecs / 60),
-      reason: `${s.realFailures} real (non-flaky) failures in ${s.totalRuns} runs (${failRatePct}%) — caught late`,
+      reason: `${s.realFailures} real (non-flaky) failures${incidentNote} in ${s.totalRuns} runs (${failRatePct}%) — caught late`,
     });
   }
-  // Rank by how often it really fails late (impact), tiebreak by cost then name.
-  out.sort((a, b) => b.realFailures - a.realFailures
+  // Rank by DISTINCT incidents (a long single outage shouldn't outrank many
+  // separate problems, #150.3), then raw real failures, then cost, then name.
+  out.sort((a, b) => b.incidents - a.incidents
+    || b.realFailures - a.realFailures
     || b.minutesInWindow - a.minutesInWindow
     || a.name.localeCompare(b.name));
   return out.slice(0, cfg.topN);
