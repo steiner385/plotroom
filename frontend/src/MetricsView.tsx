@@ -98,6 +98,19 @@ const METRICS_SECTIONS: { id: MetricsSection; label: string }[] = [
 ];
 const SECTION_STORAGE_KEY = 'prdash.metrics.section';
 
+/** Read + validate the persisted section from localStorage; returns 'tuning' as
+ *  the default. Called by BOTH the `section` and `everActivated` useState lazy
+ *  initialisers so the localStorage read is shared rather than duplicated. */
+function resolveInitialSection(): MetricsSection {
+  try {
+    const s = localStorage.getItem(SECTION_STORAGE_KEY);
+    if (s && METRICS_SECTIONS.some((x) => x.id === s)) return s as MetricsSection;
+  } catch { /* private mode */ }
+  // Default to the ranked Tuning Actions — the one panel that says what to fix
+  // — rather than a data section, when there's no remembered preference (UX-M3).
+  return 'tuning';
+}
+
 /** Deep-link a Tuning recommendation to the panel that is its evidence (UX-M4):
  *  the section to switch to + the panel id to scroll/focus. lint:* kinds all map
  *  to the workflow-lint panel (handled by prefix in resolveRecLink). */
@@ -281,28 +294,11 @@ export function MetricsView({ now, focusCostNonce }: {
       setPromotePr((p) => ({ ...p, [key]: { error: e instanceof Error ? e.message : String(e) } }));
     }
   };
-  const [section, setSection] = useState<MetricsSection>(() => {
-    try {
-      const s = localStorage.getItem(SECTION_STORAGE_KEY);
-      if (s && METRICS_SECTIONS.some((x) => x.id === s)) return s as MetricsSection;
-    } catch { /* private mode */ }
-    // Default to the ranked Tuning Actions — the one panel that says what to fix
-    // — rather than a data section, when there's no remembered preference (UX-M3).
-    return 'tuning';
-  });
+  const [section, setSection] = useState<MetricsSection>(resolveInitialSection);
   // Tracks which sections have been activated at least once (lazy-render guard,
   // issue #179). Initialised with the initial section so its content is ready.
   const [everActivated, setEverActivated] = useState<ReadonlySet<MetricsSection>>(
-    () => {
-      const initial: MetricsSection = (() => {
-        try {
-          const s = localStorage.getItem(SECTION_STORAGE_KEY);
-          if (s && METRICS_SECTIONS.some((x) => x.id === s)) return s as MetricsSection;
-        } catch { /* private mode */ }
-        return 'tuning';
-      })();
-      return new Set([initial]);
-    }
+    () => new Set([resolveInitialSection()])
   );
   const selectSection = (s: MetricsSection) => {
     setSection(s);

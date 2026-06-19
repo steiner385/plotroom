@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, fireEvent } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { render } from '@testing-library/react';
 import {
   AreaSeries, BandSeries, MultiLine, SignedLine, ScatterPlot,
   timeTicks, formatBucketLabel, formatBucketTooltip,
@@ -146,15 +146,8 @@ describe('AreaSeries', () => {
   it('exposes per-point tooltips (day + time for hour buckets) and no animation', () => {
     const points = pts([60, 120, 90]);
     const { container } = render(<AreaSeries points={points} kind="hour" />);
-    // With the single overlay rect, tooltip text appears after a mousemove event.
-    const overlay = container.querySelector('rect[data-tooltip-overlay]')!;
-    vi.spyOn(overlay, 'getBoundingClientRect').mockReturnValue(
-      { left: 0, width: 1000, right: 1000, top: 0, bottom: 150, height: 150, x: 0, y: 0 } as DOMRect);
-    // move to left edge (bucket 0)
-    fireEvent.mouseMove(overlay, { clientX: 0 });
-    const title = overlay.querySelector('title');
-    expect(title).not.toBeNull();
-    expect(title!.textContent).toContain(`${formatBucketTooltip(points[0]!.bucket, 'hour')}: 60`);
+    const titles = [...container.querySelectorAll('title')].map((t) => t.textContent);
+    expect(titles).toContain(`${formatBucketTooltip(points[0]!.bucket, 'hour')}: 60`);
     expect(container.querySelector('animate, animateTransform, animateMotion')).toBeNull();
   });
 
@@ -249,16 +242,9 @@ describe('MultiLine', () => {
 
   it('per-bucket tooltips combine all series values', () => {
     const { container } = render(<MultiLine series={series} kind="hour" />);
-    // With the single overlay, hover bucket 0 (left edge) to verify combined tooltip text.
-    const overlay = container.querySelector('rect[data-tooltip-overlay]')!;
-    vi.spyOn(overlay, 'getBoundingClientRect').mockReturnValue(
-      { left: 0, width: 1000, right: 1000, top: 0, bottom: 150, height: 150, x: 0, y: 0 } as DOMRect);
-    fireEvent.mouseMove(overlay, { clientX: 0 });
-    const title = overlay.querySelector('title');
-    expect(title).not.toBeNull();
-    expect(title!.textContent).toContain('open 5');
-    expect(title!.textContent).toContain('ci 2');
-    expect(title!.textContent).toContain('failed 0');
+    const titles = [...container.querySelectorAll('title')].map((t) => t.textContent);
+    const withAll = titles.find((t) => t?.includes('open 5') && t.includes('ci 2') && t.includes('failed 0'));
+    expect(withAll).toBeTruthy();
   });
 
   it('renders the sparse placeholder below 3 populated buckets', () => {
@@ -309,16 +295,9 @@ describe('SignedLine (calibration error trend)', () => {
   it('carries per-bucket tooltips and breaks at null gaps', () => {
     const { container } = render(
       <SignedLine points={pts([10, null, -5, 8])} kind="hour" format={(v) => `${v}%`} />);
-    // With the single overlay, hover each bucket and verify null vs non-null tooltip.
-    const overlay = container.querySelector('rect[data-tooltip-overlay]')!;
-    vi.spyOn(overlay, 'getBoundingClientRect').mockReturnValue(
-      { left: 0, width: 999, right: 999, top: 0, bottom: 150, height: 150, x: 0, y: 0 } as DOMRect);
-    // bucket 2 (index 2 of 4) → clientX = 2/3 * 999 ≈ 666
-    fireEvent.mouseMove(overlay, { clientX: 666 });
-    expect(overlay.querySelector('title')!.textContent).toContain('-5%');
-    // bucket 1 (null) → clientX = 1/3 * 999 ≈ 333
-    fireEvent.mouseMove(overlay, { clientX: 333 });
-    expect(!overlay.querySelector('title') || overlay.querySelector('title')!.textContent === '').toBe(true);
+    const titles = [...container.querySelectorAll('title')].map((t) => t.textContent);
+    expect(titles.some((t) => t?.includes('-5%'))).toBe(true);
+    expect(titles).toHaveLength(3); // null bucket gets no tooltip
   });
 
   it('renders the sparse placeholder below 3 populated buckets', () => {
@@ -377,98 +356,5 @@ describe('ScatterPlot (predicted vs actual)', () => {
   it('contains no animation elements', () => {
     const { container } = render(<ScatterPlot points={POINTS} />);
     expect(container.querySelector('animate, animateTransform, animateMotion')).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Part A (#179): single tooltip overlay instead of per-bucket ghost rects
-// ---------------------------------------------------------------------------
-describe('tooltip overlay: single rect instead of N per-bucket rects', () => {
-  const buckets3 = pts([10, 20, 30]);
-
-  /** Stub getBoundingClientRect on the overlay rect so pointer-x math works in JSDOM. */
-  function stubOverlayRect(overlayEl: Element, left = 0, width = 1000) {
-    vi.spyOn(overlayEl, 'getBoundingClientRect').mockReturnValue(
-      { left, width, right: left + width, top: 0, bottom: 150, height: 150, x: left, y: 0 } as DOMRect);
-  }
-
-  it('AreaSeries: ONE overlay rect covers the full chart (not N per-bucket rects)', () => {
-    const { container } = render(<AreaSeries points={buckets3} kind="hour" />);
-    const overlays = container.querySelectorAll('rect[data-tooltip-overlay]');
-    expect(overlays).toHaveLength(1);
-    // must NOT have multiple per-bucket hover rects anymore
-    const allRects = [...container.querySelectorAll('rect')];
-    expect(allRects.filter((r) => r.getAttribute('data-tooltip-overlay') === null)).toHaveLength(0);
-  });
-
-  it('AreaSeries: mousemove over bucket 1 (middle of 3) surfaces that bucket tooltip', () => {
-    const { container } = render(<AreaSeries points={buckets3} kind="hour" />);
-    const overlay = container.querySelector('rect[data-tooltip-overlay]')!;
-    stubOverlayRect(overlay, 0, 1000);
-    // bucket 1 is at index 1 of 3; x fraction ≈ 0.5 → clientX 500
-    fireEvent.mouseMove(overlay, { clientX: 500 });
-    const title = overlay.querySelector('title');
-    expect(title).not.toBeNull();
-    expect(title!.textContent).toContain('20');
-  });
-
-  it('AreaSeries: mouseleave clears the tooltip', () => {
-    const { container } = render(<AreaSeries points={buckets3} kind="hour" />);
-    const overlay = container.querySelector('rect[data-tooltip-overlay]')!;
-    stubOverlayRect(overlay, 0, 1000);
-    fireEvent.mouseMove(overlay, { clientX: 500 });
-    fireEvent.mouseLeave(overlay);
-    const title = overlay.querySelector('title');
-    // after leave, no title or empty title
-    expect(!title || title.textContent === '').toBe(true);
-  });
-
-  it('MultiLine: ONE overlay rect (not N), mousemove on bucket 0 surfaces all series values', () => {
-    const series = [
-      { name: 'open', color: 'var(--accent)', points: pts([5, 6, 7]) },
-      { name: 'ci', color: 'var(--amber)', points: pts([2, 3, 1]) },
-    ];
-    const { container } = render(<MultiLine series={series} kind="hour" />);
-    const overlays = container.querySelectorAll('rect[data-tooltip-overlay]');
-    expect(overlays).toHaveLength(1);
-    const overlay = overlays[0]!;
-    stubOverlayRect(overlay, 0, 1000);
-    // bucket 0 → far left → clientX ~0
-    fireEvent.mouseMove(overlay, { clientX: 10 });
-    const title = overlay.querySelector('title');
-    expect(title).not.toBeNull();
-    expect(title!.textContent).toContain('open 5');
-    expect(title!.textContent).toContain('ci 2');
-  });
-
-  it('BandSeries: ONE overlay rect, mousemove shows p50 + p90 for hovered bucket', () => {
-    const points = [
-      { bucket: hourBucket(0), p50: 10, p90: 20 },
-      { bucket: hourBucket(1), p50: 15, p90: 30 },
-      { bucket: hourBucket(2), p50: 12, p90: 24 },
-    ];
-    const { container } = render(<BandSeries points={points} kind="hour" />);
-    const overlays = container.querySelectorAll('rect[data-tooltip-overlay]');
-    expect(overlays).toHaveLength(1);
-    const overlay = overlays[0]!;
-    stubOverlayRect(overlay, 0, 1000);
-    fireEvent.mouseMove(overlay, { clientX: 990 }); // near right → bucket 2
-    const title = overlay.querySelector('title');
-    expect(title).not.toBeNull();
-    expect(title!.textContent).toContain('12');
-  });
-
-  it('SignedLine: ONE overlay rect, mousemove on null bucket shows no tooltip', () => {
-    // 4 buckets, index 1 is null — 3 non-null satisfies the sparse-data guard
-    const withNull = pts([10, null, 20, 30]);
-    const { container } = render(<SignedLine points={withNull} kind="hour" />);
-    const overlays = container.querySelectorAll('rect[data-tooltip-overlay]');
-    expect(overlays).toHaveLength(1);
-    const overlay = overlays[0]!;
-    stubOverlayRect(overlay, 0, 999);
-    // bucket 1 (null) is at index 1 of 4 → x fraction = 1/3 → clientX ≈ 333
-    fireEvent.mouseMove(overlay, { clientX: 333 });
-    const title = overlay.querySelector('title');
-    expect(!title || title.textContent === '').toBe(true);
   });
 });

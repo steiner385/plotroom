@@ -11,14 +11,7 @@
  *    rollover for hour charts, month rollover for day charts) + first/last anchors
  *  - sparse-data guard: a series with <3 populated buckets renders a
  *    "collecting data — n samples so far" placeholder instead of floating dots
- *
- * Perf (issue #179):
- *  - tooltip overlay: ONE full-chart transparent <rect> replaces the N per-bucket
- *    ghost rects; bucket index is computed from pointer X on mousemove so tooltip
- *    fidelity is unchanged (same text(i) callback), and the DOM has O(1) hover nodes.
  */
-
-import { useState } from 'react';
 
 export type BucketKind = 'hour' | 'day';
 
@@ -213,44 +206,19 @@ function lineShapes(values: (number | null)[], geom: Geom, stroke: string, keyPr
   });
 }
 
-/**
- * Single full-chart transparent overlay rect that computes the hovered bucket
- * from the pointer X position on mousemove. One DOM node replaces the N
- * per-bucket ghost rects while preserving the same tooltip text per bucket.
- *
- * Pointer-x → index mapping:
- *  - The SVG uses getBoundingClientRect() on the overlay rect to convert
- *    clientX to a [0,1] fraction of the chart width.
- *  - Fraction is mapped to bucket index: round((frac) * (n-1)), clamped [0,n-1].
- *  - Edge cases: 0 or 1 bucket → always index 0; left/right overshoot → clamped.
- *  - Null-value buckets: text(i) returns null → title cleared (no tooltip shown).
- */
-function TooltipOverlay({ buckets, geom, kind, text }: {
-  buckets: string[]; geom: Geom; kind: BucketKind;
-  text: (i: number) => string | null;
-}) {
-  const [hoveredText, setHoveredText] = useState<string | null>(null);
-
-  const handleMouseMove = (e: React.MouseEvent<SVGRectElement>) => {
-    const n = buckets.length;
-    if (n === 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const frac = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
-    const idx = Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1))));
-    setHoveredText(text(idx) ?? null);
-  };
-
-  const handleMouseLeave = () => setHoveredText(null);
-
-  return (
-    <rect data-tooltip-overlay="true"
-      x={0} y={0} width={VB_W} height={geom.h}
-      fill="transparent"
-      onMouseMove={handleMouseMove}
-      onMouseLeave={handleMouseLeave}>
-      {hoveredText != null && <title>{hoveredText}</title>}
-    </rect>
-  );
+/** Invisible hover targets carrying per-bucket `<title>` tooltips. */
+function tooltipTargets(buckets: string[], geom: Geom, kind: BucketKind,
+  text: (i: number) => string | null) {
+  const step = buckets.length > 1 ? geom.x(1) - geom.x(0) : VB_W - PAD_L - PAD_R;
+  return buckets.map((_, i) => {
+    const t = text(i);
+    return t == null ? null : (
+      <rect key={`t${i}`} x={geom.x(i) - step / 2} y={0} width={Math.max(step, 4)} height={geom.h}
+        fill="transparent">
+        <title>{t}</title>
+      </rect>
+    );
+  });
 }
 
 /**
@@ -289,9 +257,9 @@ export function AreaSeries({ points, kind, height = 150, color = 'var(--accent)'
       })}
       {lineShapes(values, geom, color, 's')}
       {markerShapes(markers, points.map((p) => p.bucket), geom)}
-      <TooltipOverlay buckets={points.map((p) => p.bucket)} geom={geom} kind={kind}
-        text={(i) => points[i]!.value == null ? null
-          : `${formatBucketTooltip(points[i]!.bucket, kind)}: ${format(points[i]!.value!)}`} />
+      {tooltipTargets(points.map((p) => p.bucket), geom, kind, (i) =>
+        points[i]!.value == null ? null
+          : `${formatBucketTooltip(points[i]!.bucket, kind)}: ${format(points[i]!.value!)}`)}
     </svg>
   );
 }
@@ -349,13 +317,12 @@ export function BandSeries({ points, kind, height = 150, color = 'var(--accent)'
           fill={color} fillOpacity={0.18} stroke={color} strokeOpacity={0.25} strokeWidth={1} />;
       })}
       {lineShapes(p50s, geom, color, 'p')}
-      <TooltipOverlay buckets={points.map((p) => p.bucket)} geom={geom} kind={kind}
-        text={(i) => {
-          const pt = points[i]!;
-          if (pt.p50 == null) return null;
-          const spread = pt.p90 != null ? ` (p90 ${format(pt.p90)})` : '';
-          return `${formatBucketTooltip(pt.bucket, kind)}: p50 ${format(pt.p50)}${spread}`;
-        }} />
+      {tooltipTargets(points.map((p) => p.bucket), geom, kind, (i) => {
+        const pt = points[i]!;
+        if (pt.p50 == null) return null;
+        const spread = pt.p90 != null ? ` (p90 ${format(pt.p90)})` : '';
+        return `${formatBucketTooltip(pt.bucket, kind)}: p50 ${format(pt.p50)}${spread}`;
+      })}
     </svg>
   );
   if (compact) return svg;
@@ -409,9 +376,9 @@ export function SignedLine({ points, kind, height = 150, color = 'var(--accent)'
         {gridline(0, true)}
         {xAxisMarks(timeTicks(points.map((p) => p.bucket), kind), geom, points.length)}
         {lineShapes(values, geom, color, 's')}
-        <TooltipOverlay buckets={points.map((p) => p.bucket)} geom={geom} kind={kind}
-          text={(i) => points[i]!.value == null ? null
-            : `${formatBucketTooltip(points[i]!.bucket, kind)}: ${format(points[i]!.value!)}`} />
+        {tooltipTargets(points.map((p) => p.bucket), geom, kind, (i) =>
+          points[i]!.value == null ? null
+            : `${formatBucketTooltip(points[i]!.bucket, kind)}: ${format(points[i]!.value!)}`)}
       </svg>
       <div className="chart-caption">0 = on target · above 0 = ran past the ETA</div>
     </div>
@@ -492,12 +459,11 @@ export function MultiLine({ series, kind, height = 150, format = fmt, label, mar
           buckets={buckets} kind={kind} count={count} />
         {series.map((s, si) => lineShapes(s.points.map((p) => p.value), geom, s.color, `s${si}`))}
         {markerShapes(markers, buckets, geom)}
-        <TooltipOverlay buckets={buckets} geom={geom} kind={kind}
-          text={(i) => {
-            const parts = series.flatMap((s) =>
-              s.points[i]?.value == null ? [] : [`${s.name} ${format(s.points[i]!.value!)}`]);
-            return parts.length ? `${formatBucketTooltip(buckets[i]!, kind)} — ${parts.join(' · ')}` : null;
-          }} />
+        {tooltipTargets(buckets, geom, kind, (i) => {
+          const parts = series.flatMap((s) =>
+            s.points[i]?.value == null ? [] : [`${s.name} ${format(s.points[i]!.value!)}`]);
+          return parts.length ? `${formatBucketTooltip(buckets[i]!, kind)} — ${parts.join(' · ')}` : null;
+        })}
       </svg>
       <div className="chart-legend">
         {series.map((s) => (
