@@ -430,14 +430,14 @@ export function ProtectionMap() {
                     const open = !collapsed.has(g.name);
                     return (
                       <Fragment key={g.name}>
-                        <tr key={`h-${g.name}`} className="pm-group-row">
+                        <tr key={`h-${g.name}`} className="pm-group-row" onClick={() => toggleGroup(g.name)}>
                           <td className="pm-group-name">
                             <button
                               type="button"
                               className="pm-group-btn"
                               aria-expanded={open}
                               aria-label={`Toggle group ${g.name}`}
-                              onClick={() => toggleGroup(g.name)}
+                              onClick={(e) => { e.stopPropagation(); toggleGroup(g.name); }}
                             >
                               <span className="pm-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
                               {' '}{g.name}

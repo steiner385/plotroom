@@ -298,6 +298,15 @@ export function MetricsView({ now, focusCostNonce }: {
   const [payload, setPayload] = useState<MetricsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  // Coarse clock tick: refreshes the time axis in the memo ~once per minute so
+  // `nowDate` / `axis` / `dayAxis` don't freeze for an idle session.
+  // Only active when `now` is NOT injected (tests inject a fixed clock).
+  const [clockTick, setClockTick] = useState(0);
+  useEffect(() => {
+    if (now) return; // injected clock — no live tick needed
+    const id = setInterval(() => setClockTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, [now]);
 
   const hourDisabled = WINDOW_DAYS[window] > HOUR_BUCKET_MAX_DAYS;
   const bucket: MetricsBucket = hourDisabled ? 'day' : bucketPref;
@@ -423,7 +432,7 @@ export function MetricsView({ now, focusCostNonce }: {
       costRunsByRepo, costActualScopes, recommendations, configChanges, changeMarkersByRepo,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, now]);
+  }, [payload, now, clockTick]);
 
   const controls = (
     <div className="metrics-controls">
