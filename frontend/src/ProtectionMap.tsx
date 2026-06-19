@@ -406,10 +406,10 @@ export function ProtectionMap() {
 
             {/* ── MATRIX (reference) ────────────────────────────────────── */}
             <div className="pm-grid-wrap">
-              <table className="pm-grid" data-testid="pm-grid">
+              <table className="pm-grid" data-testid="pm-grid" aria-label="Protection check matrix">
                 <thead>
                   <tr>
-                    <th className="pm-check-h">
+                    <th scope="col" className="pm-check-h">
                       check
                       <label className="pm-show-absent">
                         <input type="checkbox" checked={showAbsent} onChange={(e) => setShowAbsent(e.target.checked)} /> absent
@@ -418,7 +418,7 @@ export function ProtectionMap() {
                     {model.tiers.map((t) => {
                       const st = tierStats.get(t.id)!;
                       return (
-                        <th key={t.id} className="pm-tier-h" title={`trigger: ${t.event}`}>
+                        <th scope="col" key={t.id} className="pm-tier-h" title={`trigger: ${t.event}`}>
                           {t.label}<i>{st.gates}g · {fmtMin(st.minutes)}</i>
                         </th>
                       );
@@ -431,7 +431,7 @@ export function ProtectionMap() {
                     return (
                       <Fragment key={g.name}>
                         <tr key={`h-${g.name}`} className="pm-group-row" onClick={() => toggleGroup(g.name)}>
-                          <td className="pm-group-name">
+                          <th scope="rowgroup" className="pm-group-name">
                             <button
                               type="button"
                               className="pm-group-btn"
@@ -443,7 +443,7 @@ export function ProtectionMap() {
                               {' '}{g.name}
                               <span className="pm-group-meta">{g.checks.length}{g.gates ? ` · ${g.gates}g` : ''}{g.drift ? ' · ⚠' : ''}</span>
                             </button>
-                          </td>
+                          </th>
                           {model.tiers.map((t) => {
                             const best = g.tierBest.get(t.id) ?? 'absent';
                             return <td key={t.id} className={`pm-mini pm-${best}`}>{STATE_GLYPH[best]}</td>;
@@ -523,8 +523,8 @@ export function ProtectionMap() {
                 </p>
                 <p className="pm-drawer-why">{drilled.detail}</p>
 
-                <table className="pm-evidence" data-testid="pm-evidence">
-                  <thead><tr><th>tier</th><th>state</th><th>runs</th><th>fail%</th><th>min</th></tr></thead>
+                <table className="pm-evidence" data-testid="pm-evidence" aria-label="Per-tier evidence">
+                  <thead><tr><th scope="col">tier</th><th scope="col">state</th><th scope="col">runs</th><th scope="col">fail%</th><th scope="col">min</th></tr></thead>
                   <tbody>
                     {model.tiers.map((t) => {
                       const c = byCell.get(cellKey(dcheck, t.id));
