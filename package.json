@@ -1,6 +1,6 @@
 {
   "name": "plotroom",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Embeddable CI/CD + pull-request operations dashboard — watch GitHub Actions pipeline health, runner timing and critical path, and PR merge-readiness, with one-click ready-to-merge / draft levers. Ships a React component (./embed) and a mountable Express backend (./server).",
   "type": "module",
   "license": "MIT",
