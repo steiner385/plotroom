@@ -2197,9 +2197,21 @@ export class Poller extends EventEmitter {
       const view = this.viewForOpenPr(pr, now, repoGroupProgress.get(pr.repo) ?? []);
       if (view) push(pr.repo, view);
     }
-    for (const rec of history.listTrackedMerged(config.retentionDays, now)) {
+    const trackedMerged = history.listTrackedMerged(config.retentionDays, now);
+    // #205: newest prod-live merge per repo. An older merge not yet on prod is
+    // superseded (its SHA was rolled up into that deploy) and must not show as
+    // 'awaiting/overdue' — its content already shipped via the newer merge.
+    const newestProdMergedAt = new Map<string, string>();
+    for (const rec of trackedMerged) {
+      if (rec.prodLiveAt == null) continue;
+      const cur = newestProdMergedAt.get(rec.repo);
+      if (cur == null || rec.mergedAt > cur) newestProdMergedAt.set(rec.repo, rec.mergedAt);
+    }
+    for (const rec of trackedMerged) {
       if (config.exclude.includes(rec.repo)) continue; // exclude applies on reconfigure too
-      const view = this.viewForMergedPr(rec, now);
+      const np = newestProdMergedAt.get(rec.repo);
+      const superseded = rec.prodLiveAt == null && np != null && rec.mergedAt < np;
+      const view = this.viewForMergedPr(rec, now, superseded);
       if (view) push(rec.repo, view);
     }
 
@@ -2676,19 +2688,25 @@ export class Poller extends EventEmitter {
       groupChecks, mergeEtaSim };
   }
 
-  private viewForMergedPr(rec: MergedPrRecord, now: Date): PrView | null {
+  private viewForMergedPr(rec: MergedPrRecord, now: Date, superseded = false): PrView | null {
     const { history, config } = this.deps;
     const dc = this.effectiveDeploy()[rec.repo];
     const qaSha = this.envShas.get(`${rec.repo}/qa`);
     const prodSha = this.envShas.get(`${rec.repo}/prod`);
-    const deploy: DeployInfo = {
-      hasDeploy: !!dc,
-      qaLive: rec.qaLiveAt ? true : (qaSha == null ? null : false),
-      prodLive: rec.prodLiveAt ? true : (prodSha == null ? null : false),
-      // no squash sha yet, or sha not visible in the clone even after fetch
-      propagating: !rec.mergeCommitSha || this.propagating.has(`${rec.repo}#${rec.number}`),
-      deployProgress: null,
-    };
+    // #205: a superseded merge (its SHA rolled up into a newer prod deploy — a
+    // sub-PR merged to a feature branch, or a squash artifact) has effectively
+    // shipped to QA+prod. Treat it as live so it never sits 'qa-deploying
+    // overdue' waiting for a SHA that will never deploy on its own.
+    const deploy: DeployInfo = superseded
+      ? { hasDeploy: !!dc, qaLive: true, prodLive: true, propagating: false, deployProgress: null }
+      : {
+          hasDeploy: !!dc,
+          qaLive: rec.qaLiveAt ? true : (qaSha == null ? null : false),
+          prodLive: rec.prodLiveAt ? true : (prodSha == null ? null : false),
+          // no squash sha yet, or sha not visible in the clone even after fetch
+          propagating: !rec.mergeCommitSha || this.propagating.has(`${rec.repo}#${rec.number}`),
+          deployProgress: null,
+        };
     if (dc && !rec.qaLiveAt && deploy.qaLive === false) {
       const gap = history.medianDeployGap(rec.repo, 'qa') ?? 600;
       const elapsed = (now.getTime() - Date.parse(rec.mergedAt)) / 1000;

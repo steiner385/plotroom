@@ -77,16 +77,27 @@ export function computeRepoDeploy(
   // sits, so a PR awaiting QA isn't ALSO counted as awaiting prod (the two
   // metrics must be disjoint): prod-live → done; QA-live-only → awaiting prod;
   // neither → awaiting QA.
-  let awaitingQa = 0;
-  let awaitingProd = 0;
   const repoMerged: ChainInput[] = [];
   for (const rec of history.listTrackedMerged(retentionDays, now)) {
     if (rec.repo !== repo) continue;
-    if (rec.prodLiveAt != null) { /* fully deployed — counts toward neither */ }
-    else if (rec.qaLiveAt != null) awaitingProd += 1; // on QA, awaiting prod
-    else awaitingQa += 1;                              // not yet on QA
     repoMerged.push({ number: rec.number, mergeCommitSha: rec.mergeCommitSha,
       mergedAt: rec.mergedAt, qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt });
+  }
+  // The newest merge that reached prod. An older merge not yet on prod is
+  // SUPERSEDED — its SHA was rolled up into that newer prod deploy and will never
+  // go live on its own (a sub-PR merged into a feature branch, or a squash
+  // artifact whose recorded SHA isn't what landed on the default branch; #205).
+  // Such merges must NOT be counted as 'awaiting' or they sit 'overdue' forever
+  // even though their content already shipped to QA+prod via the newer merge.
+  const newestProdMergedAt = repoMerged.reduce<string | null>(
+    (max, m) => (m.prodLiveAt != null && (max == null || m.mergedAt > max)) ? m.mergedAt : max, null);
+  let awaitingQa = 0;
+  let awaitingProd = 0;
+  for (const m of repoMerged) {
+    if (m.prodLiveAt != null) continue;                                          // fully deployed
+    if (newestProdMergedAt != null && m.mergedAt < newestProdMergedAt) continue; // superseded (#205)
+    if (m.qaLiveAt != null) awaitingProd += 1; // on QA, awaiting prod
+    else awaitingQa += 1;                       // not yet on QA
   }
   return { envs, awaitingQa, awaitingProd, chain: deployChain(repoMerged) };
 }
