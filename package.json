@@ -10,19 +10,33 @@
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite\"",
     "build": "vite build",
     "build:embed": "vite build --config vite.embed.config.ts",
-    "prepare": "vite build --config vite.embed.config.ts",
+    "prepare": "pnpm build:embed && pnpm build:server",
     "start": "NODE_ENV=production tsx server/index.ts",
     "app:setup": "tsx scripts/app-setup.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "service:install": "bash scripts/install-service.sh"
+    "service:install": "bash scripts/install-service.sh",
+    "build:server": "tsc -p tsconfig.server.json"
   },
-  "files": ["dist/embed"],
+  "files": [
+    "dist/embed",
+    "dist/server"
+  ],
   "exports": {
-    "./embed": { "types": "./dist/embed/index.d.ts", "import": "./dist/embed/index.js" },
-    "./embed/style.css": "./dist/embed/style.css"
+    "./embed": {
+      "types": "./dist/embed/index.d.ts",
+      "import": "./dist/embed/index.js"
+    },
+    "./embed/style.css": "./dist/embed/style.css",
+    "./server": {
+      "types": "./dist/server/server/backend.d.ts",
+      "import": "./dist/server/server/backend.js"
+    }
   },
-  "peerDependencies": { "react": "^19", "react-dom": "^19" },
+  "peerDependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
     "express": "^4.22.2",
