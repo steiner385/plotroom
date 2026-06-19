@@ -99,7 +99,9 @@ export interface AppAuthConfig {
   /** Numeric GitHub App id (App settings → "App ID"). */
   appId: number;
   /** Path to the App's PEM private key (~/ and package-root-relative supported). */
-  privateKeyPath: string;
+  privateKeyPath?: string;
+  /** PEM private key string (alternative to privateKeyPath for mountable host usage). */
+  privateKey?: string;
   /** Installation to mint tokens for; auto-discovered when exactly one exists. */
   installationId?: number;
 }
