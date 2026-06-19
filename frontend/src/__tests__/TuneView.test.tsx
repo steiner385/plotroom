@@ -34,7 +34,12 @@ describe('TuneView (US5 — 5th section, aggregates J3/I2/H/L)', () => {
     render(<TuneView repo="o/r" api={api({ policy: vi.fn(async () => { throw new Error('boom'); }) })} />);
     expect(await screen.findByLabelText('Budgets')).toHaveTextContent(/minutes/); // budgets still render
     const policy = await screen.findByLabelText('Policy');
-    expect(policy).toHaveTextContent(/couldn.t load|error/i); // error state, not a silent void
+    // The Policy region renders immediately (in its loading state); the error text
+    // only arrives one extra microtask later (load().then→.catch sets the error
+    // state), so we must RETRY the content check. A plain sync assertion here races
+    // that error re-render and flakes under CI load (the section still shows
+    // "Loading…" when checked). waitFor polls until the error state renders.
+    await waitFor(() => expect(policy).toHaveTextContent(/couldn.t load|error/i)); // error state, not a silent void
   });
 
   it('renders designed empty states (not a void) when a focused repo has no data', async () => {
