@@ -43,5 +43,5 @@ export function SectionContent({ active, state, connected, api, focused, onFocus
     case 'insights': section = <InsightsView repo={focused} api={api} />; break;
   }
 
-  return <ErrorBoundary>{section}</ErrorBoundary>;
+  return <ErrorBoundary key={active}>{section}</ErrorBoundary>;
 }

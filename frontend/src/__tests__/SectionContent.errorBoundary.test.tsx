@@ -44,9 +44,36 @@ describe('SectionContent error isolation', () => {
     expect(alert).toHaveTextContent(/something broke rendering this tab/);
   });
 
-  it('does NOT re-throw — the workspace shell stays mounted', () => {
-    // If the boundary is missing the render() call above would throw and this
-    // assertion would never run. Reaching here proves containment.
-    expect(true).toBe(true);
+  it('recovers when switching to a healthy section — key={active} resets the boundary', () => {
+    // Render the crashing pipeline section; boundary must show the error fallback.
+    const { rerender } = render(wrap(
+      <SectionContent
+        active="pipeline"
+        state={state}
+        connected={true}
+        api={api}
+        focused={null}
+        onFocusRepo={() => {}}
+      />
+    ));
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+
+    // Switch to "health" — key={active} remounts the boundary; HealthView is not
+    // mocked and renders cleanly with the stub state.
+    rerender(wrap(
+      <SectionContent
+        active="health"
+        state={state}
+        connected={true}
+        api={api}
+        focused={null}
+        onFocusRepo={() => {}}
+      />
+    ));
+
+    // The error fallback must be gone, proving the boundary was reset.
+    expect(screen.queryByRole('alert')).toBeNull();
+    // And healthy content must be present.
+    expect(screen.getByRole('group', { name: /overall ci health/i })).toBeInTheDocument();
   });
 });

@@ -29,6 +29,7 @@ export interface DerivedModel { tiers: TierDef[]; checks: string[]; cells: Cell[
 
 // gate (mandatory) ▸ conditional (runs-when-touched) ▸ advisory ▸ absent
 const STATE_RANK: Record<CellState, number> = { gate: 3, conditional: 2, advisory: 1, absent: 0 };
+const ABSENT_META = { role: 'absent' as CellState, drift: false, minutes: 0, gateTiers: [] as string[] };
 const STATE_GLYPH: Record<CellState, string> = { gate: '●', conditional: '◐', advisory: '○', absent: '·' };
 const STATE_WORD: Record<CellState, string> = { gate: 'gate', conditional: 'conditional', advisory: 'advisory', absent: 'absent' };
 
@@ -206,7 +207,6 @@ export function ProtectionMap() {
       const g = groupOf(check);
       const arr = groups.get(g) ?? []; arr.push(check); groups.set(g, arr);
     }
-    const ABSENT_META = { role: 'absent' as CellState, drift: false, minutes: 0, gateTiers: [] as string[] };
     const getMeta = (c: string) => checkMeta.get(c) ?? ABSENT_META;
     const rank = (c: string) => { const m = getMeta(c); return (m.drift ? 100 : 0) + STATE_RANK[m.role] * 10; };
     return [...groups.entries()].map(([name, checks]) => {
