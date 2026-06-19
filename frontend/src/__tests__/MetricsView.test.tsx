@@ -284,6 +284,10 @@ function mockFetchOk(payload: MetricsPayload = PAYLOAD) {
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+  // Clear the section preference so each test starts with the default 'tuning' section.
+  // Without this, tests that call selectSection() (via goToEvidence or sub-tab clicks)
+  // would contaminate subsequent tests' localStorage-based initial section state.
+  try { localStorage.removeItem('prdash.metrics.section'); } catch { /* private mode */ }
 });
 
 const PANELS = ['Tuning actions', 'Recent config changes', 'Lead time', 'Trends', 'Runner-wait health', 'Queue throughput',
@@ -377,6 +381,7 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Trends' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
     const trends = screen.getByRole('heading', { name: 'Trends' }).closest('section')! as HTMLElement;
     // one chart, not four micro-multiples
     expect(trends.querySelectorAll('svg')).toHaveLength(1);
@@ -394,6 +399,10 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Trends' });
+    // Activate both throughput and performance so their stats are mounted.
+    // runner waits (+50%) are in performance; queue stats (+100%, ≈ prev) are in throughput.
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     // runner waits: 45 vs 30 → +50%; queue merges: 8 vs 4 → +100%
     expect(screen.getByText('+50% vs prev')).toBeInTheDocument();
     expect(screen.getAllByText('+100% vs prev').length).toBeGreaterThanOrEqual(1);
@@ -414,6 +423,7 @@ describe('MetricsView', () => {
     });
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Trends' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
     expect(screen.getByRole('heading', { name: 'acme/widgets' })).toBeInTheDocument();
     expect(screen.queryByText('octo/empty')).toBeNull();
   });
@@ -433,13 +443,16 @@ describe('MetricsView', () => {
     });
     render(<MetricsView now={NOW} />);
     await screen.findByRole('heading', { name: 'Queue throughput' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
     expect(screen.getByText('collecting data — 2 samples so far')).toBeInTheDocument();
   });
 
   it('queue-efficiency panel shows runs/merge and the run-vs-required-gate split', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
-    const block = await screen.findByTestId('queue-eff-acme/widgets');
+    await screen.findByRole('heading', { name: 'Queue efficiency' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    const block = screen.getByTestId('queue-eff-acme/widgets');
     expect(within(block).getByText('6.5')).toBeInTheDocument();              // 13 runs ÷ 2 merges
     expect(within(block).getByText('13 runs ÷ 2 merges')).toBeInTheDocument();
     expect(within(block).getByText('10')).toBeInTheDocument();               // advisory-only failures
@@ -458,7 +471,9 @@ describe('MetricsView', () => {
           requiredConfigured: false },
         adminBypass: { merges: 0, bypasses: 0, rate: null } }] });
     render(<MetricsView now={NOW} />);
-    const block = await screen.findByTestId('queue-eff-acme/widgets');
+    await screen.findByRole('heading', { name: 'Queue efficiency' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    const block = screen.getByTestId('queue-eff-acme/widgets');
     expect(within(block).getByText('set requiredCheckPrefixes')).toBeInTheDocument();
     expect(within(block).getByText(/required-gate split can.t be computed/)).toBeInTheDocument();
   });
@@ -499,7 +514,9 @@ describe('MetricsView', () => {
       { repo: 'acme/widgets', at: '2026-06-11T09:30:00Z', field: 'batchSize',
         oldValue: '6', newValue: '12' }] });
     render(<MetricsView now={NOW} />);
-    const list = await screen.findByTestId('config-changes');
+    await screen.findByTestId('config-changes');
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    const list = screen.getByTestId('config-changes');
     expect(within(list).getByTestId('cfg-change-batchSize').textContent).toContain('batchSize');
     expect(within(list).getByText('12')).toBeInTheDocument();
     // an amber marker is overlaid on the queue chart at the change's bucket (H9)
@@ -513,7 +530,9 @@ describe('MetricsView', () => {
         curve: Array.from({ length: 12 }, (_, i) => ({ batch: i + 1, throughputPerHour: i + 1,
           timeInQueueSecs: i < 9 ? 1000 - i * 10 : null, stable: i < 9 })) }] });
     render(<MetricsView now={NOW} />);
-    const block = await screen.findByTestId('batch-advisor-acme/widgets');
+    await screen.findByRole('heading', { name: 'Batch-size advisor' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    const block = screen.getByTestId('batch-advisor-acme/widgets');
     expect(within(block).getByText('current is 3')).toBeInTheDocument();   // recommendation headline
     expect(within(block).getByTestId('batch-row-acme/widgets-5').className).toContain('batch-recommended');
     expect(within(block).getByTestId('batch-row-acme/widgets-3').className).toContain('batch-current');
@@ -530,7 +549,9 @@ describe('MetricsView', () => {
         { name: 'ci', needs: ['unit-tests', 'lint'], durationP50: 10, waitP50: 5, onCriticalPath: true, slackSecs: 0 },
       ] }] });
     render(<MetricsView now={NOW} />);
-    const block = await screen.findByTestId('needs-graph-acme/widgets-pull_request');
+    await screen.findByRole('heading', { name: 'CI needs graph' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
+    const block = screen.getByTestId('needs-graph-acme/widgets-pull_request');
     // all four jobs rendered as nodes
     for (const name of ['build', 'unit-tests', 'lint', 'ci']) {
       expect(within(block).getByTestId(`ng-node-${name}`)).toBeInTheDocument();
@@ -543,6 +564,8 @@ describe('MetricsView', () => {
   it('slowest-jobs table keeps its leaderboard with variability highlighting and band trends', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByRole('heading', { name: 'Slowest / most-variable jobs' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     await waitFor(() => expect(screen.getByText('Integration Tests')).toBeInTheDocument());
     const calm = screen.getByText('1.3×');
     const spiky = screen.getByText('4.0×');
@@ -560,6 +583,7 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     // +18.4% median error → optimistic (stages take longer than promised)
     expect(within(panel).getByText('p50 ETAs run 18% optimistic (n=42)')).toBeInTheDocument();
@@ -572,6 +596,7 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     // ci has 3 buckets → real SignedLine with the emphasized zero gridline
     const trend = within(panel).getByRole('img',
@@ -588,6 +613,7 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     // queue: 2 buckets and 2 points — both charts guard with placeholders
     expect(within(panel).getAllByText('collecting data — 2 samples so far')).toHaveLength(2);
@@ -602,6 +628,7 @@ describe('MetricsView', () => {
     ] });
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'ETA calibration' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('no data yet')).toBeInTheDocument();
   });
@@ -610,6 +637,7 @@ describe('MetricsView', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Runner-wait health' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('pull_request p50 wait')).toBeInTheDocument();
     expect(within(panel).getByText('merge_group p50 wait')).toBeInTheDocument();
@@ -622,8 +650,10 @@ describe('MetricsView — flakiest jobs panel (issue #37)', () => {
   it('renders the per-repo flake table: job, event, rate, events/runs, trend sparkline', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
-    await waitFor(() => expect(screen.getByText('HighFiveCue suite')).toBeInTheDocument());
+    await screen.findByRole('heading', { name: 'Flakiest jobs' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const panel = screen.getByRole('heading', { name: 'Flakiest jobs' }).closest('section')!;
+    await waitFor(() => expect(within(panel).getByText('HighFiveCue suite')).toBeInTheDocument());
     const row = within(panel).getByText('HighFiveCue suite').closest('tr')!;
     expect(within(row).getByText('pull_request')).toBeInTheDocument();
     expect(within(row).getByText('23%')).toBeInTheDocument();
@@ -649,6 +679,8 @@ describe('MetricsView — train killers panel (issue #38)', () => {
   it('renders the ranked table with ejects, est. cost, and the flake cross-reference', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByRole('heading', { name: 'Train killers' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     await waitFor(() => expect(screen.getByText('merge-group e2e')).toBeInTheDocument());
     const panel = screen.getByRole('heading', { name: 'Train killers' }).closest('section')!;
     const killer = within(panel).getByText('merge-group e2e').closest('tr')!;
@@ -662,6 +694,8 @@ describe('MetricsView — train killers panel (issue #38)', () => {
   it("highlights 'killer AND flaky' rows amber (tk-flaky); flake-unknown rows show – and stay plain", async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByRole('heading', { name: 'Train killers' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     await waitFor(() => expect(screen.getByText('merge-group e2e')).toBeInTheDocument());
     const panel = screen.getByRole('heading', { name: 'Train killers' }).closest('section')!;
     const flakyRow = within(panel).getByText('merge-group e2e').closest('tr')!;
@@ -675,6 +709,8 @@ describe('MetricsView — train killers panel (issue #38)', () => {
   it('documents the cost approximation (median group run × batch size) under the table', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByRole('heading', { name: 'Train killers' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     await waitFor(() => expect(screen.getByText('merge-group e2e')).toBeInTheDocument());
     const panel = screen.getByRole('heading', { name: 'Train killers' }).closest('section')!;
     expect(within(panel).getByText(/cost ≈ ejects × median group run/)).toBeInTheDocument();
@@ -695,6 +731,7 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     const prChain = within(panel).getByRole('list',
       { name: 'acme/widgets pull_request critical path' });
@@ -710,6 +747,7 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     const pr = within(panel).getByText('pull_request end-to-end (p50)')
       .closest('.metric-stat')! as HTMLElement;
@@ -721,6 +759,7 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     const off = within(panel).getByText('bats-tests').closest('li')!;
     expect(off.textContent).toContain('could grow 11m before mattering'); // formatDur(660)
@@ -730,6 +769,7 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     // appears in the visible note AND (UX-M1) the sr-only stat description
     expect(within(panel).getAllByText(/ignores the window selector/).length).toBeGreaterThan(0);
@@ -739,6 +779,7 @@ describe('MetricsView — critical path panel (issue #42)', () => {
     mockFetchOk(EMPTY);
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Critical path' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('no data yet')).toBeInTheDocument();
   });
@@ -749,6 +790,7 @@ describe('MetricsView — workflow lint panel (issue #48 rule 1)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Workflow lint' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const panel = heading.closest('section')! as HTMLElement;
     const warnRow = within(panel).getByText('unit-tests').closest('tr')!;
     expect(within(warnRow).getByText('warn')).toBeInTheDocument();
@@ -764,6 +806,7 @@ describe('MetricsView — workflow lint panel (issue #48 rule 1)', () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Workflow lint' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('warn').className).toContain('lint-warn');
     expect(within(panel).getByText('info').className).toContain('lint-info');
@@ -773,6 +816,7 @@ describe('MetricsView — workflow lint panel (issue #48 rule 1)', () => {
     mockFetchOk(EMPTY);
     render(<MetricsView now={NOW} />);
     const heading = await screen.findByRole('heading', { name: 'Workflow lint' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const panel = heading.closest('section')! as HTMLElement;
     expect(within(panel).getByText('no findings')).toBeInTheDocument();
   });
@@ -781,6 +825,7 @@ describe('MetricsView — workflow lint panel (issue #48 rule 1)', () => {
 describe('MetricsView — CI cost panel (issue #43)', () => {
   const costPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'CI cost' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-cost'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -913,6 +958,7 @@ describe('MetricsView — CI cost panel (issue #43)', () => {
 describe('MetricsView — lead time panel (issue #44)', () => {
   const ltPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'Lead time' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1024,6 +1070,7 @@ describe('MetricsView — lead time panel (issue #44)', () => {
 describe('MetricsView — duration regressions strip (issue #41)', () => {
   const regPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'Duration regressions' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1063,6 +1110,7 @@ describe('MetricsView — duration regressions strip (issue #41)', () => {
 describe('MetricsView — Runner pools panel (issue #45)', () => {
   const poolPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'Runner pools' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1108,6 +1156,7 @@ describe('MetricsView — Runner pools panel (issue #45)', () => {
 describe('MetricsView — Spot reclaims panel (issue #46)', () => {
   const reclaimPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'Spot reclaims' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1137,6 +1186,7 @@ describe('MetricsView — Spot reclaims panel (issue #46)', () => {
 describe('MetricsView — Concurrency demand panel (issue #47)', () => {
   const concPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'Concurrency demand' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1171,6 +1221,7 @@ describe('MetricsView — Concurrency demand panel (issue #47)', () => {
 describe('MetricsView — cost actuals + attribution coverage (phase 2)', () => {
   const costPanel = async () => {
     const heading = await screen.findByRole('heading', { name: 'CI cost' });
+    fireEvent.click(screen.getByTestId('metrics-subtab-cost'));
     return heading.closest('section')! as HTMLElement;
   };
 
@@ -1339,6 +1390,8 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
   it('renders demotion candidates with the suggested lower tier', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const row = await screen.findByTestId('demotion-lint: eslint/pull_request');
     expect(within(row).getByText('lint: eslint')).toBeInTheDocument();
     expect(within(row).getByText('every PR push')).toBeInTheDocument();
@@ -1349,6 +1402,8 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
   it('renders promotion candidates with the suggested earlier tier', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const row = await screen.findByTestId('promotion-e2e/push');
     expect(within(row).getByText('e2e')).toBeInTheDocument();
     expect(within(row).getByText('every push to main (post-merge)')).toBeInTheDocument();
@@ -1359,6 +1414,8 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
   it('the Draft PR button posts and renders the resulting PR link', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const btn = await screen.findByTestId('demotion-draft-lint: eslint/pull_request');
     fireEvent.click(btn);
     const link = await screen.findByText('draft PR ↗');
@@ -1368,9 +1425,74 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
   it('the promotion Draft PR button posts and renders the resulting PR link (#150.2)', async () => {
     mockFetchOk();
     render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
     const btn = await screen.findByTestId('promotion-draft-e2e/push');
     fireEvent.click(btn);
     const link = await screen.findByText('draft PR ↗');
     expect(link).toHaveAttribute('href', 'https://github.com/o/r/pull/88');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part B (#179): lazy-render inactive metric panel content
+// ---------------------------------------------------------------------------
+describe('MetricsView — lazy-render inactive panel content (#179)', () => {
+  beforeEach(() => {
+    try { localStorage.removeItem('prdash.metrics.section'); } catch { /* ignore */ }
+  });
+
+  it('never-activated panel section IS present in the DOM but has NO chart content', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    // Wait for data to load (default active section is "tuning")
+    await screen.findByTestId('metrics-subtab-tuning');
+    // "cost" section is never activated — its <section> element must exist (a11y)
+    const costSection = document.getElementById('metrics-ci-cost');
+    expect(costSection).not.toBeNull();
+    // but its heavy chart content should NOT be rendered yet
+    // (CI cost panel's pool bars are only rendered when the panel has been activated)
+    expect(costSection!.querySelector('[data-testid^="cost-pool-"]')).toBeNull();
+  });
+
+  it('activating a section renders its panel content', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-cost');
+    // cost section not yet activated — no pool bars
+    expect(document.getElementById('metrics-ci-cost')!
+      .querySelector('[data-testid^="cost-pool-"]')).toBeNull();
+    // activate the cost tab
+    fireEvent.click(screen.getByTestId('metrics-subtab-cost'));
+    // now the content should be rendered
+    await screen.findByTestId('cost-pool-acme/widgets-kindash-runner');
+    expect(document.getElementById('metrics-ci-cost')!
+      .querySelector('[data-testid^="cost-pool-"]')).not.toBeNull();
+  });
+
+  it('switching AWAY from an activated section keeps its content mounted (display:none only)', async () => {
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-cost');
+    // activate cost, then switch to throughput
+    fireEvent.click(screen.getByTestId('metrics-subtab-cost'));
+    await screen.findByTestId('cost-pool-acme/widgets-kindash-runner');
+    fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
+    // cost section is now inactive but content stays mounted (lazy keep-alive)
+    expect(document.getElementById('metrics-ci-cost')!
+      .querySelector('[data-testid^="cost-pool-"]')).not.toBeNull();
+    // and the section carries the inactive class
+    expect(document.getElementById('metrics-ci-cost')!.className)
+      .toContain('metric-panel--inactive');
+  });
+
+  it('the initially-active section (tuning) renders its content immediately', async () => {
+    mockFetchOk({ ...PAYLOAD, recommendations: [
+      { repo: 'acme/widgets', kind: 'batch-size', priority: 'medium',
+        title: 'raise merge-queue batch 6 → 12', detail: '+50%' }] });
+    render(<MetricsView now={NOW} />);
+    // Tuning tab is the default active section — its content (recommendations list) renders immediately.
+    await screen.findByTestId('recommendations');
+    expect(screen.getByTestId('rec-batch-size')).toBeInTheDocument();
   });
 });
