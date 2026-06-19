@@ -1,0 +1,61 @@
+name: Publish to npm
+
+# Tokenless publish via npm Trusted Publishing (OIDC). Requires a one-time setup
+# on npmjs.com AFTER the package exists: package → Settings → Trusted Publisher →
+# GitHub Actions, with repo `steiner385/chartroom` and workflow file `publish.yml`.
+# Until that's configured (and the first version is published manually with a
+# token — OIDC can't bootstrap a brand-new name), this workflow will no-op-fail.
+#
+# Trigger: publishing a GitHub Release (write the release notes, tag e.g. v0.1.1),
+# or a manual dispatch. The release tag should match package.json "version".
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Never let two publishes race.
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write        # required: lets npm mint the OIDC token for trusted publishing
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      # Trusted Publishing (OIDC) needs npm >= 11.5.1; node 22 still ships npm 10.x.
+      - name: Upgrade npm to an OIDC-capable version
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify the release tag matches package.json version
+        if: github.event_name == 'release'
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "Release tag ($tag) != package.json version ($pkg) — bump package.json or fix the tag."; exit 1
+          fi
+
+      # `npm publish` runs the `prepare` script (builds dist/embed + dist/server),
+      # then publishes. With id-token:write + a configured trusted publisher and
+      # npm >= 11.5.1, auth is the OIDC exchange (no NODE_AUTH_TOKEN) and provenance
+      # is attached automatically.
+      - name: Publish
+        run: npm publish --provenance --access public
