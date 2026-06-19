@@ -86,19 +86,30 @@ export class AppJwtSigner {
   private readonly key: KeyObject;
   private readonly now: () => number;
 
-  constructor(opts: { appId: number; privateKeyPath: string; now?: () => number }) {
+  constructor(opts: { appId: number; privateKeyPath?: string; privateKey?: string; now?: () => number }) {
     this.appId = opts.appId;
     let pem: string;
-    try {
-      pem = readFileSync(opts.privateKeyPath, 'utf8');
-    } catch (e) {
-      throw new Error(`tokenSource "app": cannot read private key at ${opts.privateKeyPath}: `
-        + (e instanceof Error ? e.message : String(e)));
-    }
-    try {
-      this.key = createPrivateKey(pem);
-    } catch {
-      throw new Error(`tokenSource "app": ${opts.privateKeyPath} is not a valid PEM private key`);
+    if (opts.privateKey) {
+      pem = opts.privateKey;
+      try {
+        this.key = createPrivateKey(pem);
+      } catch {
+        throw new Error('tokenSource "app": the provided privateKey is not a valid PEM private key');
+      }
+    } else if (opts.privateKeyPath) {
+      try {
+        pem = readFileSync(opts.privateKeyPath, 'utf8');
+      } catch (e) {
+        throw new Error(`tokenSource "app": cannot read private key at ${opts.privateKeyPath}: `
+          + (e instanceof Error ? e.message : String(e)));
+      }
+      try {
+        this.key = createPrivateKey(pem);
+      } catch {
+        throw new Error(`tokenSource "app": ${opts.privateKeyPath} is not a valid PEM private key`);
+      }
+    } else {
+      throw new Error('tokenSource "app": requires privateKey or privateKeyPath');
     }
     this.now = opts.now ?? Date.now;
   }
@@ -168,7 +179,7 @@ export class AppTokenSource implements TokenProvider {
 
   constructor(opts: AppTokenSourceOptions) {
     this.signer = opts.signer === undefined
-      ? new AppJwtSigner({ appId: opts.appId, privateKeyPath: opts.privateKeyPath, now: opts.now })
+      ? new AppJwtSigner({ appId: opts.appId, privateKeyPath: opts.privateKeyPath, privateKey: opts.privateKey, now: opts.now })
       : opts.signer;
     this.restBase = deriveRestBase(opts.apiUrl ?? 'https://api.github.com/graphql');
     this.fetchFn = opts.fetchFn ?? fetch;

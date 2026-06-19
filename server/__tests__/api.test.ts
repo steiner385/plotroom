@@ -499,6 +499,34 @@ describe('same-origin guard (PUT /api/config, POST /api/admin/restart)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// R1 Task 2: trustHostAuth opt — skip the same-origin guard when the host
+// app's own auth middleware is the gate.
+// ---------------------------------------------------------------------------
+
+describe('trustHostAuth option', () => {
+  it('default (trustHostAuth absent): a disallowed Origin on POST /api/admin/restart → 403', async () => {
+    const exit = vi.fn();
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      restart: { exit, delayMs: 5 } });
+    const res = await request(app).post('/api/admin/restart')
+      .set('origin', 'https://evil.example');
+    expect(res.status).toBe(403);
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('trustHostAuth: true — same disallowed Origin on POST /api/admin/restart passes the guard', async () => {
+    const exit = vi.fn();
+    const app = createApp({ getState: () => STATE, bus: new EventEmitter(),
+      trustHostAuth: true, restart: { exit, delayMs: 5 } });
+    const res = await request(app).post('/api/admin/restart')
+      .set('origin', 'https://evil.example');
+    // Guard is bypassed — request reaches the handler (202), not a 403
+    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(202);
+  });
+});
+
 describe('POST /api/admin/restart', () => {
   it('responds 202 immediately, then calls the injected exit(1) after the delay', async () => {
     const exit = vi.fn();

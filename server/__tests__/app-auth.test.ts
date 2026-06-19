@@ -251,6 +251,48 @@ describe('AppJwtSigner', () => {
     expect(() => new AppJwtSigner({ appId: 1, privateKeyPath: join(dir, 'nope.pem') }))
       .toThrow(/tokenSource "app".*nope\.pem/);
   });
+
+  // ---- R1: inline privateKey string -------------------------------------------
+
+  it('inline privateKey string: constructs without reading a file and mints a valid JWT', () => {
+    const { privateKey: privKeyObj, publicKey: pubKeyObj } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pemStr = privKeyObj.export({ type: 'pkcs8', format: 'pem' }) as string;
+    const signer = new AppJwtSigner({ appId: 42, privateKey: pemStr, now: () => T0 });
+    const jwt = signer.mint();
+    const [h, p, s] = jwt.split('.');
+    expect(cryptoVerify('RSA-SHA256', Buffer.from(`${h}.${p}`), pubKeyObj, Buffer.from(s!, 'base64url'))).toBe(true);
+    const claims = JSON.parse(Buffer.from(p!, 'base64url').toString());
+    expect(claims.iss).toBe('42');
+  });
+
+  it('privateKeyPath still works (regression)', () => {
+    const signer = new AppJwtSigner({ appId: 999, privateKeyPath: pemPath, now: () => T0 });
+    const jwt = signer.mint();
+    const [h, p, s] = jwt.split('.');
+    expect(cryptoVerify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(s!, 'base64url'))).toBe(true);
+  });
+
+  it('neither privateKey nor privateKeyPath → clear error', () => {
+    expect(() => new AppJwtSigner({ appId: 1 } as never))
+      .toThrow(/tokenSource "app": requires privateKey or privateKeyPath/);
+  });
+
+  it('invalid inline PEM → clear error without a file path', () => {
+    expect(() => new AppJwtSigner({ appId: 1, privateKey: 'not-a-pem' }))
+      .toThrow(/the provided privateKey is not a valid PEM private key/);
+  });
+
+  it('AppTokenSource accepts inline privateKey and mints a valid JWT', async () => {
+    const { privateKey: privKeyObj } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pemStr = privKeyObj.export({ type: 'pkcs8', format: 'pem' }) as string;
+    const { fn } = makeFetch({
+      'POST /app/installations/77/access_tokens': () => okToken('ghs_inlinekey', T0 + 3600_000),
+    });
+    const ts = new AppTokenSource({
+      appId: 99, privateKey: pemStr, installationId: 77, fetchFn: fn, now: () => T0,
+    });
+    expect(await ts.get()).toBe('ghs_inlinekey');
+  });
 });
 
 // ---- InstallationRegistry ------------------------------------------------------

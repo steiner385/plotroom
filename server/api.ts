@@ -195,6 +195,9 @@ export function createApp(opts: {
   workspaceRouter?: express.Router;
   /** Restart endpoint knobs — `exit` injectable for tests. */
   restart?: { exit?: (code: number) => void; delayMs?: number };
+  /** When true, skip the built-in same-origin guard on mutating endpoints —
+   *  the host app's auth middleware is the gate. Default false. */
+  trustHostAuth?: boolean;
 }): express.Express {
   const app = express();
   app.disable('x-powered-by');
@@ -202,11 +205,15 @@ export function createApp(opts: {
   // Same-origin guard for mutating endpoints — accepts loopback plus any
   // configured bind/origin hosts (e.g. a Tailscale IP/MagicDNS name) so the
   // dashboard works when reached across the tailnet. Resolved per request.
-  const originGuard = makeSameOriginGuard(() => {
-    const cfg = opts.config?.get();
-    return new Set<string>(['127.0.0.1', 'localhost',
-      ...(cfg?.bindHosts ?? []), ...(cfg?.allowedOriginHosts ?? [])]);
-  });
+  // When trustHostAuth is true the guard becomes a pass-through — the host
+  // app's own auth middleware is the gate (e.g. requireAdminSession).
+  const originGuard = opts.trustHostAuth
+    ? ((_req: express.Request, _res: express.Response, next: express.NextFunction) => next())
+    : makeSameOriginGuard(() => {
+        const cfg = opts.config?.get();
+        return new Set<string>(['127.0.0.1', 'localhost',
+          ...(cfg?.bindHosts ?? []), ...(cfg?.allowedOriginHosts ?? [])]);
+      });
 
   // Webhook receiver — mounted BEFORE express.json with a route-scoped raw-body
   // parser: signature verification needs the exact request bytes, and nothing
