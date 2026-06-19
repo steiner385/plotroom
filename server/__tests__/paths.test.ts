@@ -36,7 +36,7 @@ describe('paths', () => {
   it('APP_ROOT resolves to the package root (absolute, contains package.json)', async () => {
     // The contract is "the directory containing package.json", anchored to the
     // module location — NOT a specific folder basename (the checkout/clone dir
-    // can be named anything, e.g. the repo rename to `chartroom`).
+    // can be named anything, e.g. the repo rename to `plotroom`).
     const { APP_ROOT } = await import('../paths.js');
     expect(isAbsolute(APP_ROOT)).toBe(true);
     expect(existsSync(join(APP_ROOT, 'package.json'))).toBe(true);

@@ -1,5 +1,5 @@
 {
-  "name": "chartroom",
+  "name": "plotroom",
   "version": "0.1.0",
   "description": "Embeddable CI/CD + pull-request operations dashboard — watch GitHub Actions pipeline health, runner timing and critical path, and PR merge-readiness, with one-click ready-to-merge / draft levers. Ships a React component (./embed) and a mountable Express backend (./server).",
   "type": "module",
@@ -7,10 +7,10 @@
   "author": "Tony Stein",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/steiner385/chartroom.git"
+    "url": "git+https://github.com/steiner385/plotroom.git"
   },
-  "homepage": "https://github.com/steiner385/chartroom#readme",
-  "bugs": "https://github.com/steiner385/chartroom/issues",
+  "homepage": "https://github.com/steiner385/plotroom#readme",
+  "bugs": "https://github.com/steiner385/plotroom/issues",
   "keywords": [
     "ci",
     "cd",
