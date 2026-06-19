@@ -305,13 +305,17 @@ export function MetricsView({ now, focusCostNonce }: {
     setEverActivated((prev) => prev.has(s) ? prev : new Set([...prev, s]));
     try { localStorage.setItem(SECTION_STORAGE_KEY, s); } catch { /* ignore */ }
   };
+  // A pending scroll/focus rAF (evidence jump or cost-chip) must be cancelled on
+  // unmount, else the callback fires into a detached DOM after teardown (#213).
+  const scrollRaf = useRef<number | null>(null);
+  useEffect(() => () => { if (scrollRaf.current != null) cancelAnimationFrame(scrollRaf.current); }, []);
   // Jump from a recommendation to its evidence panel: switch section, then (after
   // the panel re-renders into view) scroll to it and move focus to its heading (UX-M4).
   const goToEvidence = (kind: string) => {
     const link = resolveRecLink(kind);
     if (!link) return;
     selectSection(link.section);
-    requestAnimationFrame(() => {
+    scrollRaf.current = requestAnimationFrame(() => {
       const el = document.getElementById(link.panel);
       el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       el?.querySelector('h2')?.focus?.();
@@ -360,10 +364,11 @@ export function MetricsView({ now, focusCostNonce }: {
     const el = document.getElementById('metrics-ci-cost');
     if (!el) return;   // panel not rendered yet — re-runs when `payload` lands
     handledCostNonce.current = focusCostNonce;
-    requestAnimationFrame(() => {
+    scrollRaf.current = requestAnimationFrame(() => {
       el.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' });
       el.querySelector('h2')?.focus?.();
     });
+    return () => { if (scrollRaf.current != null) cancelAnimationFrame(scrollRaf.current); };
   }, [focusCostNonce, payload]);
 
   // Memoize all payload-derived arrays and Maps so SSE frames that deliver the
