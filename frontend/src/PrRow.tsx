@@ -1,4 +1,4 @@
-import { useState, type MouseEvent, type KeyboardEvent } from 'react';
+import { useState, useMemo, memo, type MouseEvent, type KeyboardEvent } from 'react';
 import { useApiBase } from './embed/ApiBaseContext';
 import type { PrView } from './types';
 import { formatDur, formatEta, stageLabel } from './format';
@@ -11,7 +11,7 @@ import { DEFS, defTitle, subLineTitle } from './definitions';
  *  substate reason for parked, group/position info for queue.
  *  @param queueCulprit lowest-position genuinely-conflicting queue entry (from
  *  RepoQueueView.unmergeableCulprit) — named in the queue-blocked sub line. */
-function subLine(pr: PrView, queueCulprit: number | null): string | null {
+export function subLine(pr: PrView, queueCulprit: number | null): string | null {
   const s = pr.stage;
   if (s.stage === 'parked') return stageLabel(s.stage, s.substate);
   if (s.stage === 'queue') {
@@ -94,18 +94,42 @@ export function readyMergeGate(pr: PrView): { show: boolean; blocked: boolean; r
   return { show: true, blocked: false, reason: '' };
 }
 
-export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }: {
+type PrRowProps = {
   pr: PrView; hasDeploy: boolean;
   /** Repo-level RepoQueueView.unmergeableCulprit (queue-blocked sub line). */
   queueCulprit?: number | null;
   /** false in kiosk mode (issue #20): row is read-only — no expand-on-click. */
   expandable?: boolean;
-}) {
+};
+
+/**
+ * areEqual comparator for React.memo.
+ *
+ * JSON.stringify is correct here because `pr` is plain JSON-parsed data from
+ * the SSE feed: field order is stable (same server serialisation path every
+ * time), all values are JSON primitives/arrays/objects, and there are no
+ * function or class-instance fields. Stringifying is O(size of one PR) — far
+ * cheaper than reconciling the entire subtree on an unchanged row.
+ *
+ * Explicitly checks the three scalar props separately so that a change to any
+ * of them still forces a re-render even if `pr` itself is byte-for-byte equal.
+ */
+function areEqual(prev: PrRowProps, next: PrRowProps): boolean {
+  return (
+    prev.hasDeploy === next.hasDeploy &&
+    prev.queueCulprit === next.queueCulprit &&
+    prev.expandable === next.expandable &&
+    JSON.stringify(prev.pr) === JSON.stringify(next.pr)
+  );
+}
+
+function PrRowInner({ pr, hasDeploy, queueCulprit = null, expandable = true }: PrRowProps) {
   const { apiUrl } = useApiBase();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionResult, setActionResult] = useState<{ ok: boolean; msg: string } | null>(null);
-  const gate = readyMergeGate(pr);
+  // useMemo: readyMergeGate scans pr.checks and pr.stage — re-run only when pr changes
+  const gate = useMemo(() => readyMergeGate(pr), [pr]);
 
   async function onReadyMerge(e: MouseEvent) {
     e.stopPropagation();
@@ -143,7 +167,8 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
   // pair instead of the single-number stage ETA (queueAheadCount stays in the
   // sub line); everything else keeps the existing chip.
   const sim = s.stage === 'queue' ? pr.mergeEtaSim ?? null : null;
-  const sub = subLine(pr, queueCulprit);
+  // useMemo: subLine scans pr.checks and reads queueCulprit — re-run only when either changes
+  const sub = useMemo(() => subLine(pr, queueCulprit), [pr, queueCulprit]);
   return (
     <div id={`pr-${pr.number}`} className={`pr-row ${parked ? `parked ${s.substate ?? ''}` : ''}`}>
       {/* Keyboard-operable expand toggle (UX-H1). role="button" rather than a
@@ -261,3 +286,5 @@ export function PrRow({ pr, hasDeploy, queueCulprit = null, expandable = true }:
     </div>
   );
 }
+
+export const PrRow = memo(PrRowInner, areEqual);
