@@ -744,6 +744,7 @@ const stopPoller = prdash.startPoller();    // run the poller in-process; call s
 ```
 - `router` is a mountable Express app — **no `.listen()`**. `trustHostAuth` (default true) skips the built-in same-origin guard because **your** middleware (`requireAdminSession`) is the gate — there is no shared secret.
 - **Single instance + a persistent volume** at `dataDir` (better-sqlite3 is single-writer; don't horizontally scale the poller). `/api/admin/restart` is a **no-op** when mounted (it never `process.exit`es your host).
+- With inline `githubApp` creds, pass `config` as an **object** (as above), not `{ path }` — the file loader still requires `app.privateKeyPath` for `tokenSource:"app"`, whereas the object path lets the inline `privateKey` stand alone.
 
 **Frontend — mount the component (`pr-dashboard/embed`), pointing `apiBase` at your own backend mount:**
 ```tsx
