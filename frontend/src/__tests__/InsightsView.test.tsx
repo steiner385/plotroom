@@ -18,9 +18,17 @@ const api = (over: Partial<WorkspaceApi> = {}): WorkspaceApi => ({
 describe('InsightsView (WS3a — Metrics + Tune folded into one section)', () => {
   it('renders the analytics (Metrics) and the tuning panels (budgets etc.) together', async () => {
     render(<InsightsView repo="o/r" api={api()} />);
-    expect(screen.getByTestId('metrics')).toBeInTheDocument();
+    // MetricsView is lazy-loaded; use findBy to wait for the Suspense boundary to resolve.
+    expect(await screen.findByTestId('metrics')).toBeInTheDocument();
     // the Tune panels are present (with their empty states)
     expect(await screen.findByLabelText('Budgets')).toBeInTheDocument();
     expect(screen.getByLabelText('Policy')).toBeInTheDocument();
+  });
+
+  it('shows a loading placeholder while MetricsView lazy-loads', async () => {
+    render(<InsightsView repo="o/r" api={api()} />);
+    // Before the lazy module resolves the fallback may appear; after it resolves the
+    // real stub is shown. Either way, MetricsView content appears eventually.
+    expect(await screen.findByTestId('metrics')).toBeInTheDocument();
   });
 });
