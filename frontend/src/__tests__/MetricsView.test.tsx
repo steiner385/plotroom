@@ -1496,3 +1496,23 @@ describe('MetricsView — lazy-render inactive panel content (#179)', () => {
     expect(screen.getByTestId('rec-batch-size')).toBeInTheDocument();
   });
 });
+
+describe('MetricsView — scroll rAF cancelled on unmount (#213)', () => {
+  it('cancels a pending scroll/focus rAF on unmount so it never fires into a detached DOM', async () => {
+    // Mock rAF to return a sentinel id WITHOUT scheduling (so no callback fires).
+    const RAF_ID = 4242;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(RAF_ID as unknown as number);
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    mockFetchOk();
+    // focusCostNonce schedules a scroll-to-cost rAF once the payload + #metrics-ci-cost render.
+    const { unmount } = render(<MetricsView now={NOW} focusCostNonce={1} />);
+    await screen.findByTestId('metrics-subtab-cost');        // payload loaded → cost-focus effect runs
+    await waitFor(() => expect(rafSpy).toHaveBeenCalled());  // a scroll rAF was scheduled
+    unmount();
+    // The pending rAF id must be cancelled in the effect cleanup — otherwise its
+    // callback fires post-teardown into a detached jsdom window (the #213 flake).
+    expect(cancelSpy).toHaveBeenCalledWith(RAF_ID);
+    rafSpy.mockRestore();
+    cancelSpy.mockRestore();
+  });
+});
