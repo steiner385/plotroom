@@ -721,17 +721,17 @@ webhook receiver**:
 
 ---
 
-## Embedding pr-dashboard in a host app
+## Embedding Chartroom in a host app
 
-pr-dashboard is **source-only**: a host app consumes it and hosts **both tiers
-in-process** — there is no separate pr-dashboard service and no cross-service
+Chartroom (npm: `chartroom`) is **source-only**: a host app consumes it and hosts
+**both tiers in-process** — there is no separate Chartroom service and no cross-service
 proxy. It exposes two mountable surfaces, frontend (`./embed`) and backend
 (`./server`). The standalone (`pnpm start`, `:4400`) is unchanged for local/dev.
 Full handoff: [docs/embedding-host-guide.md](docs/embedding-host-guide.md).
 
-**Backend — mount the API + poller in your own Express server (`pr-dashboard/server`):**
+**Backend — mount the API + poller in your own Express server (`chartroom/server`):**
 ```ts
-import { createPrDashboardBackend } from 'pr-dashboard/server';
+import { createPrDashboardBackend } from 'chartroom/server';
 
 const prdash = await createPrDashboardBackend({
   config,                                   // resolved config object, or { path }
@@ -746,22 +746,23 @@ const stopPoller = prdash.startPoller();    // run the poller in-process; call s
 - **Single instance + a persistent volume** at `dataDir` (better-sqlite3 is single-writer; don't horizontally scale the poller). `/api/admin/restart` is a **no-op** when mounted (it never `process.exit`es your host).
 - With inline `githubApp` creds, pass `config` as an **object** (as above), not `{ path }` — the file loader still requires `app.privateKeyPath` for `tokenSource:"app"`, whereas the object path lets the inline `privateKey` stand alone.
 
-**Frontend — mount the component (`pr-dashboard/embed`), pointing `apiBase` at your own backend mount:**
+**Frontend — mount the component (`chartroom/embed`), pointing `apiBase` at your own backend mount:**
 ```tsx
-import { PrDashboard } from 'pr-dashboard/embed';
-import 'pr-dashboard/embed/style.css';
+import { PrDashboard } from 'chartroom/embed';
+import 'chartroom/embed/style.css';
 // the API lives under `${mount}/api`, so apiBase = your mount path + /api
 <PrDashboard apiBase="/bff/ops/prdash/api" basename="/ops/prdash" routerMode="path" />
 ```
 **Props:** `apiBase?`, `basename?`, `routerMode?`, `focusedRepo?`, `onFocusChange?`, `className?`, `withCredentials?`.
 
-**Consumption:** `prepare` builds **both** `dist/embed` (frontend) and `dist/server`
-(backend, tsc), so a git dependency works today:
-`"pr-dashboard": "github:<org>/pr-dashboard#<sha>"`. React 19 is a peer dependency
-(host provides the single instance). The `./server` export's emitted ESM uses
-extensionless imports — **import it under `tsx` or a bundler** (plain `node` ESM
-needs `.js` extensions; a public-npm build that's plain-`node`-importable is a
-follow-up). A public npm package under a better name is planned.
+**Consumption:** the package is published to npm as **[`chartroom`](https://www.npmjs.com/package/chartroom)** —
+`npm i chartroom` ships the prebuilt `dist/embed` (frontend) + `dist/server`
+(backend, tsc), no build step at install time. A git dependency also works
+(`"chartroom": "github:steiner385/chartroom#<sha>"`; its `prepare` builds both on
+install). React 19 is a peer dependency (host provides the single instance). The
+`./server` export's emitted ESM uses extensionless imports — **import it under
+`tsx` or a bundler** (plain `node` ESM needs `.js` extensions; a plain-`node`
+build is a follow-up, #200).
 
 ---
 

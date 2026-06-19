@@ -5,11 +5,11 @@
 > corrected architecture (per the project owner): pr-dashboard is **source-only**
 > and the host hosts **both tiers in-process** — there is **no separate
 > pr-dashboard service and no cross-service proxy**.
-> - **Backend:** mount `createPrDashboardBackend()` from **`pr-dashboard/server`** in
+> - **Backend:** mount `createPrDashboardBackend()` from **`chartroom/server`** in
 >   your own Express server (`app.use('/bff/ops/prdash', requireAdminSession, router)`)
 >   and run `startPoller()` in-process. Your auth gates it (`trustHostAuth` default true,
 >   no shared secret). SQLite lives on your `dataDir` volume (single instance).
-> - **Frontend:** mount `<PrDashboard apiBase="/bff/ops/prdash/api" .../>` from `pr-dashboard/embed`.
+> - **Frontend:** mount `<PrDashboard apiBase="/bff/ops/prdash/api" .../>` from `chartroom/embed`.
 >
 > See the **README "Embedding pr-dashboard in a host app"** section and the
 > coordination channel (`/home/tony/.config/kindash/coordination/pr-dashboard-integration.md`,
@@ -20,7 +20,7 @@
 ---
 
 This is the handoff for the host (`admin.kindash.com`) team consuming the
-`pr-dashboard/embed` component. It covers the package API, the routing
+`chartroom/embed` component. It covers the package API, the routing
 integration (read the **Routing** section carefully — it has a real nested-router
 gotcha), the backend/proxy contract you must provision, styling, and the
 host-vs-embed ownership split.
@@ -38,7 +38,7 @@ dependency works:
 ```jsonc
 // host package.json
 "dependencies": {
-  "pr-dashboard": "github:steiner385/pr-dashboard#<commit-sha>"
+  "chartroom": "github:steiner385/chartroom#<commit-sha>"
 }
 ```
 
@@ -50,8 +50,8 @@ dependency works:
   the dev toolchain available at install time (standard for git deps).
 
 ```tsx
-import { PrDashboard } from 'pr-dashboard/embed';
-import 'pr-dashboard/embed/style.css';
+import { PrDashboard } from 'chartroom/embed';
+import 'chartroom/embed/style.css';
 ```
 
 ---
@@ -213,7 +213,7 @@ mutations 403 — only GETs work. That's deliberate.
 
 ## 6. Styling & theming
 
-- Import `pr-dashboard/embed/style.css` once. Every rule is scoped under
+- Import `chartroom/embed/style.css` once. Every rule is scoped under
   `.prdash-root` (the embed's wrapper div), so **nothing leaks** into your page and
   the embed sets **no** `body`/`html` styles.
 - The embed's design tokens are CSS custom properties defined on `.prdash-root`

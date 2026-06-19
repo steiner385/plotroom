@@ -1,7 +1,28 @@
 {
-  "name": "pr-dashboard",
-  "private": true,
+  "name": "chartroom",
+  "version": "0.1.0",
+  "description": "Embeddable CI/CD + pull-request operations dashboard — watch GitHub Actions pipeline health, runner timing and critical path, and PR merge-readiness, with one-click ready-to-merge / draft levers. Ships a React component (./embed) and a mountable Express backend (./server).",
   "type": "module",
+  "license": "MIT",
+  "author": "Tony Stein",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/steiner385/chartroom.git"
+  },
+  "homepage": "https://github.com/steiner385/chartroom#readme",
+  "bugs": "https://github.com/steiner385/chartroom/issues",
+  "keywords": [
+    "ci",
+    "cd",
+    "github-actions",
+    "pull-request",
+    "dashboard",
+    "pipeline",
+    "merge-readiness",
+    "devops",
+    "react",
+    "embeddable"
+  ],
   "packageManager": "pnpm@10.28.0",
   "engines": {
     "node": ">=20"

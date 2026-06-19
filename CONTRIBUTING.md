@@ -13,7 +13,7 @@ Requirements: Node 20+, [pnpm](https://pnpm.io) (this repo is pnpm-only — do
 not use npm or yarn; only `pnpm-lock.yaml` is maintained).
 
 ```bash
-git clone https://github.com/steiner385/pr-dashboard.git
+git clone https://github.com/steiner385/chartroom.git
 cd pr-dashboard
 pnpm install
 
