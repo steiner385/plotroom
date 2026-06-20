@@ -49,8 +49,8 @@ export function TuneView({ repo, api }: { repo: string | null; api: WorkspaceApi
 
   return (
     <div className="tune-view">
-      <h2>Tune &amp; Investigate{repo ? ` — ${repo}` : ''}</h2>
-
+      {/* #184: section heading + tab label are owned by InsightsView's two-tab
+          layout now; the stale "Tune & Investigate" h2 is removed. */}
       <Panel label="Budgets" title="Budgets" value={budgets}
         isEmpty={(d) => d.gauges.length === 0} empty="No budget breaches in this window ✓">
         {(d) => (

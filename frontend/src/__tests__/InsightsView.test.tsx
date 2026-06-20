@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import type { WorkspaceApi } from '../shell/workspaceApi';
 
 // MetricsView is heavy (fetches /api/metrics); stub it — we test the composition.
@@ -23,5 +23,27 @@ describe('InsightsView (WS3a — Metrics + Tune folded into one section)', () =>
     // the Tune panels are present (with their empty states)
     expect(await screen.findByLabelText('Budgets')).toBeInTheDocument();
     expect(screen.getByLabelText('Policy')).toBeInTheDocument();
+  });
+
+  it('exposes Analytics + Tuning & Policy tabs and toggles the panels (#184)', async () => {
+    render(<InsightsView repo="o/r" api={api()} />);
+    await screen.findByTestId('metrics');
+    const analyticsTab = screen.getByRole('tab', { name: 'Analytics' });
+    const tuningTab = screen.getByRole('tab', { name: /Tuning & Policy/ });
+    // default → Analytics active, Tuning hidden
+    expect(analyticsTab).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById('insights-panel-analytics')).not.toHaveAttribute('hidden');
+    expect(document.getElementById('insights-panel-tuning')).toHaveAttribute('hidden');
+    // switch → Tuning active, Analytics hidden
+    fireEvent.click(tuningTab);
+    expect(tuningTab).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById('insights-panel-tuning')).not.toHaveAttribute('hidden');
+    expect(document.getElementById('insights-panel-analytics')).toHaveAttribute('hidden');
+  });
+
+  it('no longer renders the stale "Tune & Investigate" heading (#184)', async () => {
+    render(<InsightsView repo="o/r" api={api()} />);
+    await screen.findByTestId('metrics');
+    expect(screen.queryByRole('heading', { name: /Tune & Investigate/ })).toBeNull();
   });
 });
