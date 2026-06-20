@@ -447,9 +447,11 @@ export function ProtectionMap() {
                 </tbody>
               </table>
               <p className="pm-legend">
-                <b className="pm-gate">● gate</b> blocks merge · <b className="pm-cond">◐ conditional</b> runs-when-touched ·
-                <b className="pm-adv"> ○ advisory</b> non-blocking · <span className="pm-absent">· absent</span> ·
-                <b className="pm-drift"> ⚠ drift</b> config ≠ observed
+                <span><b className="pm-gate">● gate</b> blocks merge</span>
+                <span><b className="pm-cond">◐ conditional</b> runs-when-touched</span>
+                <span><b className="pm-adv">○ advisory</b> non-blocking</span>
+                <span><span className="pm-absent">· absent</span></span>
+                <span><b className="pm-drift">⚠ drift</b> config ≠ observed</span>
               </p>
             </div>
           </div>

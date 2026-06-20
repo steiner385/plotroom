@@ -120,7 +120,7 @@ export function DiagnoseView({ state, focusedRepo, api }: DiagnoseViewProps) {
               ? `Blocked by ${blocker.check.name} (${blocker.why === 'failed' ? (blocker.flaky ? 'failed — likely FLAKE' : 'failed') : 'still running'})`
               : 'Nothing blocking — all checks green.'}
           </p>
-          <CheckGantt checks={selected.checks} stage={selected.stage.stage} />
+          <CheckGantt checks={selected.checks} stage={selected.stage.stage} showLegend />
         </section>
       )}
     </div>

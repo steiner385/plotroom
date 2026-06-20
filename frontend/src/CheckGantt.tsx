@@ -170,25 +170,37 @@ export function groupByWorkflow(checks: CheckView[]): WorkflowGroup[] {
  *  kept within the leading (rollup) workflow and foreign workflows render after
  *  the rollup workflow's rows. One shared time scale spans the whole panel.
  *  A single-workflow panel renders exactly as before (no headers). */
-export function CheckGantt({ checks, stage }: {
-  checks: CheckView[]; stage: string;
+export function CheckGantt({ checks, stage, showLegend = false }: {
+  checks: CheckView[]; stage: string; showLegend?: boolean;
 }) {
   const scale = useMemo(() => ganttScale(checks), [checks]);
   const groups = useMemo(() => groupByWorkflow(checks), [checks]);
   const grouped = groups.length > 1;
   return (
-    <ul className="checks gantt" aria-label={`checks for ${stage} stage`}>
-      {groups.map((g, gi) => {
-        const required = g.checks.filter((c) => c.isRequired);
-        const advisory = g.checks.filter((c) => !c.isRequired);
-        return (
-          <Fragment key={`wf-${gi}`}>
-            {grouped && <li className="divider g-workflow">{g.name ?? 'other checks'}</li>}
-            {required.map((c, i) => <GanttRow key={`${c.name}-${i}`} c={c} scale={scale} />)}
-            {advisory.map((c, i) => <GanttRow key={`${c.name}-${i}`} c={c} scale={scale} />)}
-          </Fragment>
-        );
-      })}
-    </ul>
+    <>
+      <ul className="checks gantt" aria-label={`checks for ${stage} stage`}>
+        {groups.map((g, gi) => {
+          const required = g.checks.filter((c) => c.isRequired);
+          const advisory = g.checks.filter((c) => !c.isRequired);
+          return (
+            <Fragment key={`wf-${gi}`}>
+              {grouped && <li className="divider g-workflow">{g.name ?? 'other checks'}</li>}
+              {required.map((c, i) => <GanttRow key={`${c.name}-${i}`} c={c} scale={scale} />)}
+              {advisory.map((c, i) => <GanttRow key={`${c.name}-${i}`} c={c} scale={scale} />)}
+            </Fragment>
+          );
+        })}
+      </ul>
+      {/* #185: persistent inline key for the bar vocabulary. Swatches reuse the
+          .g-bar fills, so the #172 failed/overdue textures show automatically. */}
+      {showLegend && (
+        <p className="gantt-inline-legend" aria-hidden="true">
+          <span className="g-done"><span className="g-bar gil-bar"><i /></span> done</span>
+          <span className="g-running"><span className="g-bar gil-bar"><i /></span> running</span>
+          <span className="g-overdue"><span className="g-bar gil-bar"><i /></span> overdue</span>
+          <span className="g-failed"><span className="g-bar gil-bar"><i /></span> failed</span>
+        </p>
+      )}
+    </>
   );
 }

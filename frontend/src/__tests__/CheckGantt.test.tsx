@@ -565,3 +565,18 @@ describe('CheckGantt — a11y: accessible list label + progressbar bars (#173)',
     expect(label.toLowerCase()).toMatch(/done|success|complete/);
   });
 });
+
+describe('CheckGantt — persistent inline legend (#185)', () => {
+  it('renders the bar-vocabulary key only when showLegend is set', () => {
+    const checks = [check({})];
+    const { container, rerender } = render(<CheckGantt stage="ci" checks={checks} />);
+    expect(container.querySelector('.gantt-inline-legend')).toBeNull(); // default off (PrRow per-stage)
+    rerender(<CheckGantt stage="ci" checks={checks} showLegend />);
+    const legend = container.querySelector('.gantt-inline-legend')!;
+    expect(legend).not.toBeNull();
+    expect(legend.textContent).toContain('done');
+    expect(legend.textContent).toContain('failed');
+    // swatches reuse the .g-bar structure → the #172 failed/overdue textures apply
+    expect(legend.querySelectorAll('.gil-bar.g-bar').length).toBe(4);
+  });
+});
