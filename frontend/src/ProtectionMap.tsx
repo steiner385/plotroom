@@ -1,13 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { useApiBase } from './embed/ApiBaseContext';
 import { legalFromTiers, legalToTargets } from './protectionSimulate';
 import { useFocusTrap } from './hooks/useFocusTrap';
+import { useProtectionData } from './hooks/useProtectionData';
 import { ProtectionDrawer } from './ProtectionDrawer';
 // Pure model logic (types, goal vocabulary, cell/format helpers) lives in
 // protectionModel.ts (#183) so this file holds only the React component.
 import {
-  type Cell, type CellState, type DerivedModel, type Goal, type Overlay,
-  type Finding, type MetricsSlice,
+  type Cell, type CellState, type Goal, type Overlay, type Finding,
   STATE_RANK, ABSENT_META, STATE_GLYPH, GOALS, GOAL_ICON, GOAL_LABEL, OVERLAYS,
   buildFindings, cellKey, groupOf, leafOf, displayName, fmtMin, cellHeat, cellTitle,
 } from './protectionModel';
@@ -18,11 +17,9 @@ export type { CheckMeta, DerivedModel, Finding } from './protectionModel';
 // ---- component --------------------------------------------------------------
 
 export function ProtectionMap() {
-  const { apiUrl } = useApiBase();
-  const [repos, setRepos] = useState<string[]>([]);
-  const [repo, setRepo] = useState<string | null>(null);
-  const [model, setModel] = useState<DerivedModel | null>(null);
-  const [metrics, setMetrics] = useState<MetricsSlice | null>(null);
+  // Server data (repo list, selected model, deferred metrics) lives in a hook (#183);
+  // this component owns only view state.
+  const { repos, repo, setRepo, model, metrics, loading, error } = useProtectionData();
   const [overlay, setOverlay] = useState<Overlay>('none');
   const [sim, setSim] = useState<{ check: string; from: string; to: string } | null>(null);
   const [drilled, setDrilled] = useState<{ check: string; goal: Goal; detail: string } | null>(null);
@@ -30,43 +27,11 @@ export function ProtectionMap() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [expandedGoals, setExpandedGoals] = useState<Set<Goal>>(new Set());
   const [showAbsent, setShowAbsent] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // ---- a11y: drawer focus management (mirrors LegendPanel/SettingsPanel pattern) ----
   const drawerRef = useRef<HTMLElement>(null);
   /** Ref to the button that last opened the drawer — focus returns here on close. */
   const drawerTriggerRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(apiUrl('/repos'))
-      .then((r) => r.json() as Promise<{ repos: { repo: string; excluded: boolean }[] }>)
-      .then((data) => {
-        if (cancelled) return;
-        const list = Array.isArray(data) ? data : data?.repos ?? [];
-        const names = list.filter((x) => !x.excluded).map((x) => x.repo);
-        setRepos(names);
-        setRepo((prev) => prev ?? names.find((n) => n.startsWith('cairnea/')) ?? names[0] ?? null);
-      })
-      .catch(() => { if (!cancelled) setRepos([]); });
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    if (!repo) return;
-    let cancelled = false;
-    setLoading(true); setError(null);
-    fetch(apiUrl(`/protection-map?repo=${encodeURIComponent(repo)}`))
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
-        return r.json() as Promise<DerivedModel>;
-      })
-      .then((m) => { if (!cancelled) setModel(m); })
-      .catch((e) => { if (!cancelled) { setModel(null); setError(e instanceof Error ? e.message : String(e)); } })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [repo]);
 
   // default-collapse groups with no gates and no drift (pure advisory/absent noise);
   // re-seeded whenever the model changes (repo switch). User toggles adjust from there.
@@ -77,18 +42,6 @@ export function ProtectionMap() {
     const clean = [...new Set(model.checks.map(groupOf))].filter((g) => !problem.has(g));
     setCollapsed(new Set(clean));
   }, [model]);
-
-  // DEFERRED until the model has loaded: /api/metrics is a heavy synchronous SQLite
-  // pass that blocks the Node event loop and would starve /api/protection-map.
-  useEffect(() => {
-    if (!model || metrics) return;
-    let cancelled = false;
-    fetch(apiUrl('/metrics?window=30d'))
-      .then((r) => (r.ok ? r.json() : null))
-      .then((m) => { if (!cancelled) setMetrics(m); })
-      .catch(() => { if (!cancelled) setMetrics(null); });
-    return () => { cancelled = true; };
-  }, [model, metrics]);
 
   // Esc to close the drawer + focus management + focus trap (via shared hook).
   useFocusTrap(drawerRef, !!drilled, {
