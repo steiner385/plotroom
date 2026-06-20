@@ -14,6 +14,14 @@ export function WorkspaceShell({ header, children }: WorkspaceShellProps) {
   const { active, go, isPending } = useSectionRoute();
   return (
     <div className="workspace-shell">
+      {/* Skip-to-content (WCAG 2.4.1): first focusable element, visually hidden until
+          focused. Focuses <main> programmatically rather than relying on the anchor's
+          default jump, since the app uses hash routing and `#workspace-main` isn't a
+          section — letting the hash change would trip the router. */}
+      <a className="skip-link" href="#workspace-main"
+        onClick={(e) => { e.preventDefault(); document.getElementById('workspace-main')?.focus(); }}>
+        Skip to content
+      </a>
       <header className="workspace-header" role="banner">{header}</header>
       <div className="workspace-body">
         <nav className="workspace-rail" role="navigation" aria-label="Workspace sections">
@@ -33,7 +41,7 @@ export function WorkspaceShell({ header, children }: WorkspaceShellProps) {
             ))}
           </ul>
         </nav>
-        <main className="workspace-content" role="main" aria-busy={isPending || undefined}>{children}</main>
+        <main id="workspace-main" tabIndex={-1} className="workspace-content" role="main" aria-busy={isPending || undefined}>{children}</main>
       </div>
     </div>
   );

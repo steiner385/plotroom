@@ -82,6 +82,26 @@ describe('WorkspaceShell', () => {
     expect(screen.getByText('Insights')).toHaveAttribute('aria-current', 'page');
   });
 
+  it('exposes a skip-to-content link that targets and focuses main (WCAG 2.4.1)', () => {
+    render(
+      <RouterProvider mode="hash">
+        <WorkspaceShell header={<div>SPINE</div>}><p>body</p></WorkspaceShell>
+      </RouterProvider>,
+    );
+    const skip = screen.getByRole('link', { name: /skip to content/i });
+    // it must be the FIRST focusable element so a keyboard user hits it before the header
+    const focusables = Array.from(document.querySelectorAll('a[href],button,[tabindex]'));
+    expect(focusables[0]).toBe(skip);
+    const main = screen.getByRole('main');
+    expect(skip).toHaveAttribute('href', `#${main.id}`);
+    expect(main.id).toBeTruthy();
+    expect(main).toHaveAttribute('tabindex', '-1');
+    // activating it moves focus into main (programmatic, so hash routing isn't disturbed)
+    fireEvent.click(skip);
+    expect(main).toHaveFocus();
+    expect(location.hash).not.toContain(main.id);
+  });
+
   it('main element does NOT have aria-live (no live-region flood on SSE updates)', () => {
     render(
       <RouterProvider mode="hash">
