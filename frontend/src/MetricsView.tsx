@@ -465,7 +465,7 @@ export function MetricsView({ now, focusCostNonce }: {
     <div className="metrics-controls">
       <div className="metrics-group" role="group" aria-label="Window">
         {WINDOWS.map((w) => (
-          <button key={w} type="button" className="metrics-window-btn"
+          <button key={w} type="button" className="btn-ghost metrics-window-btn"
             title={defTitle(CONTROL_DEFINITIONS.window)}
             aria-pressed={window === w} onClick={() => setWindow(w)}>
             {w}
@@ -474,20 +474,20 @@ export function MetricsView({ now, focusCostNonce }: {
       </div>
       <span className="metrics-sep" aria-hidden="true" />
       <div className="metrics-group" role="group" aria-label="Bucket size">
-        <button type="button" className="metrics-window-btn" disabled={hourDisabled}
+        <button type="button" className="btn-ghost metrics-window-btn" disabled={hourDisabled}
           title={hourDisabled
             ? 'hourly disabled above 7d — long windows clamp to daily buckets'
             : defTitle(CONTROL_DEFINITIONS.bucketHour)}
           aria-pressed={bucket === 'hour'} onClick={() => setBucketPref('hour')}>
           hourly
         </button>
-        <button type="button" className="metrics-window-btn"
+        <button type="button" className="btn-ghost metrics-window-btn"
           title={defTitle(CONTROL_DEFINITIONS.bucketDay)}
           aria-pressed={bucket === 'day'} onClick={() => setBucketPref('day')}>
           daily
         </button>
       </div>
-      <button type="button" className="metrics-refresh" aria-label="Refresh metrics"
+      <button type="button" className="btn-ghost metrics-refresh" aria-label="Refresh metrics"
         title={defTitle(CONTROL_DEFINITIONS.refresh)}
         onClick={() => setRefreshTick((t) => t + 1)}>
         ↻

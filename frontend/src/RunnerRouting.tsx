@@ -205,7 +205,7 @@ export function RunnerRouting() {
               <div className="runner-override-group" role="group" aria-label={`${row.key} runner override`}>
                 <button
                   type="button"
-                  className="runner-override"
+                  className="btn-ghost runner-override"
                   data-testid={`override-${row.key}-spot`}
                   aria-pressed={state === 'spot'}
                   aria-label={`${row.key}: force spot`}
@@ -215,7 +215,7 @@ export function RunnerRouting() {
                 </button>
                 <button
                   type="button"
-                  className="runner-override"
+                  className="btn-ghost runner-override"
                   data-testid={`override-${row.key}-ondemand`}
                   aria-pressed={state === 'ondemand'}
                   aria-label={`${row.key}: force on-demand`}
@@ -225,7 +225,7 @@ export function RunnerRouting() {
                 </button>
                 <button
                   type="button"
-                  className="runner-override"
+                  className="btn-ghost runner-override"
                   data-testid={`override-${row.key}-auto`}
                   aria-pressed={state === 'auto'}
                   aria-label={`${row.key}: clear to auto`}
