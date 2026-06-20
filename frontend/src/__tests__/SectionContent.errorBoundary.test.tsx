@@ -41,7 +41,7 @@ describe('SectionContent error isolation', () => {
     // The boundary renders an [role="alert"] card with the error message
     const alert = screen.getByRole('alert');
     expect(alert).toHaveTextContent(/PipelineView exploded/);
-    expect(alert).toHaveTextContent(/something broke rendering this tab/);
+    expect(alert).toHaveTextContent(/something went wrong in this section/i);
   });
 
   it('recovers when switching to a healthy section — key={active} resets the boundary', () => {
@@ -75,5 +75,14 @@ describe('SectionContent error isolation', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     // And healthy content must be present.
     expect(screen.getByRole('group', { name: /overall ci health/i })).toBeInTheDocument();
+  });
+
+  it('shows a feed-level stale banner only when stale (#187)', () => {
+    const props = { active: 'health' as const, state, connected: true, api,
+      focused: null, onFocusRepo: () => {} };
+    const { rerender } = render(wrap(<SectionContent {...props} stale={false} />));
+    expect(screen.queryByText(/data may be out of date/i)).toBeNull();
+    rerender(wrap(<SectionContent {...props} stale />));
+    expect(screen.getByText(/data may be out of date/i)).toBeInTheDocument();
   });
 });

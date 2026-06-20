@@ -488,6 +488,23 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
   color: var(--fail); font-size: 13px; padding: 12px 14px; margin: 12px 0;
 }
 
+/* #187: shared empty / error / stale / loading placeholder — one layout so
+   every section's non-data states read the same. */
+.section-state { display: flex; align-items: center; gap: 10px; padding: 16px;
+  color: var(--muted); font-size: 13px; }
+.section-state__icon { font-size: 18px; line-height: 1; flex: none; }
+.section-state__text { min-width: 0; }
+.section-state__headline { margin: 0; color: var(--text); font-weight: 600; }
+.section-state__sub { margin: 2px 0 0; }
+.section-state__action { margin-left: auto; flex: none; align-self: center;
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.section-state--stale { background: color-mix(in srgb, var(--amber) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent); border-radius: 6px; margin: 0 0 12px; }
+.section-state--stale .section-state__icon { color: var(--amber); }
+.section-state--error { background: var(--surface); border: 1px solid var(--fail);
+  border-radius: 8px; margin: 12px 0; }
+.section-state--error .section-state__icon { color: var(--fail); }
+
 .metric-panel {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 12px 14px; margin-bottom: 12px;

@@ -6,6 +6,7 @@ import { DiagnoseView } from './sections/diagnose/DiagnoseView';
 import { ModelEditView } from './sections/modelEdit/ModelEditView';
 import { InsightsView } from './sections/insights/InsightsView';
 import { ErrorBoundary } from './ErrorBoundary';
+import { SectionState } from './shell/SectionState';
 import { useSectionRoute } from './embed/RouterContext';
 import { SECTIONS, laneToSection, type SectionId } from './shell/sections';
 import type { WorkspaceApi } from './shell/workspaceApi';
@@ -15,13 +16,15 @@ export interface SectionContentProps {
   active: SectionId;
   state: DashboardState | null;
   connected: boolean;
+  /** SSE feed connected but no fresh frame recently → show a stale banner (#187). */
+  stale?: boolean;
   api: WorkspaceApi;
   focused: string | null;
   onFocusRepo: (repo: string) => void;
 }
 
 /** Render the active section view. No landmark (the host/standalone shell owns <main>). */
-export function SectionContent({ active, state, connected, api, focused, onFocusRepo }: SectionContentProps) {
+export function SectionContent({ active, state, connected, stale, api, focused, onFocusRepo }: SectionContentProps) {
   const { go } = useSectionRoute();
   // Stable callback — same `go` reference → same onJumpToLane identity → HealthView
   // and HealthHeader don't re-render just because SectionContent re-renders.
@@ -32,7 +35,8 @@ export function SectionContent({ active, state, connected, api, focused, onFocus
 
   let body: React.ReactNode;
   if (!state) {
-    body = <div className="workspace-loading" role="status">Connecting to the live feed…</div>;
+    body = <SectionState kind="loading" headline="Connecting to the live feed"
+      sub="This usually takes a few seconds." />;
   } else {
     let section: React.ReactNode;
     switch (active) {
@@ -58,6 +62,12 @@ export function SectionContent({ active, state, connected, api, focused, onFocus
   return (
     <>
       <SectionAnnouncer active={active} />
+      {/* #187: feed-level stale banner — Pipeline/Diagnose had no stale signal at
+          all. Shown above whichever section is active once data has loaded. */}
+      {stale && state && (
+        <SectionState kind="stale" headline="Data may be out of date"
+          sub="No fresh updates recently — the feed is reconnecting; showing the last known state." />
+      )}
       {body}
     </>
   );

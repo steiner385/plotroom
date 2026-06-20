@@ -22,8 +22,9 @@ describe('ErrorBoundary', () => {
   it('renders the inline fallback card with the error message when a child throws', () => {
     render(<ErrorBoundary><Bomb /></ErrorBoundary>);
     const card = screen.getByRole('alert');
-    expect(card).toHaveTextContent(
-      'something broke rendering this tab — kaboom from child — try refresh');
+    expect(card).toHaveTextContent(/something went wrong in this section/i);
+    expect(card).toHaveTextContent(/kaboom from child/);
+    expect(screen.getByRole('button', { name: /refresh page/i })).toBeInTheDocument();
   });
 
   it('preserves console.error reporting of the caught error', () => {

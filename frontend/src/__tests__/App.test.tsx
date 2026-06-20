@@ -319,8 +319,9 @@ describe('App tab bar', () => {
       metricsBomb.throws = true;
       render(<App />);
       fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));
-      expect(screen.getByRole('alert')).toHaveTextContent(
-        'something broke rendering this tab — metrics exploded — try refresh');
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent(/something went wrong in this section/i);
+      expect(alert).toHaveTextContent(/metrics exploded/);
     });
 
     it('the Pipeline tab still works after the Metrics tab crashed', () => {

@@ -32,7 +32,7 @@ function PrDashboardInner(
   return (
     <>
       <StatusStrip repos={repos} focused={focused} onFocus={focus} connected={connected} stale={stale} api={api} />
-      <SectionContent active={active} state={state} connected={connected} api={api} focused={focused} onFocusRepo={focus} />
+      <SectionContent active={active} state={state} connected={connected} stale={stale} api={api} focused={focused} onFocusRepo={focus} />
     </>
   );
 }

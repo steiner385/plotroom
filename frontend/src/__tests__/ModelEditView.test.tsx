@@ -30,8 +30,9 @@ describe('ModelEditView (WS3b — Model/Optimize/Build as one section, three mod
     expect(screen.getByRole('tab', { name: /edit/i })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('shows the select-a-pipeline hint when no repo is focused', () => {
+  it('shows the no-pipeline-selected empty state when no repo is focused', () => {
     render(<ModelEditView repo={null} api={api} />);
-    expect(screen.getByText(/select a pipeline/i)).toBeInTheDocument();
+    expect(screen.getByText(/no pipeline selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/choose a repository/i)).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { SectionState } from './shell/SectionState';
 
 interface Props {
   children: ReactNode;
@@ -30,9 +31,12 @@ export class ErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     if (this.state.error) {
       return (
-        <div className="tab-error" role="alert">
-          something broke rendering this tab — {this.state.error.message} — try refresh
-        </div>
+        <SectionState
+          kind="error"
+          headline="Something went wrong in this section"
+          sub={`A rendering error occurred (${this.state.error.message}). The rest of the dashboard is still working.`}
+          action={{ label: 'Refresh page', onClick: () => location.reload() }}
+        />
       );
     }
     return this.props.children;

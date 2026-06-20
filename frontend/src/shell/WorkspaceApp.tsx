@@ -91,6 +91,7 @@ export function WorkspaceApp() {
           active={active}
           state={state}
           connected={connected}
+          stale={stale}
           api={api}
           focused={focused}
           onFocusRepo={focus}

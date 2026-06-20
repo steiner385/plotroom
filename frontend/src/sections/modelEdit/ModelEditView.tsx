@@ -5,6 +5,7 @@
 // editor. A mode tablist composes the three existing, already-tested surfaces.
 import { useState } from 'react';
 import type { WorkspaceApi } from '../../shell/workspaceApi';
+import { SectionState } from '../../shell/SectionState';
 import { ModelView } from '../model/ModelView';
 import { OptimizeView } from '../optimize/OptimizeView';
 import { BuildView } from '../build/BuildView';
@@ -19,7 +20,10 @@ const MODES: { id: Mode; label: string; blurb: string }[] = [
 export function ModelEditView({ repo, api }: { repo: string | null; api: WorkspaceApi }) {
   const [mode, setMode] = useState<Mode>('inspect');
 
-  if (!repo) return <div className="model-edit-view empty">Select a pipeline to inspect and shape its model.</div>;
+  if (!repo) return (
+    <SectionState kind="empty" headline="No pipeline selected"
+      sub="Choose a repository from the pipeline switcher to inspect and shape its model." />
+  );
 
   return (
     <div className="model-edit-view">
