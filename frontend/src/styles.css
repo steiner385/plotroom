@@ -30,6 +30,16 @@
     /* same AA-vs-white fills as light — white on #5c9bff was only 2.77:1 */
     --accent-strong: #2563eb; --done-strong: #15803d; --amber-strong: #9a5d00; }
 }
+/* Shared "ghost pill" button (#182): the drift-prone base colors + hover are
+   unified here (previously copied across .metrics-window-btn / .metrics-refresh /
+   .runner-override). Per-button classes keep their own sizing (radius/padding/
+   font) + pressed/active + disabled states. Defined before its consumers so the
+   :hover here is overridden by their later [aria-pressed] rules, as before. */
+.btn-ghost {
+  cursor: pointer; border: 1px solid var(--border);
+  background: var(--surface); color: var(--muted);
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--text); }
 /* Wider cap for the glance-from-across-the-room context this tool targets — the
    metro tracks, queue trains, and metric charts use the extra width (UX-M2). */
 .app { max-width: min(1400px, 96vw); margin: 0 auto; padding: 16px 20px 60px; }
@@ -441,8 +451,7 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .metrics-group { display: flex; gap: 4px; }
 .metrics-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 .metrics-window-btn {
-  background: var(--surface); color: var(--muted); border: 1px solid var(--border);
-  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  border-radius: 6px; padding: 4px 10px; font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .metrics-window-btn[aria-pressed='true'] {
@@ -451,10 +460,8 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .metrics-window-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .metrics-window-btn:disabled:hover { border-color: var(--border); color: var(--muted); }
 .metrics-refresh {
-  background: var(--surface); color: var(--muted); border: 1px solid var(--border);
-  border-radius: 6px; padding: 4px 9px; font-size: 13px; cursor: pointer; line-height: 1;
+  border-radius: 6px; padding: 4px 9px; font-size: 13px; line-height: 1;
 }
-.metrics-refresh:hover, .metrics-window-btn:hover { border-color: var(--accent); color: var(--text); }
 .metrics-error { color: var(--fail); font-size: 13px; }
 
 /* per-tab error boundary fallback (a tab crash must not white-screen the SPA) */
@@ -890,10 +897,8 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 /* Three-state override button group */
 .runner-override-group { display: flex; gap: 3px; }
 .runner-override {
-  font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 5px; cursor: pointer;
-  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 5px;
 }
-.runner-override:hover { border-color: var(--accent); color: var(--text); }
 .runner-override[aria-pressed='true'] {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-color: var(--accent); color: var(--accent); font-weight: 700;
