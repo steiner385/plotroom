@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { DashboardState, LaneStatus } from './types';
 import { buildLaneHealth } from './spine/laneHealth';
-import { rollup, LANE_GLYPH, LANE_WORD } from './spine/laneStatus';
+import { rollup, attentionPhrase, LANE_GLYPH, LANE_WORD } from './spine/laneStatus';
 
 /** Global at-a-glance CI health band shown above the tabs. Reads the SAME lane
  *  derivations the Delivery spine renders in detail (via buildLaneHealth), so
@@ -24,15 +24,17 @@ export function HealthHeader({ state, onJumpToLane }: {
         type="button"
         className={`health-rollup r-${roll.state}`}
         data-testid="health-rollup"
+        /* The rollup routes to the richest detail for the first lane needing
+           attention — the legacy app's Delivery tab, or the matching workspace
+           section. The hint stays destination-neutral so it's accurate in both. */
         aria-label={allGreen
-          ? 'All lanes healthy — open the Delivery tab'
-          : `${roll.count} lane${roll.count === 1 ? '' : 's'} need attention — open the Delivery tab`}
+          ? 'All lanes healthy'
+          : `${attentionPhrase(roll.count)} — jump to the first`}
         onClick={() => onJumpToLane(roll.firstAttentionId, firstAttentionStatus)}
       >
         <span className={`spine-glyph s-${roll.state}`} aria-hidden="true">{LANE_GLYPH[roll.state]}</span>
         <span className="health-rollup-label">
-          {allGreen ? 'All systems green'
-            : `${roll.count} lane${roll.count === 1 ? '' : 's'} need attention`}
+          {allGreen ? 'All systems green' : attentionPhrase(roll.count)}
         </span>
       </button>
       <ul className="health-lanes" role="list">

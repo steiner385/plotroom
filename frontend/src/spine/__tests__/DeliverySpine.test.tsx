@@ -17,7 +17,7 @@ describe('DeliverySpine', () => {
     expect(screen.getByTestId('spine-lane-deploy')).toBeInTheDocument();
     expect(screen.getByTestId('spine-lane-scheduled')).toBeInTheDocument();
     expect(screen.getByTestId('spine-lane-failures')).toBeInTheDocument();
-    expect(screen.getByTestId('spine-rollup')).toHaveTextContent(/need attention/i);
+    expect(screen.getByTestId('spine-rollup')).toHaveTextContent(/needs? attention/i);
   });
   it('skeleton state when state is null (no crash, lanes present)', () => {
     render(<DeliverySpine state={null} kiosk={false} />);
