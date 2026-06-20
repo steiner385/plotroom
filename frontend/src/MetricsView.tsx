@@ -1,9 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApiBase } from './embed/ApiBaseContext';
 import { scrollBehavior } from './motion';
 import type { MetricsBucket, MetricsPayload, MetricsWindow, DemotionCandidate, PromotionCandidate } from './types';
 import { RunnerRouting } from './RunnerRouting';
-import { Skeleton } from './shell/Skeleton';
 import { LEAD_TIME_SEGMENTS } from './leadtime';
 import {
   AreaSeries, BandSeries, MultiLine, ScatterPlot, SignedLine,
@@ -11,7 +10,7 @@ import {
 } from './charts';
 import { formatDur, formatSince } from './format';
 import { NeedsGraph } from './NeedsGraph';
-import { CONTROL_DEFINITIONS, DEFS, defTitle, type Definition } from './definitions';
+import { CONTROL_DEFINITIONS, DEFS, defTitle } from './definitions';
 
 // Pure model logic (axis math, chart-alignment, formatters, section + rec-link
 // vocabulary) lives in metricsModel.ts (#183) so this file holds only React.
@@ -23,67 +22,9 @@ import {
   calibrationHeadline, METRICS_SECTIONS, SECTION_STORAGE_KEY,
   resolveInitialSection, resolveRecLink,
 } from './metricsModel';
-
-const ActiveSectionContext = createContext<MetricsSection>('tuning');
-/** Tracks which sections have ever been activated (used for lazy rendering). */
-const EverActivatedContext = createContext<ReadonlySet<MetricsSection>>(new Set(['tuning']));
-
-function Panel({ id, title, empty, emptyText = 'no data yet', section, children }: {
-  id?: string; title: string; empty: boolean; emptyText?: string;
-  /** Which metrics sub-tab this panel belongs to; hidden unless that tab is active. */
-  section: MetricsSection; children: ReactNode;
-}) {
-  const active = useContext(ActiveSectionContext);
-  const everActivated = useContext(EverActivatedContext);
-  // Hide inactive sections with a CSS class (display:none) rather than the
-  // `hidden` attribute — display:none hides from screen readers too (correct for
-  // an inactive tab), and it keeps the panels in the DOM for one-payload data.
-  //
-  // Lazy rendering (issue #179): a panel that has NEVER been the active section
-  // skips rendering its heavy chart content — only the <section> shell + heading
-  // are emitted. Once activated, the panel stays mounted even when inactive so
-  // the display:none + a11y behaviour is unchanged.
-  const contentReady = section === active || everActivated.has(section);
-  return (
-    <section className={`metric-panel${section === active ? '' : ' metric-panel--inactive'}`}
-      id={id} data-section={section}>
-      <h2 tabIndex={id ? -1 : undefined}>{title}</h2>
-      {empty
-        ? <p className="metric-empty">{emptyText}</p>
-        /* #188: a never-activated panel reserves height with a skeleton instead
-           of collapsing to 0, so first activation doesn't jump the layout. */
-        : (contentReady ? children : <Skeleton height={200} />)}
-    </section>
-  );
-}
-
-function MetricStat({ label, value, delta, def }: {
-  label: string; value: string; delta?: string | null;
-  /** What this figure means / how it's computed (issue #66) — every headline
-   *  stat must carry one; rendered as the mouse tooltip AND, for screen-reader
-   *  users who can't reach a title=, an aria-describedby hidden description (UX-M1). */
-  def: Definition;
-}) {
-  const descId = useId();
-  return (
-    <div className="metric-stat" title={defTitle(def)} aria-describedby={descId}>
-      <b>{value}</b>
-      <span>{label}</span>
-      {delta != null && <em className="metric-delta">{delta}</em>}
-      <span id={descId} className="sr-only">{defTitle(def)}</span>
-    </div>
-  );
-}
-
-/** Labeled full-width chart block inside a repo sub-section. */
-function ChartBlock({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="metric-chart-block">
-      <span className="metric-label">{label}</span>
-      {children}
-    </div>
-  );
-}
+import {
+  ActiveSectionContext, EverActivatedContext, Panel, MetricStat, ChartBlock,
+} from './metricsPanels';
 
 const TREND_SERIES = [
   { key: 'open', color: 'var(--accent)' },
