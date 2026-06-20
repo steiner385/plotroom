@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { DashboardState, Lane } from '../types';
 import { SpineLane } from './SpineLane';
-import { rollup, attentionLanes } from './laneStatus';
+import { rollup, attentionLanes, attentionPhrase } from './laneStatus';
 import { buildLaneHealth } from './laneHealth';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { scrollBehavior } from '../motion';
@@ -64,7 +64,7 @@ export function DeliverySpine({ state, kiosk, focus, hideRollup = false }: {
   const liveSummary = useMemo(() => {
     if (roll.state === 'green') return 'All delivery lanes healthy';
     const names = attentionLanes(lanes).map((l) => l.title).join(', ');
-    return `${roll.count} ${roll.count === 1 ? 'lane needs' : 'lanes need'} attention: ${names}`;
+    return `${attentionPhrase(roll.count)}: ${names}`;
   }, [roll, lanes]);
 
   // Auto-expand + reveal a lane requested from the header (not in kiosk, where
@@ -108,9 +108,9 @@ export function DeliverySpine({ state, kiosk, focus, hideRollup = false }: {
       </span>
       {!kiosk && !hideRollup && (
         <button type="button" data-testid="spine-rollup" className={`spine-rollup r-${roll.state}`}
-          aria-label={roll.state === 'green' ? 'All lanes healthy' : `${roll.count} lanes need attention — go to first`}
+          aria-label={roll.state === 'green' ? 'All lanes healthy' : `${attentionPhrase(roll.count)} — go to first`}
           onClick={jumpToRed}>
-          {roll.state === 'green' ? '● all green' : `${roll.count} lanes need attention`}
+          {roll.state === 'green' ? '● all green' : attentionPhrase(roll.count)}
         </button>
       )}
       <ul className="spine-rail" role="list">

@@ -20,6 +20,14 @@ export function attentionLanes(lanes: LaneView[]): LaneView[] {
     && (isRed(l) || l.status === 'blind' || l.status === 'amber'));
 }
 
+/** "N lane needs attention" / "N lanes need attention" with correct subject-verb
+ *  agreement, in ONE place so the health band, the spine rollup pill, and the
+ *  live-region announcement can't drift (they did: the header rendered "1 lane
+ *  need attention" while the spine's live region said "1 lane needs attention"). */
+export function attentionPhrase(count: number): string {
+  return `${count} ${count === 1 ? 'lane needs' : 'lanes need'} attention`;
+}
+
 export function rollup(lanes: LaneView[]): { state: RollupState; count: number; firstAttentionId: string | null } {
   const attention = attentionLanes(lanes);
   const rank = (l: LaneView): number => (isRed(l) ? 3 : l.status === 'blind' ? 2 : l.status === 'amber' ? 1 : 0);

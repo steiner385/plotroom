@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LANE_GLYPH, LANE_WORD, rollup } from '../laneStatus';
+import { LANE_GLYPH, LANE_WORD, rollup, attentionPhrase } from '../laneStatus';
 import type { LaneView } from '../../types';
 
 const lane = (p: Partial<LaneView>): LaneView => ({
@@ -29,5 +29,15 @@ describe('rollup (worst-wins: red > blind > amber > green/idle)', () => {
   });
   it('all green/idle → green', () => {
     expect(rollup([lane({ status: 'green' }), lane({ id: 'b', status: 'idle' })]).state).toBe('green');
+  });
+});
+
+describe('attentionPhrase — subject-verb agreement', () => {
+  it('uses the singular verb for one lane', () => {
+    expect(attentionPhrase(1)).toBe('1 lane needs attention');
+  });
+  it('uses the plural verb for zero or many lanes', () => {
+    expect(attentionPhrase(0)).toBe('0 lanes need attention');
+    expect(attentionPhrase(3)).toBe('3 lanes need attention');
   });
 });

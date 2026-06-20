@@ -31,7 +31,7 @@ describe('HealthHeader', () => {
 
   it('rolls up to "need attention" when a wired lane is red', () => {
     render(<HealthHeader state={redState()} onJumpToLane={vi.fn()} />);
-    expect(screen.getByTestId('health-rollup')).toHaveTextContent(/need attention/i);
+    expect(screen.getByTestId('health-rollup')).toHaveTextContent(/needs? attention/i);
     expect(screen.getByTestId('health-rollup')).toHaveClass('r-red');
   });
 
