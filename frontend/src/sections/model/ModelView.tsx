@@ -18,6 +18,16 @@ function failRate(o: NonNullable<CellLike['observed']>): number {
   return o.runs > 0 ? (o.realFailures / o.runs) * 100 : 0;
 }
 
+/** Clean + collapse a list of check names for an inline prose line: strip raw
+ *  templates and fold a sharded fan-out (test: unit (1/8)…(8/8)) into one
+ *  "base (×N)" entry, so the ruleset-mismatch sentence doesn't enumerate eight
+ *  near-identical shards. */
+function collapseNames(names: string[]): string {
+  return groupShards(names.map(stripCheckTemplate))
+    .map((r) => (r.kind === 'single' ? r.check : `${r.base} (×${r.members.length})`))
+    .join(', ');
+}
+
 export function requiredGates(model: DerivedModelLike): string[] {
   return model.checkMeta.filter((m) => m.isRequiredMergeGate).map((m) => m.check);
 }
@@ -163,9 +173,9 @@ export function ModelView({ repo, api }: ModelViewProps) {
       {/* Details below the matrix — ruleset specifics + security (roadmap 2.4) */}
       {ruleset && ruleset.readable && !ruleset.inSync && (
         <p className="model-ruleset-detail mismatch">
-          ⚠ Ruleset mismatch — {ruleset.missingFromModel.length ? `the ruleset requires ${ruleset.missingFromModel.map(stripCheckTemplate).join(', ')}, not enforced by config` : ''}
+          ⚠ Ruleset mismatch — {ruleset.missingFromModel.length ? `the ruleset requires ${collapseNames(ruleset.missingFromModel)}, not enforced by config` : ''}
           {ruleset.missingFromModel.length && ruleset.extraInModel.length ? '; ' : ''}
-          {ruleset.extraInModel.length ? `config enforces ${ruleset.extraInModel.map(stripCheckTemplate).join(', ')}, not required by the ruleset` : ''}
+          {ruleset.extraInModel.length ? `config enforces ${collapseNames(ruleset.extraInModel)}, not required by the ruleset` : ''}
         </p>
       )}
       {ruleset && !ruleset.readable && (

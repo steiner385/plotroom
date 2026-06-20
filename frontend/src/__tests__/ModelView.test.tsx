@@ -89,6 +89,19 @@ describe('ModelView (US3)', () => {
     expect(await screen.findByText(/Ruleset mismatch/)).toHaveTextContent(/requires security-scan, not enforced by config/);
   });
 
+  it('collapses a sharded fan-out in the ruleset-mismatch list (×N, not eight lines)', async () => {
+    const mismatch = api({ ruleset: vi.fn(async () => ({
+      readable: true, derivedRequired: [], liveRequired: [], missingFromModel: [],
+      extraInModel: ['lint', ...Array.from({ length: 8 }, (_, i) => `static / test: unit (${i + 1}/8)`)],
+      inSync: false,
+    })) });
+    render(<ModelView repo="o/r" api={mismatch} />);
+    const line = await screen.findByText(/Ruleset mismatch/);
+    expect(line).toHaveTextContent('static / test: unit (×8)');     // the 8 shards folded into one
+    expect(line).not.toHaveTextContent('(1/8)');                    // individual shards gone
+    expect(line).toHaveTextContent('lint');                         // non-shard names untouched
+  });
+
   it('shows "grant administration:read" when the ruleset is unreadable (no false in-sync)', async () => {
     const unreadable = api({ ruleset: vi.fn(async () => ({ readable: false, derivedRequired: ['build'], liveRequired: [], missingFromModel: [], extraInModel: [], inSync: false })) });
     render(<ModelView repo="o/r" api={unreadable} />);
