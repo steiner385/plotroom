@@ -6,6 +6,13 @@ import { useFocusedRepo } from '../shell/useFocusedRepo';
 import { SectionContent } from '../SectionContent';
 import { StatusStrip } from './StatusStrip';
 import '../styles.css';
+// The workspace SECTIONS the embed renders (Model & Edit, Build, Tune, Optimize, …) are
+// styled in workspace.css — the protection matrix, the drill drawer, the heat overlays,
+// the pipeline canvas, the tune panels. Without this import they render unstyled in the
+// embed (only styles.css was bundled). The embed build scopes it to .prdash-root like the
+// rest; the shell-only rules (rail/header/bottom-nav, which the embed doesn't render) are
+// harmless dead CSS.
+import '../shell/workspace.css';
 
 export interface PrDashboardProps {
   /** Host proxy root for all data + the SSE. Default '/api'. Auth is the host's job. */
