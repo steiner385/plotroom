@@ -151,3 +151,44 @@ jobs:
     expect(new Set(names).size).toBe(3);
   });
 });
+
+describe('schedule-tier attribution: scheduled entry workflows that reach the same reusables', () => {
+  // ci.yml (pr/queue) and nightly.yml (schedule) BOTH reach _static.yml — ci.yml
+  // directly (static-checks → _static.yml), nightly via a nested reusable
+  // (full-ci → _full.yml → _static.yml). A check from _static.yml therefore runs
+  // on pr/queue AND schedule, so its Nightly tier must NOT be empty.
+  const withNightly = () => ({
+    'ci.yml': fx('ci.yml'), '_static.yml': fx('_static.yml'),
+    'nightly.yml': fx('nightly.yml'), '_full.yml': fx('_full.yml'),
+  });
+
+  it('unions the schedule event onto checks whose reusable a scheduled workflow reaches (transitively)', () => {
+    const g = deriveStaticGraph(withNightly());
+    const unit = g.checks.find((c) => c.checkName === 'static-checks / test: unit (1/3)')!;
+    const kinds = unit.triggers.events.map((e) => e.kind);
+    expect(kinds).toContain('schedule');            // reached via nightly → _full → _static
+    expect(kinds).toContain('pull_request');         // ci.yml still there
+    expect(kinds).toContain('merge_group');
+  });
+
+  it('does NOT add schedule to a rollup-only check the scheduled workflow never reaches', () => {
+    const g = deriveStaticGraph(withNightly());
+    // "build: production" is a plain ci.yml job; nightly's _full.yml only reaches _static.yml
+    const build = g.checks.find((c) => c.checkName === 'build: production')!;
+    expect(build.triggers.events.map((e) => e.kind)).not.toContain('schedule');
+  });
+
+  it('the assembled Nightly cell is advisory (NOT a gate) for a scheduled required check', () => {
+    const g = deriveStaticGraph(withNightly());
+    const model = assembleDerivedModel(g, gatingClosure(g, 'ci'), new Map());
+    const nightlyUnit = model.cells.find((c) => c.check === 'static-checks / test: unit (1/3)' && c.tierId === 'nightly')!;
+    expect(nightlyUnit.intent.runs).toBe(true);
+    // unit IS a required gate at PR/Queue (closure of ci → build → static-checks),
+    // but a nightly run gates nothing — the cell must be advisory, never 'gate'.
+    expect(nightlyUnit.intent.gates).toBe(false);
+    expect(nightlyUnit.state).toBe('advisory');
+    // build never runs nightly → its Nightly cell stays absent
+    const nightlyBuild = model.cells.find((c) => c.check === 'build: production' && c.tierId === 'nightly')!;
+    expect(nightlyBuild.state).toBe('absent');
+  });
+});

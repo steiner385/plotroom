@@ -2,7 +2,7 @@
 import { parseJobs } from './parse-jobs';
 import { narrowEvents } from './narrow-events';
 import { expandMatrix } from './expand-matrix';
-import type { CheckNode, MatrixCoord, RawJob, StaticGraph, TriggerSpec } from './types';
+import type { CheckNode, MatrixCoord, RawJob, StaticGraph, TriggerEvent, TriggerSpec } from './types';
 
 /**
  * Derive a static CheckNode graph from a set of workflow YAML files.
@@ -22,6 +22,14 @@ export function deriveStaticGraph(
   );
   const rollup = parsed[rollupFile] ?? { triggers: { events: [] }, jobs: [] };
 
+  // Events that reach each reusable workflow from OTHER entry-point workflows
+  // (e.g. nightly.yml / weekly.yml, which are `on: schedule`). The rollup derives
+  // checks from its own jobs only, so a check that also runs nightly — because
+  // nightly.yml `uses:` the same reusable (possibly via a nested reusable) — would
+  // otherwise never carry the `schedule` trigger and its Nightly tier would be
+  // empty. Union those events onto the check so the Nightly tier reflects reality.
+  const reusableEvents = reusableEntryEvents(parsed, rollupFile);
+
   const checks: CheckNode[] = [];
   const callerNeeds: Record<string, string[]> = {};
 
@@ -34,10 +42,14 @@ export function deriveStaticGraph(
     if (job.uses) {
       const calleeName = basename(job.uses);
       const callee = parsed[calleeName];
+      // The check runs on the rollup's (narrowed) events PLUS any events from other
+      // entry workflows (nightly/weekly) that reach this reusable — so its Nightly
+      // tier isn't falsely empty.
+      const triggers: TriggerSpec = { events: mergeEventsByKind(narrowed.events, reusableEvents.get(calleeName) ?? []) };
       if (!callee) {
         // unresolved reusable workflow: opaque, low confidence (spec §5.5)
         checks.push({
-          checkName: callerLabel, callerJobId: job.id, triggers: callerTriggers,
+          checkName: callerLabel, callerJobId: job.id, triggers,
           provenance: [{ file: rollupFile, jobId: job.id }], confidence: 'low',
         });
         continue;
@@ -47,7 +59,7 @@ export function deriveStaticGraph(
           checks.push({
             checkName: `${callerLabel} / ${leaf.name ?? leaf.id}${inst.suffix}`,
             callerJobId: job.id,
-            triggers: callerTriggers,
+            triggers,
             provenance: [
               { file: rollupFile, jobId: job.id },
               { file: calleeName, jobId: leaf.id, ...(inst.coord && Object.keys(inst.coord).length ? { matrixCoord: inst.coord } : {}) },
@@ -87,4 +99,46 @@ function expandLeaf(job: RawJob): { coord: MatrixCoord; suffix: string }[] {
 
 function basename(usesPath: string): string {
   return usesPath.split('/').pop() ?? usesPath;
+}
+
+/** Union two event lists, deduped by `kind` (first occurrence wins — keeps the
+ *  rollup's narrowed event config over a bare inherited one). */
+function mergeEventsByKind(a: TriggerEvent[], b: TriggerEvent[]): TriggerEvent[] {
+  const byKind = new Map<string, TriggerEvent>();
+  for (const e of a) if (!byKind.has(e.kind)) byKind.set(e.kind, e);
+  for (const e of b) if (!byKind.has(e.kind)) byKind.set(e.kind, e);
+  return [...byKind.values()];
+}
+
+/** For each reusable workflow, the set of trigger events under which OTHER
+ *  entry-point workflows (every parsed file that declares real `on:` events and
+ *  isn't the rollup) reach it — following `uses:` edges TRANSITIVELY, so a
+ *  reusable invoked via a nested reusable (nightly.yml → _full-ci.yml →
+ *  _static-checks.yml) still inherits the entry's events. Reusables have
+ *  `on: workflow_call` → no events (parseTriggers drops it), so they're never
+ *  treated as entries. Per-job `if:` narrowing of the secondary entry isn't
+ *  applied (scheduled workflows almost always run their jobs unconditionally);
+ *  the result is the broadest-safe interpretation (spec §5.5). */
+function reusableEntryEvents(
+  parsed: Record<string, { triggers: TriggerSpec; jobs: RawJob[] }>,
+  rollupFile: string,
+): Map<string, TriggerEvent[]> {
+  const byReusable = new Map<string, Map<string, TriggerEvent>>();
+  for (const [file, wf] of Object.entries(parsed)) {
+    if (file === rollupFile || wf.triggers.events.length === 0) continue; // not a (non-rollup) entry
+    // BFS over uses: edges; record this entry's events on every reusable reached.
+    const seen = new Set<string>();
+    const stack: string[] = wf.jobs.filter((j) => j.uses).map((j) => basename(j.uses!));
+    while (stack.length) {
+      const ru = stack.pop()!;
+      if (seen.has(ru)) continue;
+      seen.add(ru);
+      const bag = byReusable.get(ru) ?? new Map<string, TriggerEvent>();
+      for (const e of wf.triggers.events) if (!bag.has(e.kind)) bag.set(e.kind, e);
+      byReusable.set(ru, bag);
+      const callee = parsed[ru];
+      if (callee) for (const j of callee.jobs) if (j.uses) stack.push(basename(j.uses));
+    }
+  }
+  return new Map([...byReusable].map(([f, m]) => [f, [...m.values()]]));
 }

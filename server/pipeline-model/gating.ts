@@ -1,5 +1,11 @@
 import type { GatingResult, StaticGraph } from './types';
 
+/** Events at which a required check actually enforces a merge/branch gate. A
+ *  `schedule` (nightly/weekly) run is a backstop cadence, never a gate — a
+ *  required check that ALSO runs nightly must show as advisory at the Nightly
+ *  tier, not as a gate. `workflow_dispatch`/`workflow_run` likewise don't gate. */
+const GATING_EVENTS = new Set(['pull_request', 'merge_group', 'push']);
+
 export function gatingClosure(
   graph: StaticGraph, requiredRollupName: string,
   opts: { conditionalCallerJobs?: string[] } = {},
@@ -23,10 +29,16 @@ export function gatingClosure(
   const conditionalCallerJobs = [...closure].filter((id) => conditional.has(id)).sort((a, b) => a.localeCompare(b));
 
   // A node gates (unconditionally OR conditionally) when its caller is in the
-  // closure; report the events it runs at.
+  // closure; report the merge-relevant events it runs at. We intersect with
+  // GATING_EVENTS so a required check that ALSO runs on `schedule` (because a
+  // nightly/weekly workflow re-runs the same reusable) doesn't falsely register
+  // as a *gate* at the Nightly tier — it's advisory there.
   const gates = graph.checks
     .filter((c) => closure.has(c.callerJobId))
-    .map((c) => ({ checkName: c.checkName, events: c.triggers.events.map((e) => e.kind).sort() }))
+    .map((c) => ({
+      checkName: c.checkName,
+      events: c.triggers.events.map((e) => e.kind).filter((k) => GATING_EVENTS.has(k)).sort(),
+    }))
     .sort((a, b) => a.checkName.localeCompare(b.checkName));
 
   return { gatingCallerJobs, conditionalCallerJobs, gates };

@@ -70,4 +70,38 @@ describe('computeProtectionMap', () => {
     });
     expect(model).toBeNull();
   });
+
+  it('models the scheduled entry-points (nightly/weekly) so shared checks fill the Nightly tier', async () => {
+    const NIGHTLY = `
+on:
+  schedule:
+    - cron: '0 2 * * *'
+jobs:
+  full-ci:
+    uses: ./.github/workflows/_full.yml
+`;
+    // nested reusable: nightly → _full.yml → _static.yml (the SAME leaf ci.yml runs)
+    const FULL = `
+on:
+  workflow_call:
+jobs:
+  static-checks:
+    uses: ./.github/workflows/_static.yml
+`;
+    const serve = vi.fn(async (_r: string, name: string) =>
+      ({ 'ci.yml': CI, '_static.yml': STATIC, 'nightly.yml': NIGHTLY, '_full.yml': FULL } as Record<string, string>)[name] ?? null);
+    const model = await computeProtectionMap('o/r', 's', {
+      fetchWorkflow: serve,
+      successStatsByRepo: () => new Map(), flakeStatsByRepo: () => new Map(),
+    });
+    // the transitive closure fetched the nested reusable too
+    expect(serve.mock.calls.map((c) => c[1])).toEqual(expect.arrayContaining(['nightly.yml', '_full.yml', '_static.yml']));
+    // the shared check now runs at Nightly — advisory, because scheduled runs don't gate
+    const night = model!.cells.find((c) => c.check === 'static-checks / test: unit' && c.tierId === 'nightly')!;
+    expect(night.state).toBe('advisory');
+    expect(night.intent.gates).toBe(false);
+    // a rollup-only check the scheduled workflow never reaches stays absent at Nightly
+    const buildNight = model!.cells.find((c) => c.check === 'build: production' && c.tierId === 'nightly')!;
+    expect(buildNight.state).toBe('absent');
+  });
 });

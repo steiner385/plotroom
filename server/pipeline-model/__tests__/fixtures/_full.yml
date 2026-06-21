@@ -1,0 +1,5 @@
+on:
+  workflow_call:
+jobs:
+  static-checks:
+    uses: ./.github/workflows/_static.yml
