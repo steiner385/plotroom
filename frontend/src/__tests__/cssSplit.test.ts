@@ -16,3 +16,12 @@ it('workspace.css has a :focus-visible ring for .cmdk-input (a11y Fix 3 — #175
   const css = read('../shell/workspace.css');
   expect(css).toContain('.cmdk-input:focus-visible');
 });
+
+// The embed renders the workspace SECTIONS (Model & Edit, Build, Tune, Optimize, …)
+// whose styles live in workspace.css — so the embed entry MUST import it, or those
+// sections ship unstyled to the host. (They did: only styles.css was bundled.)
+it('the embed entry imports BOTH styles.css and workspace.css (section styles)', () => {
+  const entry = read('../embed/PrDashboard.tsx');
+  expect(entry).toMatch(/import\s+['"]\.\.\/styles\.css['"]/);
+  expect(entry).toMatch(/import\s+['"]\.\.\/shell\/workspace\.css['"]/);
+});
