@@ -21,6 +21,8 @@
  * survivorship — evidence the control works, not that it is removable.
  */
 
+import { matchingPrefix } from './classify';
+
 /** Minimum distinct runs in the window for a check to be eligible — a long green
  *  streak on 3 runs is not evidence. */
 export const DEMOTION_MIN_RUNS = 50;
@@ -99,9 +101,59 @@ export const DEMOTION_DEFAULTS: DemotionConfig = {
   minRuns: DEMOTION_MIN_RUNS, minSuccessPct: DEMOTION_MIN_SUCCESS_PCT, topN: DEMOTION_TOP_N,
 };
 
+/** Extra graph-derived signals the pure detector can't compute from run stats. */
+export interface DemotionSignals {
+  /** Check NAMES that other jobs declare `needs:` — i.e. fail-fast GATES. A
+   *  green/expensive check here is NOT a terminal signal: its runner-minutes are
+   *  gross, and it short-circuits the downstream fan-out it gates, so demoting it
+   *  off PRs forfeits the early-cancel saving and costs more than it saves. We
+   *  suppress these, the same way `demotionTarget` already refuses a merge_group
+   *  gate. (Derived from the CI needs-DAG in the metrics builder.) */
+  failFastGates?: Set<string>;
+}
+
+/**
+ * Map the CI needs-DAG to the set of CHECK NAMES that are fail-fast gates — the
+ * `failFastGates` signal `computeDemotionCandidates` suppresses.
+ *
+ * `nodeNeeds` is the per-repo graph: node key → the node keys it `needs:`. A node
+ * is a fail-fast gate when SOME other node needs it (it's in the union of all
+ * `needs`). A check name resolves to its node by LONGEST-prefix match (a reusable
+ * caller "fast-checks" owns checks like "fast-checks / lint: eslint"), mirroring
+ * how the metrics builder maps check names onto graph nodes elsewhere.
+ */
+export function failFastGateNames(
+  statNames: Iterable<string>, nodeNeeds: Map<string, string[]>,
+): Set<string> {
+  const keys = [...nodeNeeds.keys()];
+  // EXCLUDE the rollup aggregator's edges. The CI graph is derived by BFS from the
+  // required rollup (`ci`), so every node except the rollup is present because
+  // something needs it — the unique node nothing needs (the SINK) is the rollup.
+  // The rollup `needs:` the whole required set to ENFORCE it as required, which is
+  // not the fail-fast "cancel the downstream fan-out" relationship. Counting its
+  // edges would mark every check a gate (over-suppression). So a check is a
+  // fail-fast gate only when a NON-sink (real working) node needs it.
+  const neededByAny = new Set<string>();
+  for (const needs of nodeNeeds.values()) for (const n of needs) neededByAny.add(n);
+  const dependedUpon = new Set<string>();
+  for (const [k, needs] of nodeNeeds) {
+    if (!neededByAny.has(k)) continue; // k is a sink (the rollup aggregator) → skip its edges
+    for (const n of needs) dependedUpon.add(n);
+  }
+  const out = new Set<string>();
+  if (dependedUpon.size === 0) return out; // flat / rollup-only graph — nothing gates
+  for (const name of statNames) {
+    const key = matchingPrefix(name, keys);
+    if (key != null && dependedUpon.has(key)) out.add(name);
+  }
+  return out;
+}
+
 export function computeDemotionCandidates(
   stats: SuccessStat[], cfg: DemotionConfig = DEMOTION_DEFAULTS,
+  signals: DemotionSignals = {},
 ): DemotionCandidate[] {
+  const failFastGates = signals.failFastGates ?? new Set<string>();
   // Check NAMES that run on merge_group — i.e. still gate in the queue. Presence
   // (not greenness) is what matters: a gate that runs at all keeps protecting,
   // so a PR-tier demotion of the same check leaves the queue gate intact. Built
@@ -112,6 +164,10 @@ export function computeDemotionCandidates(
   const out: DemotionCandidate[] = [];
   for (const s of stats) {
     if (s.totalRuns < cfg.minRuns) continue;     // not enough history to trust
+    // Fail-fast gate: other jobs `needs:` this check. Its value is in the
+    // downstream fan-out it short-circuits, not in its own minutes — only a
+    // TERMINAL signal is a true demotion candidate. (See DemotionSignals.)
+    if (failFastGates.has(s.name)) continue;
     const greenRuns = s.totalRuns - s.failingRuns;
     const successPct = s.totalRuns ? (greenRuns / s.totalRuns) * 100 : 0;
     if (successPct < cfg.minSuccessPct) continue; // not green enough

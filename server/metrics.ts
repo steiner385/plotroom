@@ -12,7 +12,7 @@ import {
   lintTimeouts, lintFastGatingJobs, lintWaitDominated, sortFindings, cleanJobName,
   type LintFinding, type TimeoutLintInput, type FastGatingInput, type WaitDominatedInput,
 } from './estimator/workflow-lint';
-import { computeDemotionCandidates, type DemotionCandidate } from './estimator/demotion-candidates';
+import { computeDemotionCandidates, failFastGateNames, type DemotionCandidate } from './estimator/demotion-candidates';
 import { computePromotionCandidates, type PromotionCandidate } from './estimator/promotion-candidates';
 import { classifyEject, dominantReason, remedyForReason, type EjectReason } from './estimator/eject-reason';
 import { suggestRequiredPrefixes } from './estimator/required-prefixes';
@@ -899,7 +899,17 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   const demotionCandidates = [...successByRepo]
     .filter(([repo]) => !dropped.has(repo))
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([repo, stats]) => ({ repo, candidates: computeDemotionCandidates(stats) }))
+    .map(([repo, stats]) => {
+      // Fail-fast gates: checks other jobs `needs:`, from this repo's CI needs-DAG.
+      // Demoting one off PRs forfeits the early-cancel of the downstream fan-out it
+      // gates — its green minutes are gross, not net — so the detector suppresses it.
+      const graph = ciGraphs.get(repo);
+      const failFastGates = graph
+        ? failFastGateNames(stats.map((s) => s.name),
+            new Map([...graph].map(([k, node]) => [k, node.needs])))
+        : new Set<string>();
+      return { repo, candidates: computeDemotionCandidates(stats, undefined, { failFastGates }) };
+    })
     .filter((r) => r.candidates.length > 0);
 
   // 7c. Promotion candidates (real-failing late → shift left): the inverse lane.

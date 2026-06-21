@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  computeDemotionCandidates, DEMOTION_DEFAULTS, DEMOTION_MIN_RUNS,
+  computeDemotionCandidates, failFastGateNames, DEMOTION_DEFAULTS, DEMOTION_MIN_RUNS,
   type SuccessStat,
 } from '../demotion-candidates';
 
@@ -83,5 +83,70 @@ describe('computeDemotionCandidates — ranking & thresholds', () => {
       stat({ name: 'x', totalRuns: 120, failingRuns: 0, sumDurationSecs: 72_000 }), gate('x'),
     ]);
     expect(c!.reason).toBe('120/120 green · ~1200 runner-min in window');
+  });
+});
+
+describe('computeDemotionCandidates — fail-fast gate awareness (downstream needs:)', () => {
+  // The ranking is gross runner-minutes, which is blind to a check that other jobs
+  // `needs:`. Such a check is a fail-fast gate — its green-and-expensive minutes are
+  // GROSS; net, it short-circuits the downstream fan-out it gates, so demoting it off
+  // PRs costs more than it saves. A demotion candidate must be a TERMINAL signal.
+  it('suppresses an otherwise-demotable PR check that other jobs need (fail-fast gate)', () => {
+    const stats = [
+      stat({ name: 'lint', event: 'pull_request', sumDurationSecs: 600_000 }), // green + very expensive
+      gate('lint'),                                                            // still gates in the queue
+    ];
+    // Without the dependents signal it IS a candidate (today's blunt behavior)…
+    expect(computeDemotionCandidates(stats).map((c) => c.name)).toEqual(['lint']);
+    // …but once we know 'lint' is depended-upon, it is a gate, not a terminal signal → suppressed.
+    const aware = computeDemotionCandidates(stats, DEMOTION_DEFAULTS, { failFastGates: new Set(['lint']) });
+    expect(aware).toEqual([]);
+  });
+
+  it('still demotes a TERMINAL green check while suppressing a sibling fail-fast gate', () => {
+    const stats = [
+      stat({ name: 'lint', event: 'pull_request', sumDurationSecs: 700_000 }), gate('lint'),       // gate
+      stat({ name: 'docs-build', event: 'pull_request', sumDurationSecs: 600_000 }), gate('docs-build'), // terminal
+    ];
+    const cands = computeDemotionCandidates(stats, DEMOTION_DEFAULTS, { failFastGates: new Set(['lint']) });
+    expect(cands.map((c) => c.name)).toEqual(['docs-build']);
+  });
+});
+
+describe('failFastGateNames — map the needs-DAG to check names', () => {
+  // Realistic graph: the `ci` rollup aggregator needs the whole required set; real
+  // jobs `needs:` fast-checks/static-checks for fail-fast. A check name resolves to a
+  // node by LONGEST-prefix match (the reusable-caller key), mirroring metrics' matchingPrefix.
+  const needs = () => new Map<string, string[]>([
+    ['ci', ['fast-checks', 'static-checks', 'build', 'docs']], // rollup aggregator (the SINK)
+    ['fast-checks', []],
+    ['static-checks', ['fast-checks']],
+    ['build', ['fast-checks', 'static-checks']],
+    ['docs', []],
+  ]);
+
+  it('marks checks whose node a REAL job needs, leaving terminal checks unmarked', () => {
+    const gates = failFastGateNames(
+      ['fast-checks / lint: eslint', 'static-checks / types: tsc', 'build: production', 'docs: site'],
+      needs(),
+    );
+    // fast-checks (needed by static-checks+build) and static-checks (needed by build) are gates…
+    expect([...gates].sort()).toEqual(['fast-checks / lint: eslint', 'static-checks / types: tsc']);
+    // …build & docs are needed ONLY by the rollup aggregator → terminal, demotable.
+    expect(gates.has('build: production')).toBe(false);
+    expect(gates.has('docs: site')).toBe(false);
+  });
+
+  it('does NOT let the rollup aggregator (needs everything, needed by nobody) make everything a gate', () => {
+    // Regression for the live over-suppression: counting the `ci` rollup's edges
+    // marked all 8 KinDash candidates as gates. Only fast-checks (a REAL job, build,
+    // needs it) may be suppressed here.
+    const gates = failFastGateNames(['fast-checks / lint', 'build: prod', 'docs: site'], needs());
+    expect([...gates]).toEqual(['fast-checks / lint']);
+  });
+
+  it('returns empty when no node is depended-upon (flat graph) or the graph is empty', () => {
+    expect(failFastGateNames(['a', 'b'], new Map([['a', []], ['b', []]])).size).toBe(0);
+    expect(failFastGateNames(['a'], new Map()).size).toBe(0);
   });
 });
