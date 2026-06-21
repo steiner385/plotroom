@@ -4,6 +4,8 @@
 // Open files a draft PR. Self-contained state so it drops into any surface.
 import { useState } from 'react';
 import type { WorkspaceApi } from '../../shell/workspaceApi';
+import { PromptButton } from '../../lib/PromptButton';
+import { prefixesPrompt } from '../../lib/claudePrompts';
 
 export function PrefixesLever({ repo, api }: { repo: string; api: WorkspaceApi }) {
   const [preview, setPreview] = useState<{ prefixes: string[]; newText: string } | null>(null);
@@ -38,7 +40,10 @@ export function PrefixesLever({ repo, api }: { repo: string; api: WorkspaceApi }
             Suggested: {preview.prefixes.map((p) => <code key={p}>{p}</code>).reduce((acc, el, i) => (i === 0 ? [el] : [...acc, ', ', el]), [] as React.ReactNode[])}
           </p>
           <pre className="prefixes-diff" aria-label="pr-dashboard.yml preview">{preview.newText}</pre>
-          {!opened && <button type="button" className="prefixes-open" disabled={busy} onClick={doOpen}>Open draft PR</button>}
+          <div className="prefixes-actions">
+            {!opened && <button type="button" className="prefixes-open" disabled={busy} onClick={doOpen}>Open draft PR</button>}
+            <PromptButton getText={() => prefixesPrompt(repo, preview.prefixes)} testId="prefixes-copy-prompt" />
+          </div>
         </>
       )}
       {opened && <p className="prefixes-opened" role="status">Opened draft PR <a href={opened.url}>#{opened.number}</a> — review and merge there.</p>}

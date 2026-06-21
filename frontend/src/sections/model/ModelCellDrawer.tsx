@@ -8,6 +8,7 @@ import type { WorkspaceApi, SimResultDto } from '../../shell/workspaceApi';
 import type { DerivedModelLike } from '../optimize/types';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { STATE_GLYPH, displayName, fmtMin, type CellState } from '../../protectionModel';
+import { PromptButton } from '../../lib/PromptButton';
 
 const REMOVE = '__remove__';
 
@@ -37,25 +38,16 @@ export function ModelCellDrawer({ check, model, repo, api, onClose, returnFocusR
   const [from, setFrom] = useState(fromTiers[0]?.id ?? model.tiers[0]?.id ?? '');
   const [to, setTo] = useState<string>(REMOVE);
   const [sim, setSim] = useState<SimResultDto | null>(null);
-  const [prompt, setPrompt] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [pending, setPending] = useState<'sim' | 'prompt' | null>(null);
+  const [pending, setPending] = useState<'sim' | null>(null);
 
   const runSim = async () => {
-    setPending('sim'); setPrompt(null);
+    setPending('sim');
     try { setSim(await api.simulate(repo, { check, fromTierId: from, toTierId: to === REMOVE ? null : to })); }
     catch { setSim({ legal: false, reason: 'error', note: 'Simulation failed — try again.', costDeltaMinutes: 0, direction: 'remove', gatesLost: [], gatesGained: [], estimated: true }); }
     finally { setPending(null); }
   };
-  const copyPrompt = async () => {
-    setPending('prompt');
-    try {
-      const { prompt: text } = await api.prompt(repo, { goal: 'cost', check, detail: sim?.note ?? '', fromTierId: from, toTierId: to === REMOVE ? null : to });
-      setPrompt(text);
-      try { await navigator.clipboard?.writeText?.(text); setCopied(true); window.setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable — text is shown to copy manually */ }
-    } catch { setPrompt('Couldn’t build the prompt — try again.'); }
-    finally { setPending(null); }
-  };
+  const buildPrompt = async () =>
+    (await api.prompt(repo, { goal: 'cost', check, detail: sim?.note ?? '', fromTierId: from, toTierId: to === REMOVE ? null : to })).prompt;
 
   // to-options: any tier other than the from-tier, plus "remove from the from-tier".
   const toOptions = model.tiers.filter((t) => t.id !== from);
@@ -123,11 +115,9 @@ export function ModelCellDrawer({ check, model, repo, api, onClose, returnFocusR
         </div>
 
         <div className="model-drawer-actions">
-          <button type="button" className="model-action-primary" data-testid="model-copy-prompt" disabled={pending === 'prompt'} onClick={copyPrompt}>
-            {copied ? '✓ Copied' : pending === 'prompt' ? 'Building…' : 'Copy Claude Code prompt'}
-          </button>
+          <PromptButton getText={buildPrompt} className="model-action-primary" testId="model-copy-prompt"
+            promptClassName="model-prompt" promptTestId="model-prompt" />
         </div>
-        {prompt && <pre className="model-prompt" data-testid="model-prompt" aria-label="claude code prompt">{prompt}</pre>}
       </aside>
     </>
   );

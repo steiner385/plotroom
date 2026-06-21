@@ -1,6 +1,7 @@
 import { type RefObject } from 'react';
 import { simulateMove, legalFromTiers, legalToTargets } from './protectionSimulate';
 import { buildClaudePrompt } from './protectionPrompt';
+import { PromptButton } from './lib/PromptButton';
 import {
   type Cell, type DerivedModel, type Goal,
   GOAL_ICON, GOAL_LABEL, STATE_GLYPH, STATE_WORD,
@@ -16,7 +17,7 @@ export interface SimMove { check: string; from: string; to: string }
  *  State (the selected move, the copied flash) stays lifted in ProtectionMap so the
  *  drawer is a controlled view. */
 export function ProtectionDrawer({
-  drill, model, repo, byCell, sim, setSim, copied, setCopied, drawerRef, onClose,
+  drill, model, repo, byCell, sim, setSim, drawerRef, onClose,
 }: {
   drill: Drill;
   model: DerivedModel;
@@ -24,8 +25,6 @@ export function ProtectionDrawer({
   byCell: Map<string, Cell>;
   sim: SimMove | null;
   setSim: (s: SimMove) => void;
-  copied: boolean;
-  setCopied: (c: boolean) => void;
   drawerRef: RefObject<HTMLElement | null>;
   onClose: () => void;
 }) {
@@ -42,11 +41,8 @@ export function ProtectionDrawer({
     const keep = next.some((o) => (o.tierId ?? '__remove__') === s.to);
     setSim({ check: dcheck, from, to: keep ? s.to : (next.find((o) => o.tierId !== null)?.tierId ?? '__remove__') });
   };
-  const onCopy = () => {
-    const text = buildClaudePrompt(repo ?? '', model, { goal: drill.goal, check: dcheck, detail: drill.detail, suggestedTierId: s.to === '__remove__' ? null : s.to });
-    void navigator.clipboard?.writeText?.(text);
-    setCopied(true); window.setTimeout(() => setCopied(false), 1500);
-  };
+  const buildPrompt = () =>
+    buildClaudePrompt(repo ?? '', model, { goal: drill.goal, check: dcheck, detail: drill.detail, suggestedTierId: s.to === '__remove__' ? null : s.to });
 
   return (
     <>
@@ -115,9 +111,7 @@ export function ProtectionDrawer({
         </div>
 
         <div className="pm-drawer-actions">
-          <button type="button" className="pm-action-primary" data-testid="pm-copy-prompt" onClick={onCopy}>
-            {copied ? '✓ Copied' : 'Copy Claude Code prompt'}
-          </button>
+          <PromptButton getText={buildPrompt} className="pm-action-primary" testId="pm-copy-prompt" showPrompt={false} />
         </div>
       </aside>
     </>

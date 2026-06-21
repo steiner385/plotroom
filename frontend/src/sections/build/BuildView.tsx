@@ -11,6 +11,8 @@ import { laneLayout } from './laneLayout';
 import { PipelineCanvas } from './PipelineCanvas';
 import { NodeInspector } from './NodeInspector';
 import { RawYamlHatch } from './RawYamlHatch';
+import { PromptButton } from '../../lib/PromptButton';
+import { pipelineEditsPrompt } from '../../lib/claudePrompts';
 
 /** The provenance job id an edit must target for a check (its defining anchor). */
 function jobIdFor(model: DerivedModelLike, check: string): string | null {
@@ -115,9 +117,14 @@ export function BuildView({ repo, api }: BuildViewProps) {
           {candidate?.ok && candidate.files.length > 0 && (
             <pre className="build-diff" aria-label="generated diff">{candidate.files.map((f) => `# ${f.file}\n${f.diff}`).join('\n\n')}</pre>
           )}
-          {verdict.kind === 'safe' && !opened && (
-            <button type="button" className="build-exit" disabled={busy} onClick={openDraftPr}>Open draft PR</button>
-          )}
+          <div className="build-exit-actions">
+            {verdict.kind === 'safe' && !opened && (
+              <button type="button" className="build-exit" disabled={busy} onClick={openDraftPr}>Open draft PR</button>
+            )}
+            {/* The prompt is useful for ANY verdict (safe / scaffold / blocked) — hand
+                the structured edits to Claude Code to author (and resolve a blocked gate). */}
+            <PromptButton getText={() => pipelineEditsPrompt(repo, stack)} testId="build-copy-prompt" />
+          </div>
           {verdict.kind === 'scaffold' && (
             <p className="build-exit-note">Low confidence — this would generate a review scaffold rather than a structured apply.</p>
           )}

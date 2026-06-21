@@ -308,6 +308,8 @@ button.canvas-node.selected { outline: 2px solid var(--accent, #6af); outline-of
 .tune-error { color: var(--amber); font-size: 12px; margin: 0; }
 .optimize-diff, .quarantine-diff, .optimize-sim pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; overflow-x: auto; white-space: pre; }
 .optimize-prompt { white-space: pre-wrap !important; }
+/* Draft-PR + Claude-prompt action rows (Build / Prefixes surfaces) */
+.build-exit-actions, .prefixes-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .sim-note.legal, .plan-note.legal { color: var(--done); }
 .sim-note.illegal, .plan-note.illegal { color: var(--fail); }
 .sim-low-confidence { margin: 4px 0 0; font-size: 11px; color: var(--warn, #d98a00); }

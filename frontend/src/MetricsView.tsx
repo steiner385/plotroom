@@ -10,6 +10,8 @@ import {
 } from './charts';
 import { formatDur, formatSince } from './format';
 import { NeedsGraph } from './NeedsGraph';
+import { PromptButton } from './lib/PromptButton';
+import { demotionPrompt, promotionPrompt } from './lib/claudePrompts';
 import { CONTROL_DEFINITIONS, DEFS, defTitle } from './definitions';
 
 // Pure model logic (axis math, chart-alignment, formatters, section + rec-link
@@ -1054,16 +1056,20 @@ export function MetricsView({ now, focusCostNonce }: {
                     <td className="metric-num">{c.minutesInWindow.toLocaleString()} min</td>
                     <td><span className="demotion-arrow">→ {c.suggestedTier}</span></td>
                     <td>
-                      {st?.url
-                        ? <a className="demotion-pr-link" href={st.url} target="_blank" rel="noreferrer">draft PR ↗</a>
-                        : st?.error
-                          ? <span className="pr-action-msg err" title={st.error}>failed</span>
-                          : <button type="button" className="demotion-draft-btn"
-                              data-testid={`demotion-draft-${c.name}/${c.event}`}
-                              disabled={st?.loading}
-                              onClick={() => draftDemotionPr(d.repo, c)}>
-                              {st?.loading ? 'opening…' : 'Draft PR'}
-                            </button>}
+                      <div className="metric-action-cell">
+                        {st?.url
+                          ? <a className="demotion-pr-link" href={st.url} target="_blank" rel="noreferrer">draft PR ↗</a>
+                          : st?.error
+                            ? <span className="pr-action-msg err" title={st.error}>failed</span>
+                            : <button type="button" className="demotion-draft-btn"
+                                data-testid={`demotion-draft-${c.name}/${c.event}`}
+                                disabled={st?.loading}
+                                onClick={() => draftDemotionPr(d.repo, c)}>
+                                {st?.loading ? 'opening…' : 'Draft PR'}
+                              </button>}
+                        <PromptButton getText={() => demotionPrompt(d.repo, c)} label="Copy prompt"
+                          showPrompt={false} testId={`demotion-prompt-${c.name}/${c.event}`} />
+                      </div>
                     </td>
                   </tr>
                   );
@@ -1106,16 +1112,20 @@ export function MetricsView({ now, focusCostNonce }: {
                     <td title={c.reason} className="var-high">{c.realFailures} ({fmtPct(c.failRatePct)})</td>
                     <td><span className="promotion-arrow">↑ {c.suggestedTier}</span></td>
                     <td>
-                      {st?.url
-                        ? <a className="demotion-pr-link" href={st.url} target="_blank" rel="noreferrer">draft PR ↗</a>
-                        : st?.error
-                          ? <span className="pr-action-msg err" title={st.error}>failed</span>
-                          : <button type="button" className="demotion-draft-btn"
-                              data-testid={`promotion-draft-${c.name}/${c.event}`}
-                              disabled={st?.loading}
-                              onClick={() => draftPromotionPr(p.repo, c)}>
-                              {st?.loading ? 'opening…' : 'Draft PR'}
-                            </button>}
+                      <div className="metric-action-cell">
+                        {st?.url
+                          ? <a className="demotion-pr-link" href={st.url} target="_blank" rel="noreferrer">draft PR ↗</a>
+                          : st?.error
+                            ? <span className="pr-action-msg err" title={st.error}>failed</span>
+                            : <button type="button" className="demotion-draft-btn"
+                                data-testid={`promotion-draft-${c.name}/${c.event}`}
+                                disabled={st?.loading}
+                                onClick={() => draftPromotionPr(p.repo, c)}>
+                                {st?.loading ? 'opening…' : 'Draft PR'}
+                              </button>}
+                        <PromptButton getText={() => promotionPrompt(p.repo, c)} label="Copy prompt"
+                          showPrompt={false} testId={`promotion-prompt-${c.name}/${c.event}`} />
+                      </div>
                     </td>
                   </tr>
                   );

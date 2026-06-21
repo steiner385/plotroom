@@ -1432,6 +1432,31 @@ describe('MetricsView sub-tabs (page cleanup)', () => {
     const link = await screen.findByText('draft PR ↗');
     expect(link).toHaveAttribute('href', 'https://github.com/o/r/pull/88');
   });
+
+  it('each demotion row also offers a Claude Code prompt that copies the demote instruction', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
+    const btn = await screen.findByTestId('demotion-prompt-lint: eslint/pull_request');
+    fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('demote the CI check "lint: eslint"'));
+    expect(btn.textContent).toMatch(/Copied/);
+  });
+
+  it('each promotion row also offers a Claude Code prompt (shift-left instruction)', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+    mockFetchOk();
+    render(<MetricsView now={NOW} />);
+    await screen.findByTestId('metrics-subtab-reliability');
+    fireEvent.click(screen.getByTestId('metrics-subtab-reliability'));
+    const btn = await screen.findByTestId('promotion-prompt-e2e/push');
+    fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('shift the CI check "e2e"'));
+  });
 });
 
 // ---------------------------------------------------------------------------

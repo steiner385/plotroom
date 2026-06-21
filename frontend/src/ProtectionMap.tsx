@@ -23,7 +23,6 @@ export function ProtectionMap() {
   const [overlay, setOverlay] = useState<Overlay>('none');
   const [sim, setSim] = useState<{ check: string; from: string; to: string } | null>(null);
   const [drilled, setDrilled] = useState<{ check: string; goal: Goal; detail: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [expandedGoals, setExpandedGoals] = useState<Set<Goal>>(new Set());
   const [showAbsent, setShowAbsent] = useState(false);
@@ -337,8 +336,6 @@ export function ProtectionMap() {
               byCell={byCell}
               sim={sim}
               setSim={setSim}
-              copied={copied}
-              setCopied={setCopied}
               drawerRef={drawerRef}
               onClose={() => setDrilled(null)}
             />

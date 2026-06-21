@@ -32,6 +32,17 @@ describe('PrefixesLever (roadmap 4.5 — one-click governed prefixes PR)', () =>
     expect(a.prefixesOpen).toHaveBeenCalledWith('o/r', ['build', 'static-checks']);
   });
 
+  it('offers a Claude Code prompt for the previewed prefixes', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<PrefixesLever repo="o/r" api={api()} />);
+    fireEvent.click(screen.getByRole('button', { name: /preview/i }));
+    await screen.findByLabelText('pr-dashboard.yml preview');
+    fireEvent.click(screen.getByTestId('prefixes-copy-prompt'));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('requiredCheckPrefixes'));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('- build'));
+  });
+
   it('surfaces an error from the dry-run', async () => {
     const a = api({ prefixesDryRun: vi.fn(async () => { throw new Error('no merge_group checks to derive prefixes from'); }) });
     render(<PrefixesLever repo="o/r" api={a} />);

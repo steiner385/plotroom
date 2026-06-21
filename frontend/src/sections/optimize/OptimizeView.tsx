@@ -9,6 +9,7 @@ import type { WorkspaceApi, SimResultDto } from '../../shell/workspaceApi';
 import type { DerivedModelLike } from './types';
 import { PrefixesLever } from './PrefixesLever';
 import { demotionFindings } from './findings';
+import { PromptButton } from '../../lib/PromptButton';
 // Strip raw `${{ … }}` GitHub-expression templates from displayed check names
 // (shared with ModelView / ProtectionMap) — display only; the raw name stays the
 // key for plan/simulate/quarantine handlers.
@@ -31,9 +32,8 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const [sim, setSim] = useState<SimResultDto | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState<string | null>(null);
   // Per-action pending state (#168): key → true while that specific action is in-flight.
-  // Keys: 'simulate:<check>', 'quarantine:<check>', 'preview', 'copyPrompt', 'simulatePlan'
+  // Keys: 'simulate:<check>', 'quarantine:<check>', 'preview', 'simulatePlan'
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [quarantine, setQuarantine] = useState<{ check: string; diff?: string; error?: string } | null>(null);
   const [planChecks, setPlanChecks] = useState<Set<string>>(new Set());
@@ -43,7 +43,7 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
 
   useEffect(() => {
     if (!repo) return;
-    setModel(null); setError(null); setSelected(null); setSim(null); setDiff(null); setPrompt(null); setRulesetReadable(true); setCalibration(null);
+    setModel(null); setError(null); setSelected(null); setSim(null); setDiff(null); setRulesetReadable(true); setCalibration(null);
     api.getPipeline(repo).then((r) => setModel(r.model)).catch((e: Error) => setError(e.message));
     // trust caveat (roadmap 4.6): a verdict computed without the live branch-protection
     // ruleset is static-only — say so, never imply ruleset-verified safety.
@@ -59,7 +59,7 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
   function clearPending(key: string) { setPending((p) => { const n = { ...p }; delete n[key]; return n; }); }
 
   async function simulate(check: string) {
-    setSelected(check); setSim(null); setDiff(null); setPrompt(null);
+    setSelected(check); setSim(null); setDiff(null);
     const tier = model ? homeTier(model, check) : null;
     if (!repo || !tier) return;
     const key = `simulate:${check}`;
@@ -78,17 +78,11 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
   }
 
   // "Author one" path (FR-013/016): hand the demote to Claude Code as a prompt.
-  // The server sources provenance + the simulated delta; we display the text
-  // (always copy-able) and best-effort write it to the clipboard.
-  async function copyPrompt() {
-    if (!repo || !selected || !from) return;
-    startPending('copyPrompt');
-    try {
-      const { prompt: text } = await api.prompt(repo, { goal: 'cost', check: selected, detail: sim?.note ?? '', fromTierId: from, toTierId: null });
-      setPrompt(text);
-      try { await navigator.clipboard?.writeText(text); } catch { /* clipboard unavailable — text is still shown to copy manually */ }
-    } catch (e) { setError((e as Error).message); }
-    finally { clearPending('copyPrompt'); }
+  // The server sources provenance + the simulated delta; PromptButton displays the
+  // text (always copy-able) and best-effort writes it to the clipboard.
+  async function buildPrompt(): Promise<string> {
+    const { prompt: text } = await api.prompt(repo!, { goal: 'cost', check: selected!, detail: sim?.note ?? '', fromTierId: from!, toTierId: null });
+    return text;
   }
 
   async function doQuarantine(check: string) {
@@ -191,11 +185,10 @@ export function OptimizeView({ repo, api }: OptimizeViewProps) {
           {sim.legal
             ? <div className="optimize-actions">
                 <button type="button" disabled={!!pending['preview']} onClick={preview}>Preview draft PR</button>
-                <button type="button" disabled={!!pending['copyPrompt']} onClick={copyPrompt}>Copy Claude Code prompt</button>
+                <PromptButton key={selected} getText={buildPrompt} promptClassName="optimize-prompt" />
               </div>
             : <p className="sim-blocked">This change is blocked: {sim.reason}.</p>}
           {diff && <pre className="optimize-diff" aria-label="draft PR diff">{diff}</pre>}
-          {prompt && <pre className="optimize-prompt" aria-label="claude code prompt">{prompt}</pre>}
         </section>
       )}
     </div>

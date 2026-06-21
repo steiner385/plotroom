@@ -74,6 +74,20 @@ describe('BuildView (Increment 3 — the no-code loop)', () => {
     expect(cand).toHaveBeenCalledWith('o/r', [{ op: 'timeout', jobId: 'e2e', minutes: 15 }], 'sha');
   });
 
+  it('offers a Claude Code prompt for the composed edits — even for a blocked candidate', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<BuildView repo="o/r" api={api(vi.fn(async () => regressed))} />);
+    fireEvent.click(await screen.findByTestId('node-queue-build'));
+    fireEvent.click(within(screen.getByLabelText('Edit build')).getByRole('button', { name: /^remove$/i }));
+    // blocked → no Open draft PR, but the prompt IS offered (hand it to Claude to resolve the gate)
+    expect(await screen.findByTestId('candidate-verdict')).toHaveTextContent(/blocked/i);
+    expect(screen.queryByText('Open draft PR')).not.toBeInTheDocument();
+    const btn = screen.getByTestId('build-copy-prompt');
+    fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('Remove job `build`'));
+  });
+
   it('removing the only pending mutation clears the candidate', async () => {
     render(<BuildView repo="o/r" api={api()} />);
     fireEvent.click(await screen.findByTestId('node-pr-e2e'));

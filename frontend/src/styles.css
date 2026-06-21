@@ -1129,3 +1129,15 @@ section h2 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }
 .pm-action-primary { font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; color: #fff;
   background: var(--accent-strong); border: none; border-radius: 6px; padding: 7px 14px; }
 .pm-action-primary:hover { filter: brightness(1.08); }
+
+/* Shared "draft a Claude Code prompt" affordance (PromptButton) — used next to
+   every Draft-PR button. Secondary styling so it reads as the lighter-weight
+   sibling of the primary Draft-PR action. */
+.cc-prompt-btn { font: inherit; font-size: 12px; cursor: pointer; color: var(--accent-strong, #4f46e5);
+  background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+.cc-prompt-btn:hover:not(:disabled) { background: var(--bg, #f6f6f8); }
+.cc-prompt-btn:disabled { opacity: 0.6; cursor: default; }
+.cc-prompt { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px; font-size: 12px; margin-top: 8px; overflow-x: auto; }
+/* table action cells (demotion/promotion) stack the Draft-PR control + prompt button */
+.metric-action-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
