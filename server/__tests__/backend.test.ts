@@ -104,6 +104,22 @@ describe('createPrDashboardBackend', () => {
     expect(() => stop()).not.toThrow();
   });
 
+  it('startup re-scans the retention merged window even on an already-backfilled DB', async () => {
+    // Recovery / self-heal: merges that landed while we were down (restart,
+    // outage) are otherwise never re-scanned — the routine window never looks
+    // back far enough. On every boot the first sweep's merged window is widened
+    // to the full retention period, regardless of the one-time `backfilled` flag.
+    const be = await build();
+    const h = be.store.history;
+    h.setMeta('backfilled', '2026-06-01T00:00:00Z');     // NOT a fresh DB
+    h.setMeta('lastSweep', new Date().toISOString());    // pretend we swept moments ago
+    const stop = be.startPoller();                        // sync prefix runs before first await
+    const widened = h.getMeta('lastSweep')!;
+    stop();
+    const ageDays = (Date.now() - new Date(widened).getTime()) / 86_400_000;
+    expect(ageDays).toBeGreaterThan(DEFAULTS.retentionDays - 0.5);
+  });
+
   it('default trustHostAuth: a mutating POST from a disallowed Origin is NOT 403', async () => {
     const be = await build();
     const host = express();

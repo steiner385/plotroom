@@ -236,6 +236,42 @@ describe('Poller', () => {
       .toBe(new Date(t).toISOString());
   });
 
+  it('routine sweep paginates the merged search when a catch-up window spills past page 1', async () => {
+    // Regression: a routine (non-fresh-DB) sweep used to fetch only ONE merged
+    // page. After downtime the catch-up window can hold >1 page of merges; the
+    // oldest (page 2+) were dropped AND lastSweep advanced past them, so they
+    // were lost forever (cc-account-switcher #1/#2 vanished this way).
+    const page1Sweep = {
+      open0: { issueCount: 0, nodes: [] },
+      merged0: { issueCount: 2,
+        pageInfo: { hasNextPage: true, endCursor: 'cur-page2' },
+        nodes: [{ number: 9001, title: 'feat: recent merge', url: 'u9001', isDraft: false,
+          mergedAt: '2026-06-10T11:40:00Z', repository: { nameWithOwner: 'acme/widgets' },
+          mergeCommit: { oid: 'sq9001' } }] },
+    };
+    const mergedPage2 = {
+      merged: { issueCount: 2, pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ number: 9000, title: 'feat: older merge in the gap', url: 'u9000', isDraft: false,
+          mergedAt: '2026-06-10T11:30:00Z', repository: { nameWithOwner: 'acme/widgets' },
+          mergeCommit: { oid: 'sq9000' } }] },
+    };
+    const client = {
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('merged: search')) return mergedPage2;   // follow-up page
+        if (q.includes('open0: search')) return page1Sweep;     // initial sweep
+        if (q.includes('pullRequest')) return {};
+        throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+      }),
+    };
+    const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce(); // routine sweep — deepMergedSweep defaults to false
+    const tracked = history.listTrackedMerged(7, NOW).map((r) => r.number);
+    expect(tracked).toContain(9001); // page 1 — always captured
+    expect(tracked).toContain(9000); // page 2 — dropped before the fix
+  });
+
   it('rate-limit floor degrades hot interval', () => {
     const c = fakeClient(); c.remaining = 500;
     const p = new Poller({ router: asRouter(c), history, deploy: noDeploy(),
@@ -617,7 +653,7 @@ describe('Poller cache pruning + sweep bookkeeping', () => {
   });
 });
 
-describe('Poller deep merged sweep pagination', () => {
+describe('Poller merged sweep pagination', () => {
   afterEach(() => vi.restoreAllMocks());
 
   // 120 merged PRs for owner acme split over 3 pages (50/50/20)
@@ -642,26 +678,37 @@ describe('Poller deep merged sweep pagination', () => {
     }),
   });
 
-  it('deep flag set → follows pagination and ingests all 120 merged PRs', async () => {
+  it('merged search follows pagination and ingests all 120 merged PRs (catch-up window)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const p = new Poller({ router: asRouter(pagedClient()), history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });
-    await p.sweepOnce(true);
+    await p.sweepOnce();
     expect(history.listTrackedMerged(7, NOW)).toHaveLength(120);
     expect(warn).not.toHaveBeenCalled(); // paginated aliases don't warn truncation
   });
 
-  it('routine sweep (no deep flag) stays single-page and keeps the truncation warning', async () => {
+  it('a single-page merged window makes no pagination follow-up (steady-state cost guard)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const client = pagedClient();
+    const singlePage = () => ({
+      remaining: 4000, resetAt: null,
+      graphql: vi.fn(async (q: string) => {
+        if (q.includes('open0: search')) return {
+          open0: { issueCount: 0, nodes: [] }, open1: { issueCount: 0, nodes: [] },
+          merged0: { issueCount: 3, pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [mergedNode(1), mergedNode(2), mergedNode(3)] },
+          merged1: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+        };
+        throw new Error(`unexpected query: ${q.slice(0, 100)}`);
+      }),
+    });
+    const client = singlePage();
     const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });
     await p.sweepOnce();
-    // one search request per owner (acme, octo) — and NO pagination follow-ups
+    // one search request per owner (acme, octo) — the window fits one page, so no follow-ups
     expect(client.graphql).toHaveBeenCalledTimes(2);
-    expect(history.listTrackedMerged(7, NOW)).toHaveLength(50);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0])).toMatch(/truncated/);
+    expect(history.listTrackedMerged(7, NOW)).toHaveLength(3);
+    expect(warn).not.toHaveBeenCalled(); // nothing dropped → no truncation warning
   });
 });
 

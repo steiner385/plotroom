@@ -459,13 +459,13 @@ const SWEEP_LOW_BUDGET_MS = 300_000;
 /** Re-check ancestry for the same (sha, deployedSha) pair at most once per minute. */
 const ANCESTRY_THROTTLE_MS = 60_000;
 
-/** Page cap per owner for the startup (7-day window) deep merged sweep. */
+/** Page cap per owner for the merged search, followed whenever the window holds
+ *  more than one page (a catch-up window after downtime — see Poller.sweepImpl). */
 const MAX_MERGED_PAGES = 12;
 
 /** Page cap per owner for the open-PR search, followed on EVERY sweep — open PRs
- *  are the core dataset and must always be complete (unlike the merged 7-day
- *  window, which only needs depth at startup). 5 pages = 250 open PRs per owner;
- *  beyond that the sweep logs a truncation warning. */
+ *  are the core dataset and must always be complete. 5 pages = 250 open PRs per
+ *  owner; beyond that the sweep logs a truncation warning. */
 const MAX_OPEN_PAGES = 5;
 
 /** Re-derive required-check prefixes from a deploy repo's ci.yml at most this often. */
@@ -704,15 +704,19 @@ export class Poller extends EventEmitter {
   // ---- fetch cycles -------------------------------------------------------
 
   /**
-   * @param deepMergedSweep startup-only (fresh DB): the merged window spans 7 days and
-   * can exceed one search page — follow pagination up to MAX_MERGED_PAGES per owner.
-   * Routine incremental sweeps (90s..minutes window) stay single-page.
+   * Both the open AND merged searches follow pagination whenever GitHub reports
+   * a next page (up to MAX_*_PAGES per owner). A steady-state incremental sweep
+   * sees a single page, so this is free in the common case — but a catch-up
+   * window after downtime (process restart, outage, host off) can hold >50
+   * merges, and dropping the overflow used to lose those PRs permanently:
+   * lastSweep advances past them and nothing ever re-scans the gap. Paginate-
+   * on-hasNextPage keeps the merged set complete regardless of window width.
    */
-  async sweepOnce(deepMergedSweep = false): Promise<void> {
-    return this.withLatch('sweep', () => this.sweepImpl(deepMergedSweep));
+  async sweepOnce(): Promise<void> {
+    return this.withLatch('sweep', () => this.sweepImpl());
   }
 
-  private async sweepImpl(deepMergedSweep: boolean): Promise<void> {
+  private async sweepImpl(): Promise<void> {
     const { history, config } = this.deps;
     const sweepStartedAt = this.now(); // captured BEFORE the fetch: next window must overlap it
     const since = history.getMeta('lastSweep') ?? new Date(sweepStartedAt.getTime() - 90_000).toISOString();
@@ -738,9 +742,11 @@ export class Poller extends EventEmitter {
         const issueCount: number = (payload as any)?.issueCount ?? 0;
         const pageInfo = (payload as any)?.pageInfo as { hasNextPage?: boolean; endCursor?: string | null } | undefined;
         ownerResultCounts.set(owner, (ownerResultCounts.get(owner) ?? 0) + nodes.length);
-        // Open searches paginate on EVERY sweep (the open set must be complete —
-        // see fetchOpenPages); merged searches only on the startup deep sweep.
-        const willPaginate = (alias.startsWith('open') || (deepMergedSweep && alias.startsWith('merged')))
+        // Both open and merged searches paginate whenever GitHub reports a next
+        // page — the open set must always be complete (fetchOpenPages), and the
+        // merged set must not silently drop the overflow of a catch-up window
+        // (dropped merges advance lastSweep past them and are lost forever).
+        const willPaginate = (alias.startsWith('open') || alias.startsWith('merged'))
           && !!pageInfo?.hasNextPage && !!pageInfo.endCursor;
         if (!warnedTruncation && issueCount > nodes.length && !willPaginate) {
           console.warn(`[poller] sweep truncated: ${alias} (owner ${owner}) returned ${nodes.length} of ${issueCount} PRs`);
@@ -817,7 +823,8 @@ export class Poller extends EventEmitter {
     }
   }
 
-  /** Startup deep sweep: follow merged-search pagination (pages 2..MAX) for one owner. */
+  /** Follow merged-search pagination (pages 2..MAX) for one owner — runs whenever
+   *  the merged window holds more than one page (a catch-up window after downtime). */
   private async fetchMergedPages(client: GithubClient, owner: string, since: string,
     cursor: string, seenOpen: Set<string>): Promise<void> {
     for (let page = 2; page <= MAX_MERGED_PAGES; page++) {
@@ -830,7 +837,7 @@ export class Poller extends EventEmitter {
       if (!pageInfo?.hasNextPage || !pageInfo.endCursor) return;
       cursor = pageInfo.endCursor;
     }
-    console.warn(`[poller] deep merged sweep for ${owner} stopped at the ${MAX_MERGED_PAGES}-page cap`);
+    console.warn(`[poller] merged sweep for ${owner} stopped at the ${MAX_MERGED_PAGES}-page cap`);
   }
 
   /**

@@ -548,15 +548,22 @@ export async function createPrDashboardBackend(
    * poller, the digest, and the budget timer.
    */
   function startPoller(): () => void {
-    // Initial deep-sweep / backfill on a fresh DB — fire and forget (async),
+    // Initial reconcile + (fresh-DB-only) backfill — fire and forget (async),
     // exactly as standalone does it inline before listen().
     void (async () => {
       try {
-        if (!history.getMeta('backfilled')) {
-          // On a fresh DB, set lastSweep 7 days back so the startup merged-window covers 7 days.
-          history.setMeta('lastSweep', new Date(Date.now() - 7 * 86400_000).toISOString());
-          console.log('First launch: backfilling check-run history…');
-          await poller.sweepOnce(true);                   // deep sweep: paginate the 7-day merged window
+        const freshDb = !history.getMeta('backfilled');
+        // EVERY boot: widen the first sweep's merged window to the full retention
+        // period so merges that landed while we were down (restart, outage, host
+        // off) are re-scanned and upserted (idempotent). The routine incremental
+        // window never looks back far enough, so without this a downtime gap loses
+        // its merges permanently. The merged search paginates on hasNextPage, so a
+        // wide window is handled correctly (see Poller.sweepImpl).
+        history.setMeta('lastSweep', new Date(Date.now() - config.retentionDays * 86400_000).toISOString());
+        if (freshDb) console.log('First launch: backfilling check-run history…');
+        await poller.sweepOnce();
+        if (freshDb) {
+          // One-time, expensive per-repo check-run history backfill (fresh DB only).
           const repos = new Set<string>(Object.keys(poller.effectiveDeploy()));
           // backfill every repo that has an open PR too
           for (const { repo } of poller.getState().repos.flatMap((r) => r.prs)) repos.add(repo);
