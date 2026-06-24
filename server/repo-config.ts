@@ -44,32 +44,33 @@ function parseDeploy(repo: string, raw: unknown, warnings: string[]): DeployConf
   if (raw.environments !== undefined && !Array.isArray(raw.environments)) {
     warnings.push('deploy.environments must be a list — treated as empty');
   }
-  const environments: EnvConfig[] = [];
+  // Collect valid env names first to compute order and auto-default.
+  const validEnvsRaw: Array<{ name: string; e: Record<string, unknown> }> = [];
   for (const e of envsRaw) {
     if (!isMapping(e)) {
       warnings.push('deploy environment must be a mapping — environment dropped');
       continue;
     }
-    const name = String(e.name ?? '').toLowerCase() as EnvConfig['name'];
-    if (name !== 'qa' && name !== 'prod') {
-      warnings.push(`deploy environment name must be "qa" or "prod" (got "${String(e.name)}") — environment dropped`);
-      continue;
-    }
+    const name = String(e.name ?? '').toLowerCase();
     if (typeof e.healthUrl !== 'string' || !e.healthUrl) {
       warnings.push(`deploy environment "${name}" is missing healthUrl — environment dropped`);
       continue;
     }
-    environments.push({
-      name,
-      healthUrl: e.healthUrl,
-      auto: typeof e.auto === 'boolean' ? e.auto : name === 'qa',
-      shaKey: typeof e.shaKey === 'string' && e.shaKey ? e.shaKey : 'commitSha',
-    });
+    validEnvsRaw.push({ name, e });
   }
+  const order = validEnvsRaw.map((v) => v.name);
+  const firstEnvName = order[0] ?? '';
+  const environments: EnvConfig[] = validEnvsRaw.map(({ name, e }) => ({
+    name,
+    healthUrl: e.healthUrl as string,
+    auto: typeof e.auto === 'boolean' ? e.auto : name === firstEnvName,
+    shaKey: typeof e.shaKey === 'string' && e.shaKey ? e.shaKey as string : 'commitSha',
+  }));
   return {
     cloneUrl: typeof raw.cloneUrl === 'string' && raw.cloneUrl ? raw.cloneUrl : `https://github.com/${repo}.git`,
     defaultBranch: typeof raw.defaultBranch === 'string' && raw.defaultBranch ? raw.defaultBranch : 'main',
     environments,
+    order,
   };
 }
 

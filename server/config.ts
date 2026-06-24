@@ -6,7 +6,7 @@ import { DEFAULT_NOTIFICATIONS, NOTIFICATION_EVENT_TYPES, type NotificationsConf
 import type { RepoFileConfig } from './repo-config';
 
 export interface EnvConfig {
-  name: 'qa' | 'prod';
+  name: string;
   healthUrl: string;
   auto: boolean;
   /** JSON key in the /health payload that carries the deployed commit sha. */
@@ -14,6 +14,9 @@ export interface EnvConfig {
 }
 export interface DeployConfig {
   environments: EnvConfig[];
+  /** Env names in promotion order (first → last). Defaults to declaration order
+   *  of `environments`. The first env auto-deploys by default. */
+  order: string[];
   /** Git URL for the local bare clone. Used only when `ancestrySource` is
    *  'clone' (or as the fallback target of a pre-existing clone in 'api' mode);
    *  optional in user config — defaults to the repo's GitHub URL. */
@@ -385,21 +388,22 @@ export async function resolveOwners(
 
 /** Fill cloneUrl/defaultBranch defaults and validate/normalize environments. */
 function normalizeDeployConfig(repo: string, dc: Partial<DeployConfig>): DeployConfig {
-  const environments = (dc.environments ?? []).map((env): EnvConfig => {
-    const name = String(env.name ?? '').toLowerCase() as EnvConfig['name'];
-    if (name !== 'qa' && name !== 'prod') {
-      throw new Error(
-        `config: deploy["${repo}"] environment name must be "qa" or "prod" (got "${String(env.name)}")`);
-    }
+  const rawEnvs = dc.environments ?? [];
+  // Compute order first so auto-default can reference order[0].
+  const order = dc.order ?? rawEnvs.map((e) => String(e.name ?? '').toLowerCase());
+  const firstEnvName = order[0] ?? '';
+  const environments = rawEnvs.map((env): EnvConfig => {
+    const name = String(env.name ?? '').toLowerCase();
     if (!env.healthUrl) {
       throw new Error(`config: deploy["${repo}"] environment "${name}" is missing healthUrl`);
     }
-    return { name, healthUrl: env.healthUrl, auto: env.auto ?? name === 'qa', shaKey: env.shaKey ?? 'commitSha' };
+    return { name, healthUrl: env.healthUrl, auto: env.auto ?? (name === firstEnvName), shaKey: env.shaKey ?? 'commitSha' };
   });
   return {
     cloneUrl: dc.cloneUrl ?? `https://github.com/${repo}.git`,
     defaultBranch: dc.defaultBranch ?? 'main',
     environments,
+    order,
   };
 }
 

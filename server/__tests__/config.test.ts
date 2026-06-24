@@ -57,6 +57,7 @@ describe('loadConfig', () => {
     const dc = cfg.deploy['acme/widgets'];
     expect(dc.cloneUrl).toBe('https://github.com/acme/widgets.git');
     expect(dc.defaultBranch).toBe('main');
+    expect(dc.order).toEqual(['qa']);
     expect(dc.environments).toEqual([
       { name: 'qa', healthUrl: 'https://qa.widgets.dev/health', auto: true, shaKey: 'commitSha' },
     ]);
@@ -73,15 +74,21 @@ describe('loadConfig', () => {
     expect(loadConfig(path).deploy['acme/widgets'].environments[0].shaKey).toBe('gitSha');
   });
 
-  it('throws on a bogus env name after normalization', () => {
+  it('arbitrary env names are accepted — staging/production normalizes with order, no throw', () => {
     const path = writeConfig({
       deploy: {
         'acme/widgets': {
-          environments: [{ name: 'staging', healthUrl: 'https://x/health' }],
+          environments: [
+            { name: 'staging', healthUrl: 'h' },
+            { name: 'production', healthUrl: 'h2' },
+          ],
         },
       },
     });
-    expect(() => loadConfig(path)).toThrow(/acme\/widgets.*"qa" or "prod".*staging/);
+    const dc = loadConfig(path).deploy['acme/widgets'];
+    expect(dc.order).toEqual(['staging', 'production']);
+    expect(dc.environments[0]!.auto).toBe(true);   // first env auto by default
+    expect(dc.environments[1]!.auto).toBe(false);  // second env not auto by default
   });
 
   it('throws when an environment is missing healthUrl', () => {
@@ -219,6 +226,7 @@ describe('loadConfig', () => {
     const dc = loadConfig(path).deploy['acme/widgets'];
     expect(dc.cloneUrl).toBe('git@github.com:acme/widgets.git');
     expect(dc.defaultBranch).toBe('trunk');
+    expect(dc.order).toEqual(['prod']);
     expect(dc.environments[0]).toEqual({
       name: 'prod', healthUrl: 'https://widgets.dev/health', auto: true, shaKey: 'commitSha' });
   });
@@ -322,7 +330,8 @@ deploy:
 
   it('an instance config deploy entry overrides the in-repo block whole-entry (instance-override case)', () => {
     const instanceDc = { cloneUrl: 'https://github.com/acme/gizmos.git', defaultBranch: 'main',
-      environments: [{ name: 'qa' as const, healthUrl: 'https://qa.instance.dev/health', auto: true, shaKey: 'commitSha' }] };
+      order: ['qa'],
+      environments: [{ name: 'qa', healthUrl: 'https://qa.instance.dev/health', auto: true, shaKey: 'commitSha' }] };
     const config: AppConfig = { ...DEFAULTS, deploy: { 'acme/gizmos': instanceDc } };
     const map = effectiveDeployMap(config, new Map([['acme/gizmos', fileWithDeploy]]));
     expect(map['acme/gizmos']).toBe(instanceDc); // the override object itself — not field-merged

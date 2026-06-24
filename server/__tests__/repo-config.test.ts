@@ -31,6 +31,7 @@ deploy:
     expect(cfg.deploy).toEqual({
       cloneUrl: 'https://github.com/acme/widgets.git', // defaulted from the repo
       defaultBranch: 'trunk',
+      order: ['qa', 'prod'],
       environments: [
         { name: 'qa', healthUrl: 'https://qa.example.com/health', auto: true, shaKey: 'commitSha' },
         // prod: auto defaults false, shaKey defaults commitSha
@@ -48,7 +49,7 @@ deploy:
     ]);
   });
 
-  it('is throw-free: a bogus env name drops that environment with a warning', () => {
+  it('arbitrary env names are accepted — staging/prod both kept, order computed, auto defaults to first', () => {
     const cfg = parseRepoConfig(REPO, `
 deploy:
   environments:
@@ -57,9 +58,14 @@ deploy:
     - name: prod
       healthUrl: https://x/health
 `)!;
-    expect(cfg.deploy!.environments).toHaveLength(1);
-    expect(cfg.deploy!.environments[0]!.name).toBe('prod');
-    expect(cfg.warnings.join(' ')).toMatch(/"qa" or "prod".*staging/);
+    expect(cfg.deploy!.environments).toHaveLength(2);
+    expect(cfg.deploy!.environments[0]!.name).toBe('staging');
+    expect(cfg.deploy!.environments[1]!.name).toBe('prod');
+    expect(cfg.deploy!.order).toEqual(['staging', 'prod']);
+    expect(cfg.deploy!.environments[0]!.auto).toBe(true);   // first env auto by default
+    expect(cfg.deploy!.environments[1]!.auto).toBe(false);  // second env not auto by default
+    // No qa/prod-restriction warning should appear
+    expect(cfg.warnings.join(' ')).not.toMatch(/"qa" or "prod"/);
   });
 
   it('an environment missing healthUrl is dropped with a warning', () => {
