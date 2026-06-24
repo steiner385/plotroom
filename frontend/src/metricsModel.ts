@@ -7,6 +7,7 @@
 import type { HeadlineStat, MetricsBucket, MetricsWindow } from './types';
 import type { BandPoint, ChartPoint } from './charts';
 import { formatDur } from './format';
+import { computeTrend, type Trend } from './lib/trend';
 
 export const WINDOWS = ['24h', '3d', '7d', '14d', '30d'] as const;
 export const WINDOW_DAYS: Record<MetricsWindow, number> = {
@@ -59,6 +60,12 @@ export function deltaText(stat: HeadlineStat): string | null {
   const pct = Math.round(((stat.value - stat.prev) / stat.prev) * 100);
   if (pct === 0) return '≈ prev';
   return `${pct > 0 ? '+' : ''}${pct}% vs prev`;
+}
+
+/** A HeadlineStat → Trend, for the consistent delta-vs-baseline arrow (#258).
+ *  lowerIsBetter: latency/wait/duration metrics pass true; counts pass false. */
+export function trendOf(stat: HeadlineStat, lowerIsBetter: boolean): Trend {
+  return computeTrend(stat.value, stat.prev, { lowerIsBetter });
 }
 
 export const fmtHours = (h: number): string => formatDur(h * 3600);
