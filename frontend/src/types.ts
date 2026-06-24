@@ -99,6 +99,11 @@ export interface PrView {
   /** True when costDollars is a known undercount: rates exist but at least
    *  one counted check ran on an unpriced pool — rendered '(partial)'. */
   costDollarsPartial?: boolean;
+  /** The repo's first/terminal deploy env names (#258) — label the MetroTrack
+   *  deploy nodes + resolve the Waterfall deploy segments. Null/absent for
+   *  deploy-less repos and pre-upgrade payloads (→ QA/Prod fallback). */
+  firstEnv?: string | null;
+  terminalEnv?: string | null;
 }
 
 /** Mirror of server estimator/queue.ts MergeEtaSimulation (issue #40). */

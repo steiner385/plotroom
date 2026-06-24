@@ -144,6 +144,11 @@ export interface PrView {
    *  when costMinutes is null — the flag qualifies a $ figure, never replaces
    *  one. The UI renders '(partial)'. */
   costDollarsPartial: boolean;
+  /** The repo's first/terminal deploy env names (#258) — the UI labels the
+   *  MetroTrack deploy nodes + resolves the Waterfall deploy segments with these.
+   *  Null for deploy-less repos. */
+  firstEnv?: string | null;
+  terminalEnv?: string | null;
 }
 
 /** Absolute plausibility cap (secs) for a SUCCESS duration sample when the
@@ -2812,6 +2817,8 @@ export class Poller extends EventEmitter {
       queueAheadCount, costMinutes, costDollars, costDollarsPartial,
       checks: this.checkViews(pr, now, prefixes),
       timeline: null,
+      firstEnv: this.deployEnvsFor(pr.repo)?.firstEnv ?? null,
+      terminalEnv: this.deployEnvsFor(pr.repo)?.terminalEnv ?? null,
       touchesWorkflows: pr.touchesWorkflows,
       workflowImpact: pr.touchesWorkflows && pr.headSha
         ? this.workflowImpactCache.get(`${pr.repo}\u0000${pr.headSha}`) ?? null
@@ -2881,7 +2888,7 @@ export class Poller extends EventEmitter {
         envLive: rec.envLive },
       touchesWorkflows: false, workflowImpact: null,
       groupChecks: null, mergeEtaSim: null, costMinutes: null, costDollars: null,
-      costDollarsPartial: false };
+      costDollarsPartial: false, firstEnv, terminalEnv };
   }
 
   private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {
