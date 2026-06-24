@@ -127,11 +127,12 @@ describe('merged PRs', () => {
     expect(h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0].mergeCommitSha).toBe('def456');
   });
 
-  it('markEnvLive rejects a bogus environment name (defense in depth)', () => {
-    h.upsertMergedPr({ repo: REPO, number: 8953, title: 't', url: 'u',
+  it('markEnvLive accepts arbitrary env names and writes to pr_env_live', () => {
+    const ts = '2026-06-10T13:00:00Z';
+    h.upsertMergedPr({ repo: REPO, number: 9, title: 't', url: 'u',
       mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x' });
-    expect(() => h.markEnvLive(REPO, 8953, 'staging' as never, '2026-06-10T13:00:00Z'))
-      .toThrow(/qa.*prod|prod.*qa/);
+    expect(() => h.markEnvLive(REPO, 9, 'staging', ts)).not.toThrow();
+    expect(h.envLiveFor(REPO, 9)).toEqual({ staging: ts });
   });
 
   it('excludes PRs merged outside the retention window', () => {

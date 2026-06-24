@@ -168,6 +168,7 @@ export class HistoryStore {
   private readonly stmtUpsertPr: Database.Statement;
   private readonly stmtMarkQaLive: Database.Statement;
   private readonly stmtMarkProdLive: Database.Statement;
+  private readonly stmtUpsertEnvLive: Database.Statement;
   private readonly stmtListTracked: Database.Statement;
   private readonly stmtInsertGap: Database.Statement;
   private readonly stmtSelectGaps: Database.Statement;
@@ -488,6 +489,9 @@ export class HistoryStore {
     );
     this.stmtMarkProdLive = this.db.prepare(
       'UPDATE merged_prs SET prod_live_at=? WHERE repo=? AND number=? AND prod_live_at IS NULL'
+    );
+    this.stmtUpsertEnvLive = this.db.prepare(
+      'INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at) VALUES (?, ?, ?, ?)'
     );
     this.stmtListTracked = this.db.prepare(
       'SELECT * FROM merged_prs WHERE merged_at >= ? ORDER BY merged_at DESC'
@@ -887,13 +891,12 @@ export class HistoryStore {
       pr.createdAt ?? null, pr.firstGreenAt ?? null, pr.enqueuedAt ?? null, pr.mergedBy ?? null);
   }
 
-  markEnvLive(repo: string, number: number, env: 'qa' | 'prod', at: string): void {
-    // Defense in depth: untyped callers must never write an unknown env column.
-    if (env !== 'qa' && env !== 'prod') {
-      throw new Error(`markEnvLive: env must be 'qa' or 'prod', got '${String(env)}'`);
-    }
-    const stmt = env === 'qa' ? this.stmtMarkQaLive : this.stmtMarkProdLive;
-    stmt.run(at, repo, number);
+  markEnvLive(repo: string, number: number, env: string, at: string): void {
+    // Always write to the new generalised table (first-write-wins via INSERT OR IGNORE).
+    this.stmtUpsertEnvLive.run(repo, number, env, at);
+    // Mirror to legacy columns so metrics/leadtime keep working until Task 5 migrates them.
+    if (env === 'qa') this.stmtMarkQaLive.run(at, repo, number);
+    if (env === 'prod') this.stmtMarkProdLive.run(at, repo, number);
   }
 
   /**
