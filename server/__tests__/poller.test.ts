@@ -2011,6 +2011,22 @@ describe('Poller buildQueueView — queue view payload (V1)', () => {
     expect(groupB.failed).toBe(true);
   });
 
+  it('surfaces a queue-wait p50 trend ({value, prev}) from the 7d / prior-7d windows (#258)', async () => {
+    // NOW = 2026-06-10T12:00Z → recent window ≥ 2026-06-03T12; prior is before it.
+    history.recordQueueWait('acme/widgets', 100, '2026-06-01T00:00:00Z'); // prior
+    history.recordQueueWait('acme/widgets', 100, '2026-06-01T01:00:00Z'); // prior
+    history.recordQueueWait('acme/widgets', 200, '2026-06-08T00:00:00Z'); // recent
+    history.recordQueueWait('acme/widgets', 200, '2026-06-08T01:00:00Z'); // recent
+    const rollupBox = { current: rollupRunning as Record<string, unknown> };
+    const p = new Poller({ router: asRouter(queueViewClient(rollupBox)), history, deploy: noDeploy(),
+      config: CONFIG, now: () => NOW });
+    await p.sweepOnce();   // sweep cycle fills the queue-wait-stats cache
+    await p.detailOnce();
+    await p.queueOnce();
+    const queue = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.queue!;
+    expect(queue.queueWaitP50).toEqual({ value: 200, prev: 100 });
+  });
+
   it('returns null when there are no queue entries for the repo', async () => {
     const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });

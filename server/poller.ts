@@ -34,7 +34,7 @@ import { computeRepoFlakeSummary, type RepoFlakeSummary } from './estimator/flak
 import { computeRepoDeploy, type RepoDeployStatus } from './estimator/deploy-status';
 import { diffCiGraphs, type WorkflowImpact } from './workflow-impact';
 import { splitOidChecks } from './oid-checks';
-import { computeCostSummary, type CostSummary } from './metrics';
+import { computeCostSummary, queueWaitStatsByRepo, type CostSummary, type HeadlineStat } from './metrics';
 import { RUNNER_JOB_KEYS, type RunnerJobInput } from './estimator/runner-plan';
 import { projectInputs, reclaimWindowMs } from './estimator/routing-inputs';
 import { parseScheduledWorkflows, scheduledRunsApiPath, type ScheduledRunsApiResponse } from './scheduled';
@@ -408,6 +408,10 @@ export interface RepoQueueView {
   batchSuccessRatePct: number | null;
   /** Distinct ejected group shas in the last 24h. */
   ejects24h: number;
+  /** Queue-wait p50 over the recent 7d vs the prior 7d (#258) — the live trend
+   *  source for the Pipeline ops strip. Null when the repo has no wait samples.
+   *  Absent (undefined) on pre-#258 payloads. */
+  queueWaitP50: HeadlineStat | null;
 }
 export interface DashboardState {
   generatedAt: string;
@@ -486,6 +490,13 @@ const FLAKE_SUMMARY_LOOKBACK_MS = 14 * 86400_000;
  *  wasted; this is a distinct slow cadence from the per-build flakeRatesFor
  *  cache (FLAKE_CACHE_TTL_MS) used by the live check-radar. */
 const FLAKE_SUMMARY_INTERVAL_MS = 3 * 60_000;
+
+/** Recompute the per-repo queue-wait p50 trend (#258) at most this often — a
+ *  14-day rollup split into 7d windows moves slowly, so a per-sweep recompute
+ *  would be wasted SQLite work. */
+const QUEUE_WAIT_STATS_INTERVAL_MS = 3 * 60_000;
+/** Recent/prior window half-width for the queue-wait trend (#258): 7d vs 7d. */
+const QUEUE_WAIT_WINDOW_MS = 7 * 86400_000;
 
 /** Re-list a repo's recent push runs (to learn push-only job pools) at most
  *  this often per repo — the push job set is near-static, so 6h is plenty to
@@ -620,6 +631,8 @@ export class Poller extends EventEmitter {
   private routingInputsAt = 0;                                            // epoch ms of the last routing-inputs recompute
   private flakeSummaryCache = new Map<string, RepoFlakeSummary>();        // repo → per-cycle flake summary (Failures & flake lane, Spec 5); buildState reads this (spec §15)
   private flakeSummaryAt = 0;                                             // epoch ms of the last flake-summary recompute (throttled — 14-day rollup moves slowly)
+  private queueWaitStatsCache = new Map<string, HeadlineStat>();          // repo → per-cycle queue-wait p50 {value,prev} (#258); buildQueueView reads this (spec §15)
+  private queueWaitStatsAt = 0;                                           // epoch ms of the last queue-wait-stats recompute (throttled)
   private lastHourlyScanAt = 0;                           // epoch ms of the last hourly scan pass (#41/#45)
   private warnedAncestryFallback = new Set<string>();    // repos whose api→clone ancestry fallback was logged (log once)
   private warnedJobsApi = new Set<string>();             // repos whose jobs-API pool-learn fetch failed (log once)
@@ -786,6 +799,9 @@ export class Poller extends EventEmitter {
     // Per-repo flake summary (Failures & flake lane, Spec 5) — same cycle,
     // throttled internally (14-day rollup moves slowly); buildState reads cache.
     this.refreshFlakeSummary();
+    // Per-repo queue-wait p50 trend (#258) — same cycle, throttled internally;
+    // buildQueueView reads the cache.
+    this.refreshQueueWaitStats();
     this.emitUpdate();
   }
 
@@ -910,6 +926,10 @@ export class Poller extends EventEmitter {
     for (const key of tracked) liveRepos.add(key.slice(0, key.lastIndexOf('#')));
     for (const repo of this.laneHealthCache.keys()) {
       if (!liveRepos.has(repo)) this.laneHealthCache.delete(repo);
+    }
+    // queue-wait stats cache (#258) — keyed by repo; drop repos no longer surfaced
+    for (const repo of this.queueWaitStatsCache.keys()) {
+      if (!liveRepos.has(repo)) this.queueWaitStatsCache.delete(repo);
     }
     // scheduled-lane discovery (Spec 4) is keyed by repo — drop repos no longer
     // surfaced (scheduledCache is cleared+rebuilt each cycle, so it self-prunes).
@@ -2127,6 +2147,21 @@ export class Poller extends EventEmitter {
    * `flakeStats` (same-sha fail-then-pass resolution, CANCELLED never a verdict)
    * over a 14-day window; computeRepoFlakeSummary only filters/sorts/trims.
    */
+  /**
+   * Per-cycle queue-wait p50 trend (#258): recent 7d vs prior 7d p50 per repo,
+   * from the durable queue_waits table — reuses the Metrics windowing so the
+   * live Pipeline trend matches the Metrics panel. buildQueueView reads the
+   * cache (spec §15: no SQLite in the build path).
+   */
+  private refreshQueueWaitStats(): void {
+    const nowMs = this.now().getTime();
+    if (nowMs - this.queueWaitStatsAt < QUEUE_WAIT_STATS_INTERVAL_MS && this.queueWaitStatsCache.size) return;
+    const prevSince = new Date(nowMs - 2 * QUEUE_WAIT_WINDOW_MS).toISOString();
+    const since = new Date(nowMs - QUEUE_WAIT_WINDOW_MS).toISOString();
+    this.queueWaitStatsCache = queueWaitStatsByRepo(this.deps.history.queueWaitsSince(prevSince), since);
+    this.queueWaitStatsAt = nowMs;
+  }
+
   private refreshFlakeSummary(): void {
     const nowMs = this.now().getTime();
     if (nowMs - this.flakeSummaryAt < FLAKE_SUMMARY_INTERVAL_MS && this.flakeSummaryCache.size) return;
@@ -2405,6 +2440,7 @@ export class Poller extends EventEmitter {
       batchSuccessRatePct: runs7d + ejects7d > 0
         ? Math.round((runs7d / (runs7d + ejects7d)) * 100) : null,
       ejects24h: history.countGroupEjects(repo, dayAgo),
+      queueWaitP50: this.queueWaitStatsCache.get(repo) ?? null,
     };
   }
 
