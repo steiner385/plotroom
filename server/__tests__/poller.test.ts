@@ -2625,6 +2625,7 @@ describe('Poller in-repo .pr-dashboard.yml (Z1)', () => {
       rollupJobId: 'rollup',                          // in-repo
       workflowPath: '.github/workflows/ci.yml',       // default
       batchSize: 12,                                  // in-repo
+      autoDiscoverDeploy: false,
     });
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]))
@@ -2688,7 +2689,8 @@ describe('Poller in-repo .pr-dashboard.yml (Z1)', () => {
     expect(blobCalls(client)).toBe(1);
     expect(p.settingsFor('acme/widgets')).toEqual({
       requiredCheckPrefixes: undefined, rollupJobId: 'ci',
-      workflowPath: '.github/workflows/ci.yml', batchSize: DEFAULTS.batchSize });
+      workflowPath: '.github/workflows/ci.yml', batchSize: DEFAULTS.batchSize,
+      autoDiscoverDeploy: false });
     t += 60_000;
     await p.deployOnce();            // within 24h — throttled
     expect(blobCalls(client)).toBe(1);

@@ -37,6 +37,10 @@ export interface RepoConfig {
   workflowPath?: string;
   /** Merge-queue batch size for this repo (defaults to the global batchSize). */
   batchSize?: number;
+  /** Opt-in flag: when true, deploy environments for this repo may be
+   *  auto-discovered from GitHub (Phase 2). Default false — off unless explicitly
+   *  set. File-only (deploy-adjacent); never PUT-writable. */
+  autoDiscoverDeploy?: boolean;
 }
 /** One pool's cost-explorer metadata (file-only `poolMeta` map). */
 export interface PoolMetaEntry {
@@ -250,6 +254,8 @@ export interface RepoSettings {
   rollupJobId: string;
   workflowPath: string;
   batchSize: number;
+  /** Whether deploy auto-discovery is enabled for this repo. Default false. */
+  autoDiscoverDeploy: boolean;
 }
 
 /**
@@ -267,6 +273,7 @@ export function effectiveRepoSettings(
     rollupJobId: rc.rollupJobId ?? fileCfg?.rollupJobId ?? 'ci',
     workflowPath: rc.workflowPath ?? fileCfg?.workflowPath ?? '.github/workflows/ci.yml',
     batchSize: rc.batchSize ?? fileCfg?.batchSize ?? config.batchSize,
+    autoDiscoverDeploy: rc.autoDiscoverDeploy ?? fileCfg?.autoDiscoverDeploy ?? false,
   };
 }
 

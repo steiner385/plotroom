@@ -240,6 +240,7 @@ describe('repoSettings', () => {
       rollupJobId: 'ci',
       workflowPath: '.github/workflows/ci.yml',
       batchSize: DEFAULTS.batchSize,
+      autoDiscoverDeploy: false,
     });
   });
 
@@ -262,6 +263,7 @@ describe('repoSettings', () => {
       rollupJobId: 'rollup',
       workflowPath: '.github/workflows/main.yml',
       batchSize: 12,
+      autoDiscoverDeploy: false,
     });
     expect(repoSettings(config, 'acme/gizmos').batchSize).toBe(4);
     expect(repoSettings(config, 'acme/gizmos').rollupJobId).toBe('ci');
@@ -289,6 +291,7 @@ batchSize: 12
       rollupJobId: 'rollup',
       workflowPath: '.github/workflows/main.yml',
       batchSize: 12,
+      autoDiscoverDeploy: false,
     });
   });
 
@@ -1204,5 +1207,40 @@ describe('loadConfig allowMissingPrivateKey (#202 — inline App key for embedde
   it('still validates appId even with the option set', () => {
     expect(() => loadConfig(writeConfig({ tokenSource: 'app', app: { appId: 0 } }),
       { allowMissingPrivateKey: true })).toThrow(/appId/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 12: per-repo autoDiscoverDeploy opt-in flag (default OFF)
+// ---------------------------------------------------------------------------
+describe('effectiveRepoSettings — autoDiscoverDeploy', () => {
+  it('defaults to false when neither instance override nor fileCfg sets it', () => {
+    const s = effectiveRepoSettings('acme/widgets', DEFAULTS);
+    expect(s.autoDiscoverDeploy).toBe(false);
+  });
+
+  it('is true when set in the instance repos override', () => {
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: true } } };
+    expect(effectiveRepoSettings('acme/widgets', config).autoDiscoverDeploy).toBe(true);
+  });
+
+  it('is true when set in the in-repo fileCfg', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: true\n')!;
+    expect(effectiveRepoSettings('acme/widgets', DEFAULTS, fileCfg).autoDiscoverDeploy).toBe(true);
+  });
+
+  it('instance override wins over fileCfg (false override beats true fileCfg)', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: true\n')!;
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: false } } };
+    expect(effectiveRepoSettings('acme/widgets', config, fileCfg).autoDiscoverDeploy).toBe(false);
+  });
+
+  it('instance override true wins over fileCfg false', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: false\n')!;
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: true } } };
+    expect(effectiveRepoSettings('acme/widgets', config, fileCfg).autoDiscoverDeploy).toBe(true);
   });
 });

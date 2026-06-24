@@ -158,4 +158,31 @@ aliases:
       expect(cfg?.aliases).toBeUndefined();
     });
   });
+
+  // Task 12: autoDiscoverDeploy opt-in flag
+  describe('autoDiscoverDeploy', () => {
+    it('parses autoDiscoverDeploy: true from the file', () => {
+      const cfg = parseRepoConfig(REPO, 'autoDiscoverDeploy: true\n')!;
+      expect(cfg.autoDiscoverDeploy).toBe(true);
+      expect(cfg.warnings).toEqual([]);
+    });
+
+    it('parses autoDiscoverDeploy: false from the file', () => {
+      const cfg = parseRepoConfig(REPO, 'autoDiscoverDeploy: false\n')!;
+      expect(cfg.autoDiscoverDeploy).toBe(false);
+      expect(cfg.warnings).toEqual([]);
+    });
+
+    it('drops a non-boolean autoDiscoverDeploy with a warning', () => {
+      const cfg = parseRepoConfig(REPO, 'autoDiscoverDeploy: "yes"\n')!;
+      expect(cfg.autoDiscoverDeploy).toBeUndefined();
+      expect(cfg.warnings.join(' ')).toMatch(/autoDiscoverDeploy/);
+    });
+
+    it('drops a numeric autoDiscoverDeploy with a warning', () => {
+      const cfg = parseRepoConfig(REPO, 'autoDiscoverDeploy: 1\n')!;
+      expect(cfg.autoDiscoverDeploy).toBeUndefined();
+      expect(cfg.warnings.join(' ')).toMatch(/autoDiscoverDeploy/);
+    });
+  });
 });

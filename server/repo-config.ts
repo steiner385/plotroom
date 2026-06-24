@@ -22,11 +22,15 @@ export interface RepoFileConfig {
    *  so durations / pools / runner-waits / flake follow the rename instead of
    *  cold-starting. Declare it in the SAME PR as the workflow/job rename. */
   aliases?: Record<string, string>;
+  /** Opt-in flag: when true, deploy environments for this repo may be
+   *  auto-discovered from GitHub (Phase 2). Default false — off unless explicitly
+   *  set. */
+  autoDiscoverDeploy?: boolean;
   /** Human-readable notes for every invalid piece that was dropped. */
   warnings: string[];
 }
 
-const KNOWN_KEYS = new Set(['rollupJobId', 'workflowPath', 'requiredCheckPrefixes', 'batchSize', 'deploy', 'aliases']);
+const KNOWN_KEYS = new Set(['rollupJobId', 'workflowPath', 'requiredCheckPrefixes', 'batchSize', 'deploy', 'aliases', 'autoDiscoverDeploy']);
 
 function isMapping(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -127,6 +131,13 @@ export function parseRepoConfig(repo: string, yamlText: string): RepoFileConfig 
       if (Object.keys(clean).length) out.aliases = clean;
     } else {
       warnings.push('aliases must be a mapping of old-name -> new-name — dropped');
+    }
+  }
+  if (doc.autoDiscoverDeploy !== undefined) {
+    if (typeof doc.autoDiscoverDeploy === 'boolean') {
+      out.autoDiscoverDeploy = doc.autoDiscoverDeploy;
+    } else {
+      warnings.push('autoDiscoverDeploy must be a boolean — dropped');
     }
   }
   if (doc.deploy !== undefined) {
