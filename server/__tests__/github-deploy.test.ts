@@ -3,8 +3,10 @@ import {
   fetchEnvironments,
   fetchRecentDeployments,
   fetchDeploymentState,
+  inferDeployTopology,
   type DeployClient,
   type DeploymentRec,
+  type DeploymentWithState,
 } from '../github-deploy';
 
 /** Minimal fake client: restGet returns the canned value for the matching path prefix */
@@ -239,5 +241,162 @@ describe('fetchDeploymentState', () => {
     };
     await fetchDeploymentState(client, 'owner/repo', 99);
     expect(capturedPath).toContain('per_page=1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inferDeployTopology
+// ---------------------------------------------------------------------------
+
+/** Helper: build a DeploymentWithState */
+function dws(
+  environment: string,
+  sha: string,
+  createdAt: string,
+  state: string,
+): DeploymentWithState {
+  return { environment, sha, createdAt, state };
+}
+
+describe('inferDeployTopology', () => {
+  it('returns empty order and liveSha for empty input', () => {
+    const result = inferDeployTopology([]);
+    expect(result).toEqual({ order: [], liveSha: {} });
+  });
+
+  it('handles a single environment', () => {
+    const result = inferDeployTopology([
+      dws('production', 'sha1', '2024-01-01T10:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['production']);
+    expect(result.liveSha).toEqual({ production: 'sha1' });
+  });
+
+  it('infers staging → production order from two shas, each reaching staging earlier', () => {
+    // sha1: staging at T1, production at T2 (T1 < T2)
+    // sha2: staging at T3, production at T4 (T3 < T4)
+    const result = inferDeployTopology([
+      dws('staging',    'sha1', '2024-01-01T01:00:00Z', 'success'),
+      dws('production', 'sha1', '2024-01-01T02:00:00Z', 'success'),
+      dws('staging',    'sha2', '2024-01-02T01:00:00Z', 'success'),
+      dws('production', 'sha2', '2024-01-02T02:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['staging', 'production']);
+    // liveSha = newest success sha per env → sha2 for both
+    expect(result.liveSha).toEqual({ staging: 'sha2', production: 'sha2' });
+  });
+
+  it('liveSha reflects newest success sha per env, not earliest', () => {
+    const result = inferDeployTopology([
+      dws('staging',    'sha1', '2024-01-01T00:00:00Z', 'success'),
+      dws('production', 'sha1', '2024-01-01T01:00:00Z', 'success'),
+      dws('staging',    'sha2', '2024-01-03T00:00:00Z', 'success'),
+      dws('production', 'sha2', '2024-01-03T01:00:00Z', 'success'),
+    ]);
+    expect(result.liveSha.staging).toBe('sha2');
+    expect(result.liveSha.production).toBe('sha2');
+  });
+
+  it('no-overlap fallback: sha-A only hits staging, sha-B only hits production — orders by earliest first success', () => {
+    // staging got sha-A at T1, production got sha-B at T2, T1 < T2
+    const result = inferDeployTopology([
+      dws('staging',    'sha-A', '2024-01-01T00:00:00Z', 'success'),
+      dws('production', 'sha-B', '2024-01-02T00:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['staging', 'production']);
+    expect(result.liveSha).toEqual({ staging: 'sha-A', production: 'sha-B' });
+  });
+
+  it('non-success states are ignored for both order and liveSha', () => {
+    const result = inferDeployTopology([
+      // only success entry
+      dws('staging',    'sha1', '2024-01-01T01:00:00Z', 'success'),
+      // failure/in_progress entries that should be invisible
+      dws('production', 'sha1', '2024-01-01T00:30:00Z', 'failure'),
+      dws('production', 'sha1', '2024-01-01T00:45:00Z', 'in_progress'),
+    ]);
+    // production has no success so should not appear in liveSha
+    expect(result.liveSha).toEqual({ staging: 'sha1' });
+    // production has no success deployments → appears in order only if it has ≥1 success
+    // (here it has none, so order should only contain staging)
+    expect(result.order).toEqual(['staging']);
+  });
+
+  it('ignores non-success state entries and ranks correctly with valid successes', () => {
+    // sha1: staging success at T1, production success at T2
+    // sha2: production failure (should not give rank evidence), staging success at T3
+    const result = inferDeployTopology([
+      dws('staging',    'sha1', '2024-01-01T01:00:00Z', 'success'),
+      dws('production', 'sha1', '2024-01-01T02:00:00Z', 'success'),
+      dws('staging',    'sha2', '2024-01-02T01:00:00Z', 'success'),
+      dws('production', 'sha2', '2024-01-02T02:00:00Z', 'failure'),
+    ]);
+    // Only sha1 is a multi-env success sha
+    expect(result.order).toEqual(['staging', 'production']);
+    // liveSha for staging: sha2 (newer). production: sha1 (only success)
+    expect(result.liveSha.staging).toBe('sha2');
+    expect(result.liveSha.production).toBe('sha1');
+  });
+
+  it('infers correct 3-env order: dev → staging → production', () => {
+    // sha1: dev T1, staging T2, production T3
+    // sha2: dev T4, staging T5, production T6
+    const result = inferDeployTopology([
+      dws('dev',        'sha1', '2024-01-01T01:00:00Z', 'success'),
+      dws('staging',    'sha1', '2024-01-01T02:00:00Z', 'success'),
+      dws('production', 'sha1', '2024-01-01T03:00:00Z', 'success'),
+      dws('dev',        'sha2', '2024-01-02T01:00:00Z', 'success'),
+      dws('staging',    'sha2', '2024-01-02T02:00:00Z', 'success'),
+      dws('production', 'sha2', '2024-01-02T03:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['dev', 'staging', 'production']);
+    expect(result.liveSha).toEqual({ dev: 'sha2', staging: 'sha2', production: 'sha2' });
+  });
+
+  it('uses earliest (sha,env) success when an env is deployed multiple times for the same sha', () => {
+    // staging gets sha1 twice — earliest used for ranking
+    // production gets sha1 once, after staging's earliest
+    const result = inferDeployTopology([
+      dws('staging',    'sha1', '2024-01-01T01:00:00Z', 'success'), // earlier staging
+      dws('staging',    'sha1', '2024-01-01T05:00:00Z', 'success'), // later staging (same sha)
+      dws('production', 'sha1', '2024-01-01T03:00:00Z', 'success'), // production between the two stagings
+    ]);
+    // With earliest (sha1,staging) = T1 and (sha1,production) = T3: staging rank 0, production rank 1
+    expect(result.order).toEqual(['staging', 'production']);
+  });
+
+  it('tie-break by earliest-ever success createdAt when mean ranks are equal', () => {
+    // sha1 only hits env-A → no rank evidence for either via sha1 alone
+    // sha2 only hits env-B → same
+    // Both fall back to "no rank evidence" → sorted by earliest first success
+    // env-A earliest: T1, env-B earliest: T2 → env-A first
+    const result = inferDeployTopology([
+      dws('env-A', 'sha1', '2024-01-01T00:00:00Z', 'success'),
+      dws('env-B', 'sha2', '2024-01-02T00:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['env-A', 'env-B']);
+  });
+
+  it('tie-break by env name lexicographically when createdAt is also equal', () => {
+    // Both envs appear only with unique shas and have the exact same earliest success timestamp
+    const result = inferDeployTopology([
+      dws('z-env', 'sha1', '2024-01-01T00:00:00Z', 'success'),
+      dws('a-env', 'sha2', '2024-01-01T00:00:00Z', 'success'),
+    ]);
+    expect(result.order).toEqual(['a-env', 'z-env']);
+  });
+
+  it('no duplicates in order and every env with ≥1 success appears exactly once', () => {
+    const result = inferDeployTopology([
+      dws('dev',        'sha1', '2024-01-01T01:00:00Z', 'success'),
+      dws('staging',    'sha1', '2024-01-01T02:00:00Z', 'success'),
+      dws('production', 'sha1', '2024-01-01T03:00:00Z', 'success'),
+      dws('dev',        'sha1', '2024-01-01T04:00:00Z', 'success'), // duplicate (sha,env)
+    ]);
+    const unique = new Set(result.order);
+    expect(unique.size).toBe(result.order.length);
+    expect(unique).toContain('dev');
+    expect(unique).toContain('staging');
+    expect(unique).toContain('production');
   });
 });
