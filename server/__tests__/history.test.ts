@@ -1724,3 +1724,34 @@ describe('failureIncidentsByRepo (#150.3)', () => {
     expect(incidents()).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// pr_env_live table + legacy backfill (Task 1 — environment generalisation)
+// ---------------------------------------------------------------------------
+
+describe('pr_env_live table + legacy qa/prod backfill', () => {
+  it('backfills legacy qa/prod columns into pr_env_live on open', () => {
+    const h2 = new HistoryStore(':memory:');
+    h2.upsertMergedPr({ repo: REPO, number: 7, title: 't', url: 'u',
+      mergedAt: '2026-01-01T00:00:00Z', mergeCommitSha: 'abc', mergedBy: null, createdAt: null });
+    h2.markEnvLive(REPO, 7, 'qa', '2026-01-01T01:00:00Z');
+    h2.markEnvLive(REPO, 7, 'prod', '2026-01-01T02:00:00Z');
+    h2.runEnvLiveBackfill(); // idempotent; also runs in ctor
+    expect(h2.envLiveFor(REPO, 7)).toEqual({ qa: '2026-01-01T01:00:00Z', prod: '2026-01-01T02:00:00Z' });
+  });
+
+  it('backfill is idempotent — running it twice does not duplicate rows', () => {
+    const h2 = new HistoryStore(':memory:');
+    h2.upsertMergedPr({ repo: REPO, number: 8, title: 't', url: 'u',
+      mergedAt: '2026-01-02T00:00:00Z', mergeCommitSha: 'def' });
+    h2.markEnvLive(REPO, 8, 'qa', '2026-01-02T01:00:00Z');
+    h2.runEnvLiveBackfill();
+    h2.runEnvLiveBackfill(); // second call is a no-op
+    expect(Object.keys(h2.envLiveFor(REPO, 8))).toEqual(['qa']);
+  });
+
+  it('envLiveFor returns empty object when no entries exist for that PR', () => {
+    const h2 = new HistoryStore(':memory:');
+    expect(h2.envLiveFor(REPO, 999)).toEqual({});
+  });
+});

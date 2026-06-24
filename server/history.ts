@@ -365,6 +365,16 @@ export class HistoryStore {
         UNIQUE(repo, workflow, run_id, run_attempt)
       );
       CREATE INDEX IF NOT EXISTS idx_scheduled_runs ON scheduled_runs(repo, workflow, created_at);
+      -- Generalised per-PR env liveness (Task 1 — environment generalisation).
+      -- Each (repo, number, env) pair records the ISO timestamp at which that PR
+      -- first went live in that environment. Primary key is the natural unique key;
+      -- INSERT OR IGNORE gives first-write-wins semantics consistent with the legacy
+      -- qa_live_at/prod_live_at columns (which remain for rollback safety).
+      CREATE TABLE IF NOT EXISTS pr_env_live (
+        repo TEXT NOT NULL, number INTEGER NOT NULL, env TEXT NOT NULL,
+        live_at TEXT NOT NULL,
+        PRIMARY KEY (repo, number, env)
+      );
     `);
 
     // Migration: merged_prs gains created_at (PR lifespan metric). Fresh DBs get
@@ -748,6 +758,11 @@ export class HistoryStore {
                OR (t.created_at = s.created_at AND t.run_attempt > s.run_attempt))
          )
        ORDER BY workflow`);
+
+    // One-time backfill: copy legacy qa_live_at/prod_live_at into pr_env_live.
+    // Must run AFTER all prepared statements are initialized (getMeta/setMeta used below).
+    // Guard here (not in the method) so explicit calls to runEnvLiveBackfill() always work.
+    if (!this.getMeta('prEnvLiveBackfilled')) this.runEnvLiveBackfill();
   }
 
   /** `headSha`/`runAttempt` (issue #34): the PR/group head commit the check ran
@@ -879,6 +894,36 @@ export class HistoryStore {
     }
     const stmt = env === 'qa' ? this.stmtMarkQaLive : this.stmtMarkProdLive;
     stmt.run(at, repo, number);
+  }
+
+  /**
+   * Idempotent backfill: copies `qa_live_at`/`prod_live_at` values from
+   * `merged_prs` into `pr_env_live`. INSERT OR IGNORE gives first-write-wins
+   * semantics so re-running is always safe. Sets the meta key
+   * `prEnvLiveBackfilled` after each run; the constructor checks this key to
+   * skip the backfill on subsequent DB opens (avoiding a full-table scan every
+   * time). Direct callers (e.g. tests) may call this at any time — the INSERT
+   * OR IGNORE ensures correctness even if the meta flag was already set.
+   */
+  runEnvLiveBackfill(): void {
+    this.db.exec(`
+      INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at)
+        SELECT repo, number, 'qa', qa_live_at FROM merged_prs WHERE qa_live_at IS NOT NULL;
+      INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at)
+        SELECT repo, number, 'prod', prod_live_at FROM merged_prs WHERE prod_live_at IS NOT NULL;
+    `);
+    this.setMeta('prEnvLiveBackfilled', new Date().toISOString());
+  }
+
+  /**
+   * Returns a `{ env → live_at }` map for the given (repo, number). Reads
+   * directly from `pr_env_live`. Returns an empty object when no entries exist.
+   */
+  envLiveFor(repo: string, number: number): Record<string, string> {
+    const rows = this.db.prepare(
+      'SELECT env, live_at FROM pr_env_live WHERE repo=? AND number=?'
+    ).all(repo, number) as { env: string; live_at: string }[];
+    return Object.fromEntries(rows.map((r) => [r.env, r.live_at]));
   }
 
   /**
