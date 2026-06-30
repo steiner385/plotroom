@@ -7,6 +7,8 @@ import { createContext, useContext, useId, type ReactNode } from 'react';
 import type { MetricsSection } from './metricsModel';
 import { Skeleton } from './shell/Skeleton';
 import { defTitle, type Definition } from './definitions';
+import { TrendArrow } from './TrendArrow';
+import type { Trend } from './lib/trend';
 
 export const ActiveSectionContext = createContext<MetricsSection>('tuning');
 /** Tracks which sections have ever been activated (used for lazy rendering). */
@@ -41,8 +43,11 @@ export function Panel({ id, title, empty, emptyText = 'no data yet', section, ch
   );
 }
 
-export function MetricStat({ label, value, delta, def }: {
+export function MetricStat({ label, value, delta, trend, def }: {
   label: string; value: string; delta?: string | null;
+  /** Delta-vs-baseline trend (#258); renders the shared arrow next to the value
+   *  (nothing when flat/insignificant). For stats carrying a `{value, prev}` baseline. */
+  trend?: Trend;
   /** What this figure means / how it's computed (issue #66) — every headline
    *  stat must carry one; rendered as the mouse tooltip AND, for screen-reader
    *  users who can't reach a title=, an aria-describedby hidden description (UX-M1). */
@@ -51,7 +56,7 @@ export function MetricStat({ label, value, delta, def }: {
   const descId = useId();
   return (
     <div className="metric-stat" title={defTitle(def)} aria-describedby={descId}>
-      <b>{value}</b>
+      <b>{value}{trend && <TrendArrow trend={trend} />}</b>
       <span>{label}</span>
       {delta != null && <em className="metric-delta">{delta}</em>}
       <span id={descId} className="sr-only">{defTitle(def)}</span>
