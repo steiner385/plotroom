@@ -74,11 +74,21 @@ CE=$(aws ce get-cost-and-usage \
   --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Elastic Compute Cloud - Compute"]}}' \
   --output json)
 
-CE="$CE" METRICS="$METRICS" CONFIG="$CONFIG" DAYS="$DAYS" DRY_RUN="${DRY_RUN:-0}" python3 - <<'PY'
+# CE and METRICS are large JSON blobs. Passing them through the environment
+# breaks once METRICS outgrows the kernel's per-string limit (MAX_ARG_STRLEN,
+# 128 KiB): execve fails E2BIG and the shell reports exit 126 with no output.
+# The window grows with tracked buckets, so this fails silently over time —
+# hand them to python as files instead, which has no such limit.
+CE_FILE=$(mktemp); METRICS_FILE=$(mktemp)
+trap 'rm -f "$CE_FILE" "$METRICS_FILE"' EXIT
+printf '%s' "$CE" > "$CE_FILE"
+printf '%s' "$METRICS" > "$METRICS_FILE"
+
+CE_FILE="$CE_FILE" METRICS_FILE="$METRICS_FILE" CONFIG="$CONFIG" DAYS="$DAYS" DRY_RUN="${DRY_RUN:-0}" python3 - <<'PY'
 import json, os, sys
 
-ce = json.loads(os.environ["CE"])
-metrics = json.loads(os.environ["METRICS"])
+ce = json.load(open(os.environ["CE_FILE"]))
+metrics = json.load(open(os.environ["METRICS_FILE"]))
 cfg_path = os.environ["CONFIG"]
 dry = os.environ.get("DRY_RUN", "0") == "1"
 
