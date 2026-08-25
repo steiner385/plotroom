@@ -641,27 +641,39 @@ describe('Poller deep merged sweep pagination', () => {
       throw new Error(`unexpected query: ${q.slice(0, 100)}`);
     }),
   });
+  // Steady state: the window holds one page, so nothing reports hasNextPage.
+  const singlePageClient = () => ({
+    remaining: 4000, resetAt: null,
+    graphql: vi.fn(async (q: string) => {
+      if (q.includes('open0: search')) return {
+        open0: { issueCount: 0, nodes: [] }, open1: { issueCount: 0, nodes: [] },
+        merged0: { issueCount: 20, pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: Array.from({ length: 20 }, (_, i) => mergedNode(i + 1)) },
+        merged1: { issueCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+      };
+      throw new Error(`unexpected query: ${q.slice(0, 100)}`);
+    }),
+  });
 
-  it('deep flag set → follows pagination and ingests all 120 merged PRs', async () => {
+  it('a multi-page window follows pagination and ingests all 120 merged PRs', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const p = new Poller({ router: asRouter(pagedClient()), history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });
-    await p.sweepOnce(true);
+    await p.sweepOnce();
     expect(history.listTrackedMerged(7, NOW)).toHaveLength(120);
     expect(warn).not.toHaveBeenCalled(); // paginated aliases don't warn truncation
   });
 
-  it('routine sweep (no deep flag) stays single-page and keeps the truncation warning', async () => {
+  it('a single-page window makes one request per owner and no follow-ups', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const client = pagedClient();
+    const client = singlePageClient();
     const p = new Poller({ router: asRouter(client), history, deploy: noDeploy(),
       config: CONFIG, now: () => NOW });
     await p.sweepOnce();
-    // one search request per owner (acme, octo) — and NO pagination follow-ups
+    // One search request per owner (acme, octo) and no follow-ups: pagination is
+    // driven by hasNextPage, so the steady-state sweep still costs one each.
     expect(client.graphql).toHaveBeenCalledTimes(2);
-    expect(history.listTrackedMerged(7, NOW)).toHaveLength(50);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0])).toMatch(/truncated/);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
