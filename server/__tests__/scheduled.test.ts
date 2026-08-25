@@ -137,7 +137,7 @@ describe('HistoryStore scheduled_runs', () => {
   it('upserts on (repo, workflow, run_id, run_attempt) — a re-poll overwrites conclusion', () => {
     rec({ conclusion: null, status: 'in_progress' });
     rec({ conclusion: 'success', status: 'completed' });
-    const latest = h.latestScheduledRuns('cairnea/KinDash');
+    const latest = h.latestScheduledRuns('cairnea/KinDash', 14, new Date('2026-06-13T12:00:00Z'));
     expect(latest).toHaveLength(1);
     expect(latest[0].conclusion).toBe('success');
   });
@@ -146,7 +146,7 @@ describe('HistoryStore scheduled_runs', () => {
     rec({ workflow: 'nightly.yml', runId: 1, runNumber: 10, createdAt: '2026-06-12T06:00:00Z', conclusion: 'failure' });
     rec({ workflow: 'nightly.yml', runId: 2, runNumber: 11, createdAt: '2026-06-13T06:00:00Z', conclusion: 'success' });
     rec({ workflow: 'weekly.yml', runId: 3, runNumber: 5, createdAt: '2026-06-13T00:00:00Z', conclusion: 'success' });
-    const latest = h.latestScheduledRuns('cairnea/KinDash');
+    const latest = h.latestScheduledRuns('cairnea/KinDash', 14, new Date('2026-06-13T12:00:00Z'));
     expect(latest).toHaveLength(2);
     const nightly = latest.find((r) => r.workflow === 'nightly.yml')!;
     expect(nightly.conclusion).toBe('success'); // newest by created_at, not the older failure
