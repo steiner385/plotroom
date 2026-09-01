@@ -26,15 +26,24 @@ export interface MergedPrInput {
 export interface MergedPrRecord extends MergedPrInput {
   createdAt: string | null;
   firstGreenAt: string | null; enqueuedAt: string | null;
-  qaLiveAt: string | null; prodLiveAt: string | null;
+  /** Generic per-env liveness map (env → live_at ISO string). */
+  envLive: Record<string, string>;
+  /** Derived from envLive.qa for backward compatibility. */
+  qaLiveAt: string | null;
+  /** Derived from envLive.prod for backward compatibility. */
+  prodLiveAt: string | null;
   mergedBy: string | null;
 }
 
 /** One merged_prs row projected for the lead-time decomposition (issue #44). */
 export interface LeadTimeRow {
   repo: string;
+  /** PR number — needed to look up envLive (task 8b). */
+  number: number;
   createdAt: string | null; firstGreenAt: string | null; enqueuedAt: string | null;
   mergedAt: string; qaLiveAt: string | null; prodLiveAt: string | null;
+  /** Generic per-env liveness map (env → live_at ISO string) — task 8b. */
+  envLive: Record<string, string>;
 }
 
 /** Per-repo dashboard-state counts captured by the poller (metrics trends panel). */
@@ -168,6 +177,7 @@ export class HistoryStore {
   private readonly stmtUpsertPr: Database.Statement;
   private readonly stmtMarkQaLive: Database.Statement;
   private readonly stmtMarkProdLive: Database.Statement;
+  private readonly stmtUpsertEnvLive: Database.Statement;
   private readonly stmtListTracked: Database.Statement;
   private readonly stmtInsertGap: Database.Statement;
   private readonly stmtSelectGaps: Database.Statement;
@@ -365,6 +375,16 @@ export class HistoryStore {
         UNIQUE(repo, workflow, run_id, run_attempt)
       );
       CREATE INDEX IF NOT EXISTS idx_scheduled_runs ON scheduled_runs(repo, workflow, created_at);
+      -- Generalised per-PR env liveness (Task 1 — environment generalisation).
+      -- Each (repo, number, env) pair records the ISO timestamp at which that PR
+      -- first went live in that environment. Primary key is the natural unique key;
+      -- INSERT OR IGNORE gives first-write-wins semantics consistent with the legacy
+      -- qa_live_at/prod_live_at columns (which remain for rollback safety).
+      CREATE TABLE IF NOT EXISTS pr_env_live (
+        repo TEXT NOT NULL, number INTEGER NOT NULL, env TEXT NOT NULL,
+        live_at TEXT NOT NULL,
+        PRIMARY KEY (repo, number, env)
+      );
     `);
 
     // Migration: merged_prs gains created_at (PR lifespan metric). Fresh DBs get
@@ -479,6 +499,9 @@ export class HistoryStore {
     this.stmtMarkProdLive = this.db.prepare(
       'UPDATE merged_prs SET prod_live_at=? WHERE repo=? AND number=? AND prod_live_at IS NULL'
     );
+    this.stmtUpsertEnvLive = this.db.prepare(
+      'INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at) VALUES (?, ?, ?, ?)'
+    );
     this.stmtListTracked = this.db.prepare(
       'SELECT * FROM merged_prs WHERE merged_at >= ? ORDER BY merged_at DESC'
     );
@@ -573,7 +596,7 @@ export class HistoryStore {
        FROM group_runs WHERE completed_at >= ? ORDER BY repo, completed_at`
     );
     this.stmtSelectMergedSince = this.db.prepare(
-      `SELECT repo, merged_at, created_at, qa_live_at, merged_by, enqueued_at
+      `SELECT repo, number, merged_at, created_at, qa_live_at, merged_by, enqueued_at
        FROM merged_prs WHERE merged_at >= ? ORDER BY repo, merged_at`
     );
     // Trains/hour (queue ops): per-repo merge timestamps for train clustering.
@@ -585,7 +608,7 @@ export class HistoryStore {
     // (deployment frequency counts prod-live EVENTS, and manual prod deploys
     // often ship merges older than the window).
     this.stmtSelectLeadTimeRows = this.db.prepare(
-      `SELECT repo, created_at, first_green_at, enqueued_at, merged_at, qa_live_at, prod_live_at
+      `SELECT repo, number, created_at, first_green_at, enqueued_at, merged_at, qa_live_at, prod_live_at
        FROM merged_prs WHERE merged_at >= ? OR (prod_live_at IS NOT NULL AND prod_live_at >= ?)
        ORDER BY repo, merged_at`
     );
@@ -748,6 +771,11 @@ export class HistoryStore {
                OR (t.created_at = s.created_at AND t.run_attempt > s.run_attempt))
          )
        ORDER BY workflow`);
+
+    // One-time backfill: copy legacy qa_live_at/prod_live_at into pr_env_live.
+    // Must run AFTER all prepared statements are initialized (getMeta/setMeta used below).
+    // Guard here (not in the method) so explicit calls to runEnvLiveBackfill() always work.
+    if (!this.getMeta('prEnvLiveBackfilled')) this.runEnvLiveBackfill();
   }
 
   /** `headSha`/`runAttempt` (issue #34): the PR/group head commit the check ran
@@ -872,13 +900,42 @@ export class HistoryStore {
       pr.createdAt ?? null, pr.firstGreenAt ?? null, pr.enqueuedAt ?? null, pr.mergedBy ?? null);
   }
 
-  markEnvLive(repo: string, number: number, env: 'qa' | 'prod', at: string): void {
-    // Defense in depth: untyped callers must never write an unknown env column.
-    if (env !== 'qa' && env !== 'prod') {
-      throw new Error(`markEnvLive: env must be 'qa' or 'prod', got '${String(env)}'`);
-    }
-    const stmt = env === 'qa' ? this.stmtMarkQaLive : this.stmtMarkProdLive;
-    stmt.run(at, repo, number);
+  markEnvLive(repo: string, number: number, env: string, at: string): void {
+    // Always write to the new generalised table (first-write-wins via INSERT OR IGNORE).
+    this.stmtUpsertEnvLive.run(repo, number, env, at);
+    // Mirror to legacy columns so metrics/leadtime keep working until Task 5 migrates them.
+    if (env === 'qa') this.stmtMarkQaLive.run(at, repo, number);
+    if (env === 'prod') this.stmtMarkProdLive.run(at, repo, number);
+  }
+
+  /**
+   * Idempotent backfill: copies `qa_live_at`/`prod_live_at` values from
+   * `merged_prs` into `pr_env_live`. INSERT OR IGNORE gives first-write-wins
+   * semantics so re-running is always safe. Sets the meta key
+   * `prEnvLiveBackfilled` after each run; the constructor checks this key to
+   * skip the backfill on subsequent DB opens (avoiding a full-table scan every
+   * time). Direct callers (e.g. tests) may call this at any time — the INSERT
+   * OR IGNORE ensures correctness even if the meta flag was already set.
+   */
+  runEnvLiveBackfill(): void {
+    this.db.exec(`
+      INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at)
+        SELECT repo, number, 'qa', qa_live_at FROM merged_prs WHERE qa_live_at IS NOT NULL;
+      INSERT OR IGNORE INTO pr_env_live (repo, number, env, live_at)
+        SELECT repo, number, 'prod', prod_live_at FROM merged_prs WHERE prod_live_at IS NOT NULL;
+    `);
+    this.setMeta('prEnvLiveBackfilled', new Date().toISOString());
+  }
+
+  /**
+   * Returns a `{ env → live_at }` map for the given (repo, number). Reads
+   * directly from `pr_env_live`. Returns an empty object when no entries exist.
+   */
+  envLiveFor(repo: string, number: number): Record<string, string> {
+    const rows = this.db.prepare(
+      'SELECT env, live_at FROM pr_env_live WHERE repo=? AND number=?'
+    ).all(repo, number) as { env: string; live_at: string }[];
+    return Object.fromEntries(rows.map((r) => [r.env, r.live_at]));
   }
 
   /**
@@ -891,16 +948,23 @@ export class HistoryStore {
   listTrackedMerged(retentionDays: number, now: Date): MergedPrRecord[] {
     const cutoff = new Date(now.getTime() - retentionDays * 86400_000).toISOString();
     const rows = this.stmtListTracked.all(cutoff) as Record<string, unknown>[];
-    return rows.map((r) => ({
-      repo: r.repo as string, number: r.number as number, title: r.title as string,
-      url: r.url as string, mergedAt: r.merged_at as string,
-      mergeCommitSha: (r.merge_commit_sha as string) ?? null,
-      createdAt: (r.created_at as string) ?? null,
-      firstGreenAt: (r.first_green_at as string) ?? null,
-      enqueuedAt: (r.enqueued_at as string) ?? null,
-      qaLiveAt: (r.qa_live_at as string) ?? null, prodLiveAt: (r.prod_live_at as string) ?? null,
-      mergedBy: (r.merged_by as string) ?? null,
-    }));
+    return rows.map((r) => {
+      const repo = r.repo as string;
+      const number = r.number as number;
+      const envLive = this.envLiveFor(repo, number);
+      return {
+        repo, number, title: r.title as string,
+        url: r.url as string, mergedAt: r.merged_at as string,
+        mergeCommitSha: (r.merge_commit_sha as string) ?? null,
+        createdAt: (r.created_at as string) ?? null,
+        firstGreenAt: (r.first_green_at as string) ?? null,
+        enqueuedAt: (r.enqueued_at as string) ?? null,
+        envLive,
+        qaLiveAt: envLive.qa ?? null,
+        prodLiveAt: envLive.prod ?? null,
+        mergedBy: (r.merged_by as string) ?? null,
+      };
+    });
   }
 
   recordDeployGap(repo: string, env: string, gapSecs: number): void {
@@ -1542,12 +1606,20 @@ export class HistoryStore {
   }
 
   /** Merged PRs at/after `since` (full timestamps — bucketing happens in metrics). */
-  mergedSince(since: string): { repo: string; mergedAt: string; createdAt: string | null;
-    qaLiveAt: string | null; mergedBy: string | null; enqueuedAt: string | null }[] {
+  mergedSince(since: string): { repo: string; number: number; mergedAt: string; createdAt: string | null;
+    qaLiveAt: string | null; mergedBy: string | null; enqueuedAt: string | null;
+    envLive: Record<string, string> }[] {
     const rows = this.stmtSelectMergedSince.all(since) as Record<string, unknown>[];
-    return rows.map((r) => ({ repo: r.repo as string, mergedAt: r.merged_at as string,
-      createdAt: (r.created_at as string) ?? null, qaLiveAt: (r.qa_live_at as string) ?? null,
-      mergedBy: (r.merged_by as string) ?? null, enqueuedAt: (r.enqueued_at as string) ?? null }));
+    return rows.map((r) => {
+      const repo = r.repo as string;
+      const number = r.number as number;
+      return {
+        repo, number, mergedAt: r.merged_at as string,
+        createdAt: (r.created_at as string) ?? null, qaLiveAt: (r.qa_live_at as string) ?? null,
+        mergedBy: (r.merged_by as string) ?? null, enqueuedAt: (r.enqueued_at as string) ?? null,
+        envLive: this.envLiveFor(repo, number),
+      };
+    });
   }
 
   /** Lead-time decomposition rows (issue #44): merged_prs rows merged at/after
@@ -1556,15 +1628,21 @@ export class HistoryStore {
    *  in metrics. */
   leadTimeRowsSince(since: string): LeadTimeRow[] {
     const rows = this.stmtSelectLeadTimeRows.all(since, since) as Record<string, unknown>[];
-    return rows.map((r) => ({
-      repo: r.repo as string,
-      createdAt: (r.created_at as string) ?? null,
-      firstGreenAt: (r.first_green_at as string) ?? null,
-      enqueuedAt: (r.enqueued_at as string) ?? null,
-      mergedAt: r.merged_at as string,
-      qaLiveAt: (r.qa_live_at as string) ?? null,
-      prodLiveAt: (r.prod_live_at as string) ?? null,
-    }));
+    return rows.map((r) => {
+      const repo = r.repo as string;
+      const number = r.number as number;
+      return {
+        repo,
+        number,
+        createdAt: (r.created_at as string) ?? null,
+        firstGreenAt: (r.first_green_at as string) ?? null,
+        enqueuedAt: (r.enqueued_at as string) ?? null,
+        mergedAt: r.merged_at as string,
+        qaLiveAt: (r.qa_live_at as string) ?? null,
+        prodLiveAt: (r.prod_live_at as string) ?? null,
+        envLive: this.envLiveFor(repo, number),
+      };
+    });
   }
 
   /** Every repo that has left any trace in history (durations, merged PRs,

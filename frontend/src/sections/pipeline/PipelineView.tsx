@@ -77,8 +77,8 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
                     <p className="deploy-backlog" role="region" aria-label="Deploy backlog">
                       📦 Deploy backlog:{' '}
                       {[
-                        r.deploy.awaitingQa > 0 ? `${r.deploy.awaitingQa} awaiting QA` : null,
-                        r.deploy.awaitingProd > 0 ? `${r.deploy.awaitingProd} awaiting prod` : null,
+                        r.deploy.awaitingQa > 0 ? `${r.deploy.awaitingQa} awaiting ${r.deploy.firstEnv ?? 'QA'}` : null,
+                        r.deploy.awaitingProd > 0 ? `${r.deploy.awaitingProd} awaiting ${r.deploy.terminalEnv ?? 'prod'}` : null,
                       ].filter(Boolean).join(' · ')}
                     </p>
                   )}
@@ -100,9 +100,11 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
                   {cohort.length > 0 && (() => {
                     // Disjoint deploy stages — never lump awaiting-QA into "awaiting prod".
                     const { awaitingQa, awaitingProd } = deployBreakdown(cohort);
+                    const firstEnvName = r.deploy?.firstEnv ?? 'QA';
+                    const terminalEnvName = r.deploy?.terminalEnv ?? 'prod';
                     const parts = [
-                      awaitingQa > 0 ? `${awaitingQa} awaiting QA` : null,
-                      awaitingProd > 0 ? `${awaitingProd} awaiting prod` : null,
+                      awaitingQa > 0 ? `${awaitingQa} awaiting ${firstEnvName}` : null,
+                      awaitingProd > 0 ? `${awaitingProd} awaiting ${terminalEnvName}` : null,
                     ].filter(Boolean);
                     const label = parts.length ? parts.join(' · ') : 'deploying';
                     return (
@@ -117,7 +119,7 @@ export function PipelineView({ state, focusedRepo }: { state: DashboardState | n
                   {r.deploy?.chain && (r.deploy.chain.inFlight || r.deploy.chain.supersededCount > 0) && (
                     <p className="deploy-chain" role="region" aria-label="Deploy chain">
                       {r.deploy.chain.inFlight && (
-                        <>⤴ Deploying <strong>#{r.deploy.chain.inFlight.prNumber}</strong> — at {r.deploy.chain.inFlight.stage}, flowing to prod</>
+                        <>⤴ Deploying <strong>#{r.deploy.chain.inFlight.prNumber}</strong> — at {r.deploy.chain.inFlight.stage === 'first' ? (r.deploy.firstEnv ?? 'first') : r.deploy.chain.inFlight.stage}, flowing to {r.deploy.terminalEnv ?? 'prod'}</>
                       )}
                       {r.deploy.chain.supersededCount > 0 && (
                         <span className="deploy-superseded">

@@ -127,11 +127,12 @@ describe('merged PRs', () => {
     expect(h.listTrackedMerged(7, new Date('2026-06-11T00:00:00Z'))[0].mergeCommitSha).toBe('def456');
   });
 
-  it('markEnvLive rejects a bogus environment name (defense in depth)', () => {
-    h.upsertMergedPr({ repo: REPO, number: 8953, title: 't', url: 'u',
+  it('markEnvLive accepts arbitrary env names and writes to pr_env_live', () => {
+    const ts = '2026-06-10T13:00:00Z';
+    h.upsertMergedPr({ repo: REPO, number: 9, title: 't', url: 'u',
       mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'x' });
-    expect(() => h.markEnvLive(REPO, 8953, 'staging' as never, '2026-06-10T13:00:00Z'))
-      .toThrow(/qa.*prod|prod.*qa/);
+    expect(() => h.markEnvLive(REPO, 9, 'staging', ts)).not.toThrow();
+    expect(h.envLiveFor(REPO, 9)).toEqual({ staging: ts });
   });
 
   it('excludes PRs merged outside the retention window', () => {
@@ -203,10 +204,35 @@ describe('lead-time timestamps on merged_prs (issue #44)', () => {
     expect(rows.map((r) => r.mergedAt).sort()).toEqual(
       ['2026-06-01T12:00:00Z', '2026-06-10T12:00:00Z']);
     const full = rows.find((r) => r.mergedAt === '2026-06-10T12:00:00Z')!;
-    expect(full).toEqual({ repo: REPO, createdAt: '2026-06-10T09:00:00Z',
+    expect(full).toEqual({ repo: REPO, number: 1, createdAt: '2026-06-10T09:00:00Z',
       firstGreenAt: '2026-06-10T10:00:00Z', enqueuedAt: '2026-06-10T11:00:00Z',
       mergedAt: '2026-06-10T12:00:00Z', qaLiveAt: '2026-06-10T12:10:00Z',
-      prodLiveAt: '2026-06-10T18:00:00Z' });
+      prodLiveAt: '2026-06-10T18:00:00Z',
+      envLive: { qa: '2026-06-10T12:10:00Z', prod: '2026-06-10T18:00:00Z' } });
+  });
+
+  it('leadTimeRowsSince: each row carries number and envLive map (task 8b)', () => {
+    h.upsertMergedPr({ repo: REPO, number: 42, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha' });
+    h.markEnvLive(REPO, 42, 'staging', '2026-06-10T12:10:00Z');
+    h.markEnvLive(REPO, 42, 'production', '2026-06-10T18:00:00Z');
+    const rows = h.leadTimeRowsSince('2026-06-10T00:00:00Z');
+    const row = rows.find((r) => r.mergedAt === '2026-06-10T12:00:00Z')!;
+    expect(row.number).toBe(42);
+    expect(row.envLive).toEqual({
+      staging: '2026-06-10T12:10:00Z',
+      production: '2026-06-10T18:00:00Z',
+    });
+  });
+
+  it('mergedSince: each row carries number and envLive map (task 8b)', () => {
+    h.upsertMergedPr({ repo: REPO, number: 55, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha' });
+    h.markEnvLive(REPO, 55, 'staging', '2026-06-10T13:00:00Z');
+    const rows = h.mergedSince('2026-06-10T00:00:00Z');
+    const row = rows.find((r) => r.repo === REPO)!;
+    expect(row.number).toBe(55);
+    expect(row.envLive).toEqual({ staging: '2026-06-10T13:00:00Z' });
   });
 });
 
@@ -1722,5 +1748,90 @@ describe('failureIncidentsByRepo (#150.3)', () => {
     fail('s1', '2026-06-10T01:00:00Z');
     pass('s1', '2026-06-10T01:30:00Z'); // same sha resolved → flake, excluded
     expect(incidents()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pr_env_live table + legacy backfill (Task 1 — environment generalisation)
+// ---------------------------------------------------------------------------
+
+describe('pr_env_live table + legacy qa/prod backfill', () => {
+  it('backfills legacy qa/prod columns into pr_env_live on open', () => {
+    const h2 = new HistoryStore(':memory:');
+    h2.upsertMergedPr({ repo: REPO, number: 7, title: 't', url: 'u',
+      mergedAt: '2026-01-01T00:00:00Z', mergeCommitSha: 'abc', mergedBy: null, createdAt: null });
+    h2.markEnvLive(REPO, 7, 'qa', '2026-01-01T01:00:00Z');
+    h2.markEnvLive(REPO, 7, 'prod', '2026-01-01T02:00:00Z');
+    h2.runEnvLiveBackfill(); // idempotent; also runs in ctor
+    expect(h2.envLiveFor(REPO, 7)).toEqual({ qa: '2026-01-01T01:00:00Z', prod: '2026-01-01T02:00:00Z' });
+  });
+
+  it('backfill is idempotent — running it twice does not duplicate rows', () => {
+    const h2 = new HistoryStore(':memory:');
+    h2.upsertMergedPr({ repo: REPO, number: 8, title: 't', url: 'u',
+      mergedAt: '2026-01-02T00:00:00Z', mergeCommitSha: 'def' });
+    h2.markEnvLive(REPO, 8, 'qa', '2026-01-02T01:00:00Z');
+    h2.runEnvLiveBackfill();
+    h2.runEnvLiveBackfill(); // second call is a no-op
+    expect(Object.keys(h2.envLiveFor(REPO, 8))).toEqual(['qa']);
+  });
+
+  it('envLiveFor returns empty object when no entries exist for that PR', () => {
+    const h2 = new HistoryStore(':memory:');
+    expect(h2.envLiveFor(REPO, 999)).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listTrackedMerged exposes envLive map (Task 3 — per-env liveness surface)
+// ---------------------------------------------------------------------------
+
+describe('listTrackedMerged exposes per-env envLive map', () => {
+  it('envLive.prod is set after markEnvLive prod and prodLiveAt is derived from it', () => {
+    const ts = '2026-06-10T15:00:00Z';
+    h.upsertMergedPr({ repo: REPO, number: 5001, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha5001' });
+    h.markEnvLive(REPO, 5001, 'prod', ts);
+    const rec = h.listTrackedMerged(30, new Date('2026-06-24T00:00:00Z'))
+      .find((r) => r.number === 5001);
+    expect(rec).toBeDefined();
+    expect(rec!.envLive.prod).toBe(ts);
+    expect(rec!.prodLiveAt).toBe(ts);
+  });
+
+  it('envLive contains both qa and prod when both are marked live', () => {
+    const qaTs = '2026-06-10T12:08:00Z';
+    const prodTs = '2026-06-10T15:00:00Z';
+    h.upsertMergedPr({ repo: REPO, number: 5002, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha5002' });
+    h.markEnvLive(REPO, 5002, 'qa', qaTs);
+    h.markEnvLive(REPO, 5002, 'prod', prodTs);
+    const rec = h.listTrackedMerged(30, new Date('2026-06-24T00:00:00Z'))
+      .find((r) => r.number === 5002);
+    expect(rec!.envLive).toEqual({ qa: qaTs, prod: prodTs });
+    expect(rec!.qaLiveAt).toBe(qaTs);
+    expect(rec!.prodLiveAt).toBe(prodTs);
+  });
+
+  it('envLive is an empty object for a PR with no env marks', () => {
+    h.upsertMergedPr({ repo: REPO, number: 5003, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha5003' });
+    const rec = h.listTrackedMerged(30, new Date('2026-06-24T00:00:00Z'))
+      .find((r) => r.number === 5003);
+    expect(rec!.envLive).toEqual({});
+    expect(rec!.qaLiveAt).toBeNull();
+    expect(rec!.prodLiveAt).toBeNull();
+  });
+
+  it('envLive captures arbitrary env names (e.g. staging) beyond qa/prod', () => {
+    const stagingTs = '2026-06-10T13:00:00Z';
+    h.upsertMergedPr({ repo: REPO, number: 5004, title: 't', url: 'u',
+      mergedAt: '2026-06-10T12:00:00Z', mergeCommitSha: 'sha5004' });
+    h.markEnvLive(REPO, 5004, 'staging', stagingTs);
+    const rec = h.listTrackedMerged(30, new Date('2026-06-24T00:00:00Z'))
+      .find((r) => r.number === 5004);
+    expect(rec!.envLive.staging).toBe(stagingTs);
+    expect(rec!.qaLiveAt).toBeNull();
+    expect(rec!.prodLiveAt).toBeNull();
   });
 });

@@ -577,7 +577,13 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   poolMeta: Record<string, PoolMetaEntry> | null = null,
   prNumberForSha: (repo: string, sha: string) => number | null = () => null,
   costAutoRate = false,
-  requiredPrefixesFor: (repo: string) => string[] = () => []): MetricsPayload {
+  requiredPrefixesFor: (repo: string) => string[] = () => [],
+  /**
+   * Task 8b: returns first/terminal env names for a repo, or null when the
+   * repo has no deploy config (falls back to legacy qa/prod columns).
+   */
+  firstTerminalFor: (repo: string) =>
+    { firstEnv: string | null; terminalEnv: string | null } | null = () => null): MetricsPayload {
   const dropped = new Set(exclude);
   const keep = <T extends { repo: string }>(rows: T[]): T[] =>
     dropped.size ? rows.filter((r) => !dropped.has(r.repo)) : rows;
@@ -585,6 +591,28 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
   const since = new Date(now.getTime() - windowMs).toISOString();
   const prevSince = new Date(now.getTime() - 2 * windowMs).toISOString();
   const key = (ts: string): string => ts.slice(0, bucket === 'hour' ? 13 : 10);
+
+  /**
+   * Task 8b: re-derive qaLiveAt/prodLiveAt from envLive using the repo's real
+   * first/terminal env names. Falls back to the row's existing columns when the
+   * repo has no deploy mapping (preserves behavior for qa/prod repos and
+   * deploy-less repos, keeping all existing tests green).
+   */
+  // Constraint requires only the fields BOTH row sources carry (mergedSince has
+  // qaLiveAt but no prodLiveAt; leadTimeRowsSince has both). prodLiveAt is
+  // re-derived only when the row actually has it.
+  const normalizeEnvLive = <T extends { repo: string; qaLiveAt: string | null; envLive: Record<string, string> }>(
+    row: T,
+  ): T => {
+    const m = firstTerminalFor(row.repo);
+    if (!m) return row;
+    const next: T = { ...row, qaLiveAt: m.firstEnv ? row.envLive[m.firstEnv] ?? null : null };
+    if ('prodLiveAt' in row) {
+      (next as Record<string, unknown>).prodLiveAt =
+        m.terminalEnv ? row.envLive[m.terminalEnv] ?? null : null;
+    }
+    return next;
+  };
 
   // 1. Runner-wait health: per (repo, event) buckets with p50/p90 + headline p50.
   const rw = splitWindow(keep(history.runnerWaitsSince(prevSince)), (r) => r.at, since);
@@ -602,7 +630,8 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
     });
 
   // Shared merged-PR rows: queue merges + the whole velocity section.
-  const merged = splitWindow(keep(history.mergedSince(prevSince)), (r) => r.mergedAt, since);
+  // Normalize qaLiveAt/prodLiveAt from envLive for repos with arbitrary env names (task 8b).
+  const merged = splitWindow(keep(history.mergedSince(prevSince)).map(normalizeEnvLive), (r) => r.mergedAt, since);
   const mergedByRepo = groupBy(merged.cur, (r) => r.repo);
   const mergedPrevByRepo = groupBy(merged.prev, (r) => r.repo);
   const qw = splitWindow(keep(history.queueWaitsSince(prevSince)), (r) => r.at, since);
@@ -805,7 +834,8 @@ export function computeMetrics(history: HistoryStore, window: MetricsWindow,
     // re-open) — skip rather than poison the median; NaN = unparseable
     return Number.isFinite(secs) && secs >= 0 ? secs : null;
   };
-  const ltRows = keep(history.leadTimeRowsSince(since));
+  // Normalize qaLiveAt/prodLiveAt from envLive for repos with arbitrary env names (task 8b).
+  const ltRows = keep(history.leadTimeRowsSince(since)).map(normalizeEnvLive);
   const leadTime = [...groupBy(ltRows, (r) => r.repo)]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([repo, rows]) => {

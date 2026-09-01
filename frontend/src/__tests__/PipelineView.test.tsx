@@ -62,41 +62,70 @@ describe('PipelineView (the PR pipeline view, ported into the workspace)', () =>
   });
 
   it('collapses the awaiting-prod herd into one expandable row, keeping running PRs visible', () => {
-    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null, prs: [
-      pr('acme/alpha', 1, 'running pr', 'ci'),
-      pr('acme/alpha', 2, 'merged a', 'qa-deploy'),
-      pr('acme/alpha', 3, 'merged b', 'qa-deploy'),
-    ] }] } as never);
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      deploy: { envs: [], awaitingQa: 2, awaitingProd: 0, firstEnv: 'qa', terminalEnv: 'prod' },
+      prs: [
+        pr('acme/alpha', 1, 'running pr', 'ci'),
+        pr('acme/alpha', 2, 'merged a', 'qa-deploy'),
+        pr('acme/alpha', 3, 'merged b', 'qa-deploy'),
+      ] }] } as never);
     render(<PipelineView state={st} focusedRepo={null} />);
     // the running PR stays visible; the 2 awaiting-prod collapse behind a toggle
     expect(screen.getByText('running pr')).toBeInTheDocument();
     expect(screen.queryByText('merged a')).not.toBeInTheDocument();
     // qa-deploy PRs are awaiting QA — must NOT be lumped under "awaiting prod"
-    const toggle = screen.getByRole('button', { name: /2 merged · 2 awaiting QA/i });
+    const toggle = screen.getByRole('button', { name: /2 merged · 2 awaiting qa/i });
     expect(toggle.textContent).not.toMatch(/awaiting prod/i);
     fireEvent.click(toggle);
     expect(screen.getByText('merged a')).toBeInTheDocument();
   });
 
   it('splits the cohort label into awaiting-QA and awaiting-prod (no lumping)', () => {
-    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null, prs: [
-      pr('acme/alpha', 1, 'to qa', 'qa-deploy'),
-      pr('acme/alpha', 2, 'to prod a', 'awaiting-prod'),
-      pr('acme/alpha', 3, 'to prod b', 'awaiting-prod'),
-    ] }] } as never);
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      deploy: { envs: [], awaitingQa: 1, awaitingProd: 2, firstEnv: 'qa', terminalEnv: 'prod' },
+      prs: [
+        pr('acme/alpha', 1, 'to qa', 'qa-deploy'),
+        pr('acme/alpha', 2, 'to prod a', 'awaiting-prod'),
+        pr('acme/alpha', 3, 'to prod b', 'awaiting-prod'),
+      ] }] } as never);
     render(<PipelineView state={st} focusedRepo={null} />);
-    expect(screen.getByRole('button', { name: /3 merged · 1 awaiting QA · 2 awaiting prod/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /3 merged · 1 awaiting qa · 2 awaiting prod/i })).toBeInTheDocument();
+  });
+
+  it('uses real env names in the cohort label when firstEnv/terminalEnv are provided', () => {
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      deploy: { envs: [], awaitingQa: 1, awaitingProd: 2, firstEnv: 'staging', terminalEnv: 'production' },
+      prs: [
+        pr('acme/alpha', 1, 'to staging', 'qa-deploy'),
+        pr('acme/alpha', 2, 'to prod a', 'awaiting-prod'),
+        pr('acme/alpha', 3, 'to prod b', 'awaiting-prod'),
+      ] }] } as never);
+    render(<PipelineView state={st} focusedRepo={null} />);
+    expect(screen.getByRole('button', { name: /3 merged · 1 awaiting staging · 2 awaiting production/i })).toBeInTheDocument();
   });
 
   it('surfaces the awaiting-QA and awaiting-prod metric distinctly (not lumped)', () => {
     const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
       prs: [pr('acme/alpha', 1, 'running pr', 'ci')],
-      deploy: { envs: [], awaitingQa: 2, awaitingProd: 10, chain: { entries: [], supersededCount: 0, inFlight: null } } }] } as never);
+      deploy: { envs: [], awaitingQa: 2, awaitingProd: 10, firstEnv: 'qa', terminalEnv: 'prod',
+        chain: { entries: [], supersededCount: 0, inFlight: null } } }] } as never);
     render(<PipelineView state={st} focusedRepo={null} />);
     // deploy-backlog is a labeled content region, not a live announcement (#171)
     const summary = screen.getByRole('region', { name: /deploy backlog/i });
-    expect(summary).toHaveTextContent(/2 awaiting QA/);
-    expect(summary).toHaveTextContent(/10 awaiting prod/);
+    expect(summary).toHaveTextContent(/2 awaiting qa/i);
+    expect(summary).toHaveTextContent(/10 awaiting prod/i);
+  });
+
+  it('uses real env names in deploy backlog when firstEnv/terminalEnv are provided', () => {
+    const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
+      prs: [pr('acme/alpha', 1, 'running pr', 'ci')],
+      deploy: { envs: [], awaitingQa: 3, awaitingProd: 7, firstEnv: 'staging', terminalEnv: 'production',
+        chain: { entries: [], supersededCount: 0, inFlight: null } } }] } as never);
+    render(<PipelineView state={st} focusedRepo={null} />);
+    const summary = screen.getByRole('region', { name: /deploy backlog/i });
+    expect(summary).toHaveTextContent(/3 awaiting staging/i);
+    expect(summary).toHaveTextContent(/7 awaiting production/i);
+    expect(summary).not.toHaveTextContent(/awaiting QA/i);
   });
 
   it('omits an awaiting-QA segment when nothing is awaiting QA', () => {
@@ -113,13 +142,17 @@ describe('PipelineView (the PR pipeline view, ported into the workspace)', () =>
   it('surfaces the deploy chain: the in-flight SHA + superseded count (roadmap 4.4c)', () => {
     const st = state({ repos: [{ repo: 'acme/alpha', hasDeploy: true, queue: null,
       prs: [pr('acme/alpha', 1, 'running pr', 'ci')],
-      deploy: { envs: [], awaitingQa: 0, awaitingProd: 2, chain: {
-        entries: [], supersededCount: 1,
-        inFlight: { prNumber: 7, sha: 'sha7', stage: 'qa' } } } }] } as never);
+      deploy: { envs: [], awaitingQa: 0, awaitingProd: 2, firstEnv: 'staging', terminalEnv: 'production',
+        chain: {
+          entries: [], supersededCount: 1,
+          inFlight: { prNumber: 7, sha: 'sha7', stage: 'first' } } } }] } as never);
     render(<PipelineView state={st} focusedRepo={null} />);
     // deploy-chain is a labeled content region, not a live announcement (#171)
     const chain = screen.getByRole('region', { name: /deploy chain/i });
-    expect(chain).toHaveTextContent(/Deploying #7 — at qa/);
+    // the in-flight stage renders the real first-env name (not the internal 'first'),
+    // and "flowing to" names the real terminal env — no hardcoded qa/prod
+    expect(chain).toHaveTextContent(/Deploying #7 — at staging, flowing to production/);
+    expect(chain).not.toHaveTextContent(/flowing to prod\b/);
     expect(chain).toHaveTextContent(/1 superseded/);
   });
 

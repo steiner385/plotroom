@@ -3,8 +3,12 @@ import type { ProgressResult } from './progress';
 
 export interface DeployInfo {
   hasDeploy: boolean;
-  qaLive: boolean | null;     // null = health unknown
-  prodLive: boolean | null;
+  firstLive: boolean | null;     // null = health unknown
+  terminalLive: boolean | null;
+  /** Name of the first env in the promotion order (null when no deploy config). */
+  firstEnv: string | null;
+  /** Name of the terminal env in the promotion order (null when no deploy config). */
+  terminalEnv: string | null;
   propagating: boolean;       // squash sha not yet in local clone after fetch
   deployProgress: { percent: number | null; etaSeconds: number | null; overdue: boolean } | null;
 }
@@ -88,10 +92,10 @@ export function classify(i: ClassifyInput): StageResult | null {
     const ageDays = (now.getTime() - Date.parse(pr.mergedAt)) / 86400_000;
     if (ageDays > i.retentionDays) return null;
     if (!i.deploy.hasDeploy) return bare('merged', null);
-    if (i.deploy.prodLive) return null; // live on prod → off the board
-    if (i.deploy.qaLive) return bare('awaiting-prod', null);
+    if (i.deploy.terminalLive) return null; // live on terminal env → off the board
+    if (i.deploy.firstLive) return bare('awaiting-prod', null);
     if (i.deploy.propagating) return bare('qa-deploy', 'propagating');
-    if (i.deploy.qaLive === null) return bare('qa-deploy', 'unknown');
+    if (i.deploy.firstLive === null) return bare('qa-deploy', 'unknown');
     const p = i.deploy.deployProgress;
     return { stage: 'qa-deploy', substate: null, percent: p?.percent ?? null,
       etaSeconds: p?.etaSeconds ?? null, etaRangeSeconds: null, overdue: p?.overdue ?? false };

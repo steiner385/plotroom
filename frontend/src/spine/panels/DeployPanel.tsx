@@ -26,7 +26,7 @@ export function DeployPanel({ repos }: { repos: DashboardState['repos'] }) {
               ))}
             </div>
             <div className="spine-deploy-awaiting">
-              {d.awaitingQa} awaiting QA · {d.awaitingProd} awaiting prod
+              {d.awaitingQa} awaiting {d.firstEnv ?? 'QA'} · {d.awaitingProd} awaiting {d.terminalEnv ?? 'prod'}
             </div>
           </div>
         );

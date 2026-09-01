@@ -35,24 +35,30 @@ export interface WaterfallSegment {
   endMs: number;
 }
 
-/** The (from, to) timeline waypoints behind each lead-time segment id. */
-const SEGMENT_ENDPOINTS: { id: LeadTimeSegmentId; from: keyof PrTimeline; to: keyof PrTimeline }[] = [
-  { id: 'toFirstGreen', from: 'createdAt', to: 'firstGreenAt' },
-  { id: 'greenToEnqueued', from: 'firstGreenAt', to: 'enqueuedAt' },
-  { id: 'queue', from: 'enqueuedAt', to: 'mergedAt' },
-  { id: 'qaDeploy', from: 'mergedAt', to: 'qaLiveAt' },
-  { id: 'awaitingProd', from: 'qaLiveAt', to: 'prodLiveAt' },
-];
-
 const META = new Map(LEAD_TIME_SEGMENTS.map((s) => [s.id, s]));
 
-/** Pairwise segment extraction: both endpoints present + parseable + end ≥ start. */
-export function waterfallSegments(t: PrTimeline): WaterfallSegment[] {
+/**
+ * Pairwise segment extraction: both endpoints present + parseable + end ≥ start.
+ * The two deploy segments resolve their live timestamps from the real first/
+ * terminal env (#258): `envLive[firstEnv]`/`envLive[terminalEnv]` when provided,
+ * falling back to the legacy `qaLiveAt`/`prodLiveAt` (qa/prod or pre-upgrade
+ * payloads) — so arbitrary-env repos no longer drop the deploy segments.
+ */
+export function waterfallSegments(t: PrTimeline,
+  firstEnv?: string | null, terminalEnv?: string | null): WaterfallSegment[] {
+  const firstLiveAt = (firstEnv ? t.envLive?.[firstEnv] : null) ?? t.qaLiveAt;
+  const terminalLiveAt = (terminalEnv ? t.envLive?.[terminalEnv] : null) ?? t.prodLiveAt;
+  const endpoints: { id: LeadTimeSegmentId; from: string | null; to: string | null }[] = [
+    { id: 'toFirstGreen', from: t.createdAt, to: t.firstGreenAt },
+    { id: 'greenToEnqueued', from: t.firstGreenAt, to: t.enqueuedAt },
+    { id: 'queue', from: t.enqueuedAt, to: t.mergedAt },
+    { id: 'qaDeploy', from: t.mergedAt, to: firstLiveAt },
+    { id: 'awaitingProd', from: firstLiveAt, to: terminalLiveAt },
+  ];
   const out: WaterfallSegment[] = [];
-  for (const { id, from, to } of SEGMENT_ENDPOINTS) {
-    const a = t[from]; const b = t[to];
-    if (!a || !b) continue;
-    const startMs = Date.parse(a); const endMs = Date.parse(b);
+  for (const { id, from, to } of endpoints) {
+    if (!from || !to) continue;
+    const startMs = Date.parse(from); const endMs = Date.parse(to);
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) continue;
     const m = META.get(id)!;
     out.push({ id, label: m.label, color: m.color, startMs, endMs });
@@ -76,9 +82,10 @@ function localTime(ms: number): string {
     { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-export function Waterfall({ timeline }: { timeline: PrTimeline }) {
+export function Waterfall({ timeline, firstEnv, terminalEnv }:
+  { timeline: PrTimeline; firstEnv?: string | null; terminalEnv?: string | null }) {
   const uid = useId(); // unique pattern ids per instance (avoids url(#) collisions)
-  const segs = waterfallSegments(timeline);
+  const segs = waterfallSegments(timeline, firstEnv, terminalEnv);
   if (!segs.length) return null;
   const t0 = Math.min(...segs.map((s) => s.startMs));
   const t1 = Math.max(...segs.map((s) => s.endMs));

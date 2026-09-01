@@ -496,6 +496,83 @@ describe('computeMetrics: lead-time decomposition (issue #44)', () => {
   });
 });
 
+describe('computeMetrics: arbitrary-env lead-time normalization (task 8b)', () => {
+  /**
+   * A repo using 'staging' → 'production' instead of 'qa' → 'prod'.
+   * mergedAt = 11:20, staging-live = 11:30 (600s), production-live = 18:00.
+   * The firstTerminalFor callback maps staging→firstEnv, production→terminalEnv.
+   * Downstream: qaDeploy = merged→staging = 600s, awaitingProd = staging→prod.
+   */
+  it('derives qaDeploy from first-env and awaitingProd from terminal-env liveness', () => {
+    const STAGING_REPO = 'acme/staging-repo';
+    h.upsertMergedPr({ repo: STAGING_REPO, number: 10, title: 't', url: 'u',
+      mergedAt: '2026-06-11T11:20:00Z', mergeCommitSha: 'sha',
+      createdAt: '2026-06-11T09:00:00Z' });
+    h.markEnvLive(STAGING_REPO, 10, 'staging', '2026-06-11T11:30:00Z');
+    h.markEnvLive(STAGING_REPO, 10, 'production', '2026-06-11T18:00:00Z');
+
+    const m = computeMetrics(h, '24h', 'hour', NOW,
+      [], () => 1, new Map(), new Map(), [],
+      () => null, [], null, null, () => null, false, () => [],
+      (repo) => repo === STAGING_REPO
+        ? { firstEnv: 'staging', terminalEnv: 'production' }
+        : null);
+
+    const lt = m.leadTime.find((r) => r.repo === STAGING_REPO)!;
+    expect(lt).toBeDefined();
+    // qaDeploy segment = merged(11:20) → staging(11:30) = 600s
+    const qaDeploy = lt.segments.find((s) => s.id === 'qaDeploy')!;
+    expect(qaDeploy.medianSecs).toBe(600);
+    expect(qaDeploy.n).toBe(1);
+    // awaitingProd = staging(11:30) → production(18:00) = 6.5h
+    const awaitingProd = lt.segments.find((s) => s.id === 'awaitingProd')!;
+    expect(awaitingProd.medianSecs).toBe(6.5 * 3600);
+    expect(awaitingProd.n).toBe(1);
+    // prodDeploys counts production-live events in window
+    expect(lt.prodDeploys).toBe(1);
+  });
+
+  it('without callback (legacy), existing qa/prod columns are used as-is (backward compat)', () => {
+    // Same setup as other lead-time tests: markEnvLive qa/prod → legacy columns still work.
+    h.upsertMergedPr({ repo: REPO, number: 20, title: 't', url: 'u',
+      mergedAt: '2026-06-11T11:20:00Z', mergeCommitSha: 'sha',
+      createdAt: '2026-06-11T09:00:00Z' });
+    h.markEnvLive(REPO, 20, 'qa', '2026-06-11T11:30:00Z');
+    h.markEnvLive(REPO, 20, 'prod', '2026-06-11T18:00:00Z');
+
+    // No callback (uses default () => null)
+    const m = computeMetrics(h, '24h', 'hour', NOW);
+    const lt = m.leadTime.find((r) => r.repo === REPO)!;
+    const qaDeploy = lt.segments.find((s) => s.id === 'qaDeploy')!;
+    expect(qaDeploy.medianSecs).toBe(600);
+    expect(lt.prodDeploys).toBe(1);
+  });
+
+  it('single-env repo: qaDeploy and awaitingProd resolve to the same env (awaitingProd = 0)', () => {
+    const SINGLE_ENV_REPO = 'acme/single-env';
+    h.upsertMergedPr({ repo: SINGLE_ENV_REPO, number: 30, title: 't', url: 'u',
+      mergedAt: '2026-06-11T11:20:00Z', mergeCommitSha: 'sha',
+      createdAt: '2026-06-11T09:00:00Z' });
+    h.markEnvLive(SINGLE_ENV_REPO, 30, 'production', '2026-06-11T11:30:00Z');
+
+    const m = computeMetrics(h, '24h', 'hour', NOW,
+      [], () => 1, new Map(), new Map(), [],
+      () => null, [], null, null, () => null, false, () => [],
+      (repo) => repo === SINGLE_ENV_REPO
+        ? { firstEnv: 'production', terminalEnv: 'production' }
+        : null);
+
+    const lt = m.leadTime.find((r) => r.repo === SINGLE_ENV_REPO)!;
+    // qaDeploy = merged→production = 600s
+    const qaDeploy = lt.segments.find((s) => s.id === 'qaDeploy')!;
+    expect(qaDeploy.medianSecs).toBe(600);
+    // awaitingProd = production→production = 0 (same timestamp)
+    const awaitingProd = lt.segments.find((s) => s.id === 'awaitingProd')!;
+    expect(awaitingProd.medianSecs).toBe(0);
+    expect(lt.prodDeploys).toBe(1);
+  });
+});
+
 describe('computeMetrics: flakiness (issue #37)', () => {
   /** One sha+attempt-aware check_durations row, 60s duration. */
   const row = (conclusion: string, sha: string, attempt: number, completedAt: string,

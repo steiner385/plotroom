@@ -57,13 +57,25 @@ describe('deployLane', () => {
     const repos = [dep({
       envs: [{ name: 'qa', liveSha: 'a1b2c3d4', reachable: true },
         { name: 'prod', liveSha: 'd4e5f6a7', reachable: true }],
-      awaitingProd: 2,
+      awaitingProd: 2, firstEnv: 'qa', terminalEnv: 'prod',
     })];
     const out = deployLane(repos as unknown as DashboardState['repos']);
     expect(out.status).toBe('green');
     expect(out.summary).toMatch(/a1b2c3/);
     expect(out.summary).toMatch(/d4e5f6/);
     expect(out.summary).toMatch(/2 awaiting prod/);
+  });
+
+  it('uses real terminalEnv name in the awaiting count summary', () => {
+    const repos = [dep({
+      envs: [{ name: 'staging', liveSha: 'a1b2c3d4', reachable: true },
+        { name: 'production', liveSha: 'd4e5f6a7', reachable: true }],
+      awaitingProd: 3, firstEnv: 'staging', terminalEnv: 'production',
+    })];
+    const out = deployLane(repos as unknown as DashboardState['repos']);
+    expect(out.status).toBe('green');
+    expect(out.summary).toMatch(/3 awaiting production/);
+    expect(out.summary).not.toMatch(/awaiting prod(?!uction)/);
   });
 
   it('never returns red or amber', () => {

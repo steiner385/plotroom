@@ -38,6 +38,7 @@ import { computeCostSummary, type CostSummary } from './metrics';
 import { RUNNER_JOB_KEYS, type RunnerJobInput } from './estimator/runner-plan';
 import { projectInputs, reclaimWindowMs } from './estimator/routing-inputs';
 import { parseScheduledWorkflows, scheduledRunsApiPath, type ScheduledRunsApiResponse } from './scheduled';
+import { fetchEnvironments, fetchRecentDeployments, fetchDeploymentState, inferDeployTopology } from './github-deploy';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -95,6 +96,7 @@ export interface PrTimeline {
   mergedAt: string;
   qaLiveAt: string | null;
   prodLiveAt: string | null;
+  envLive: Record<string, string>;
 }
 
 export interface PrView {
@@ -142,6 +144,11 @@ export interface PrView {
    *  when costMinutes is null — the flag qualifies a $ figure, never replaces
    *  one. The UI renders '(partial)'. */
   costDollarsPartial: boolean;
+  /** The repo's first/terminal deploy env names (#258) — the UI labels the
+   *  MetroTrack deploy nodes + resolves the Waterfall deploy segments with these.
+   *  Null for deploy-less repos. */
+  firstEnv?: string | null;
+  terminalEnv?: string | null;
 }
 
 /** Absolute plausibility cap (secs) for a SUCCESS duration sample when the
@@ -502,6 +509,9 @@ const SCHEDULED_DISCOVERY_INTERVAL_MS = 24 * 3600_000;
  *  keeps the cost trivial (nightly/weekly cadence moves far slower). */
 const SCHEDULED_RUNS_INTERVAL_MS = 3600_000;
 
+/** Re-run deploy auto-discovery (environments + deployments) at most this often per repo. */
+export const DEPLOY_DISCOVERY_INTERVAL_MS = 6 * 3600_000;
+
 /** Stages whose first ETA prediction is scored against the actual stage duration —
  *  the same set the conformal-lite range calibration applies to (single source
  *  of truth in estimator/calibrate.ts). */
@@ -614,6 +624,9 @@ export class Poller extends EventEmitter {
   private discoveredScheduled = new Map<string, string[]>();              // repo → discovered scheduled workflow file basenames (Spec 4)
   private scheduledDiscoveryThrottle = new RetryThrottle(SCHEDULED_DISCOVERY_INTERVAL_MS); // 24h on success, backoff on failure
   private scheduledRunsThrottle = new RetryThrottle(SCHEDULED_RUNS_INTERVAL_MS);           // ~1h per repo on success, backoff on failure
+  private discoveredDeploy = new Map<string, DeployConfig>();                              // repo → auto-synthesised DeployConfig (task 13)
+  private deployDiscoveryThrottle = new RetryThrottle(DEPLOY_DISCOVERY_INTERVAL_MS);      // 6h on success, backoff on failure
+  private discoveredDeployLogged = new Set<string>();                                      // repos whose first discovery was logged
   private costSummaryCache: CostSummary | undefined;                     // global per-stage cost (Cost lane, Spec 3); buildState reads this (spec §15)
   private costSummaryAt = 0;                                              // epoch ms of the last cost recompute (throttled — cost moves slowly)
   private routingInputsCache: { jobs: RunnerJobInput[]; reclaimRate: number | null } | undefined; // runner-routing inputs (feature/runner-routing); throttled like costSummary
@@ -656,6 +669,14 @@ export class Poller extends EventEmitter {
    * instead of nothing. Live fetches overwrite these on success; restoring
    * never arms the refresh throttles, so the first cycle still fetches fresh.
    */
+  /** Env promotion order for a deploy config. Falls back to declaration order
+   *  with names lowercased (mirrors normalizeDeployConfig). Production dc.order
+   *  is always set after normalization; this fallback only affects test fixtures
+   *  that skip the normalization path. */
+  private envOrder(dc: DeployConfig): string[] {
+    return dc.order ?? dc.environments.map((e) => e.name.toLowerCase());
+  }
+
   private restorePersisted(): void {
     try {
       const raw = this.deps.history.getMeta('discoveredRepos');
@@ -1295,6 +1316,9 @@ export class Poller extends EventEmitter {
     // Scheduled-lane discovery + run polling shares this SLOW cycle (Scheduled
     // lane, Spec 4) — 24h discovery / ~1h run-poll per-repo throttles inside.
     await this.refreshScheduled();
+    // Deploy auto-discovery (task 13): synthesise DeployConfig from GitHub for
+    // repos that opt in via autoDiscoverDeploy, before the env loop runs.
+    await this.refreshDiscoveredDeploy();
     const now = this.now();
     // expire old throttle entries so the map stays bounded
     for (const [k, at] of this.ancestryCheckedAt) {
@@ -1303,13 +1327,24 @@ export class Poller extends EventEmitter {
     for (const [repo, dc] of Object.entries(this.effectiveDeploy())) {
       // clones exist only in clone mode — api mode never creates one (issue #18)
       if (config.ancestrySource === 'clone') await deploy.ensureClone(repo, dc.cloneUrl).catch(() => {});
+      const envOrder = this.envOrder(dc);
+      const firstEnv = envOrder[0] ?? null;
+      const terminalEnv = envOrder.at(-1) ?? null;
       for (const env of dc.environments) {
-        const sha = await deploy.health(env.healthUrl, env.shaKey);
-        this.envShas.set(`${repo}/${env.name}`, sha);
+        // Synthesised (auto-discovered) envs have an empty healthUrl — their live
+        // SHA was already set in envShas by refreshDiscoveredDeploy; skip the probe
+        // so we don't clobber it with a null. Configured envs probe as before.
+        let sha: string | null;
+        if (env.healthUrl) {
+          sha = await deploy.health(env.healthUrl, env.shaKey);
+          this.envShas.set(`${repo}/${env.name}`, sha);
+        } else {
+          sha = this.envShas.get(`${repo}/${env.name}`) ?? null;
+        }
         if (!sha) continue;
         for (const rec of history.listTrackedMerged(config.retentionDays, now)) {
           if (rec.repo !== repo || !rec.mergeCommitSha) continue;
-          const liveAt = env.name === 'qa' ? rec.qaLiveAt : rec.prodLiveAt;
+          const liveAt = rec.envLive[env.name] ?? null;
           if (liveAt) continue;
           // Throttle per (sha, deployedSha), transport-agnostic: clone-mode
           // 'missing' answers trigger a git fetch inside isAncestor (fetch
@@ -1327,15 +1362,15 @@ export class Poller extends EventEmitter {
           if (anc === 'no') this.seenNotLive.add(envKey);
           if (anc === 'yes') {
             history.markEnvLive(repo, rec.number, env.name, now.toISOString());
-            // "shipped" signal (issue #19): the merge commit just became prod
+            // "shipped" signal (issue #19): the merge commit just became terminal-env
             // ancestry — markEnvLive's liveAt guard makes this a true edge.
-            if (env.name === 'prod') this.deps.notifier?.prodLive(repo, rec.number, rec.title);
+            if (env.name === terminalEnv) this.deps.notifier?.terminalLive(repo, rec.number, rec.title, env.name);
             // Record a deploy-gap sample only when THIS instance previously observed the
             // PR not-live on this env. A PR found already live at first observation has
             // an unknowable merged→live wall-clock gap (e.g. process started hours after
             // the deploy) — recording now-mergedAt would poison the median (~31h vs ~10m).
-            if (env.name === 'qa' && this.seenNotLive.has(envKey)) {
-              history.recordDeployGap(repo, 'qa', (now.getTime() - Date.parse(rec.mergedAt)) / 1000);
+            if (env.name === firstEnv && this.seenNotLive.has(envKey)) {
+              history.recordDeployGap(repo, env.name, (now.getTime() - Date.parse(rec.mergedAt)) / 1000);
             }
             this.seenNotLive.delete(envKey);
           }
@@ -1436,9 +1471,22 @@ export class Poller extends EventEmitter {
     return effectiveRepoSettings(repo, this.deps.config, this.repoFileConfigs.get(repo));
   }
 
-  /** Effective deploy map (instance `deploy.*` override > in-repo file). */
+  /** Effective deploy map: discovered < in-repo file < instance override.
+   *  Auto-discovered configs fill in repos that have no hand-written deploy block. */
   effectiveDeploy(): Record<string, DeployConfig> {
-    return effectiveDeployMap(this.deps.config, this.repoFileConfigs);
+    return { ...Object.fromEntries(this.discoveredDeploy), ...effectiveDeployMap(this.deps.config, this.repoFileConfigs) };
+  }
+
+  /**
+   * Returns the first and terminal env names for a deploy-configured repo.
+   * Returns null when `repo` has no deploy config.
+   * Single-env repos return the same name for both firstEnv and terminalEnv.
+   */
+  deployEnvsFor(repo: string): { firstEnv: string | null; terminalEnv: string | null } | null {
+    const dc = this.effectiveDeploy()[repo];
+    if (!dc) return null;
+    const order = this.envOrder(dc);
+    return { firstEnv: order[0] ?? null, terminalEnv: order.at(-1) ?? null };
   }
 
   /** Parsed in-repo config for a repo (Z2 source attribution); undefined when absent. */
@@ -1895,6 +1943,88 @@ export class Poller extends EventEmitter {
     }
   }
 
+  /**
+   * Deploy auto-discovery (task 13): for every repo in `discovered` that opts in
+   * via `autoDiscoverDeploy: true` and has no hand-written deploy config, query
+   * GitHub for its environments + recent deployments, infer a promotion topology,
+   * and synthesise a DeployConfig whose env entries have an empty `healthUrl` (the
+   * env-loop will skip health probes for those and use the already-set envShas).
+   *
+   * Best-effort + failure-aware (RetryThrottle pattern): a failed guard arms the
+   * capped backoff so the next eligible deploy cycle retries.
+   */
+  private async refreshDiscoveredDeploy(): Promise<void> {
+    const { config } = this.deps;
+    const nowMs = this.now().getTime();
+    const configFileDeployMap = effectiveDeployMap(config, this.repoFileConfigs);
+
+    for (const repo of [...this.discovered].sort()) {
+      if (config.exclude.includes(repo)) continue;
+      // Skip repos already covered by a hand-written deploy config
+      if (repo in configFileDeployMap) continue;
+      if (!this.settingsFor(repo).autoDiscoverDeploy) continue;
+      if (!this.deployDiscoveryThrottle.due(repo, nowMs)) continue;
+
+      const client = this.routedClient(repo.split('/')[0] ?? '');
+      if (!client) continue; // routedClient already logged the skip
+
+      // 1) Environments
+      const envs = await this.guard(() => fetchEnvironments(client, repo));
+      if (envs === null) { this.deployDiscoveryThrottle.failure(repo, nowMs); continue; }
+      if (envs.length === 0) { this.deployDiscoveryThrottle.success(repo, nowMs); continue; }
+
+      // 2) Recent deployments
+      const deps = await this.guard(() => fetchRecentDeployments(client, repo));
+      if (deps === null) { this.deployDiscoveryThrottle.failure(repo, nowMs); continue; }
+
+      // 3) Fetch state for each deployment.
+      // fetchDeploymentState returns null (no statuses) without throwing → guard wraps
+      // that null and also returns null on error, so we can't distinguish using guard alone.
+      // Use a sentinel: wrap to return a "missing" marker when there are no statuses.
+      const MISSING = Symbol('missing');
+      const withState: Array<{ environment: string; sha: string; createdAt: string; state: string }> = [];
+      let stateFetchFailed = false;
+      for (const d of deps) {
+        const stateOrNull = await this.guard(async () => {
+          const s = await fetchDeploymentState(client, repo, d.id);
+          return s ?? MISSING;
+        });
+        if (stateOrNull === null) { stateFetchFailed = true; break; } // guard caught an error
+        if (stateOrNull === MISSING) continue; // no status for this deployment → skip
+        const stateResult = stateOrNull as { state: string; createdAt: string };
+        withState.push({ environment: d.environment, sha: d.sha, createdAt: stateResult.createdAt, state: stateResult.state });
+      }
+      if (stateFetchFailed) { this.deployDiscoveryThrottle.failure(repo, nowMs); continue; }
+
+      // 4) Infer topology
+      const topo = inferDeployTopology(withState);
+      if (topo.order.length === 0) { this.deployDiscoveryThrottle.success(repo, nowMs); continue; }
+
+      // 5) Build synthesised DeployConfig
+      const dc: DeployConfig = {
+        order: topo.order,
+        cloneUrl: `https://github.com/${repo}.git`,
+        defaultBranch: 'main',
+        environments: topo.order.map((name) => ({ name, healthUrl: '', auto: false, shaKey: 'commitSha' })),
+      };
+      this.discoveredDeploy.set(repo, dc);
+
+      // 6) Populate live SHAs from topo
+      for (const [env, sha] of Object.entries(topo.liveSha)) {
+        this.envShas.set(`${repo}/${env}`, sha);
+      }
+
+      this.deployDiscoveryThrottle.success(repo, nowMs);
+
+      // 7) Log once per repo on first (or changed) discovery
+      const orderKey = topo.order.join(' → ');
+      if (!this.discoveredDeployLogged.has(`${repo}::${orderKey}`)) {
+        this.discoveredDeployLogged.add(`${repo}::${orderKey}`);
+        console.log(`[poller] auto-discovered deploy envs for ${repo}: ${orderKey}`);
+      }
+    }
+  }
+
   /** Re-read + re-derive a repo's ci.yml at most once per 24h — armed ONLY when
    *  the read succeeds. A failed fetch/read arms a capped exponential backoff
    *  (1m..10m) so later deploy cycles retry.
@@ -2205,24 +2335,30 @@ export class Poller extends EventEmitter {
       if (view) push(pr.repo, view);
     }
     const trackedMerged = history.listTrackedMerged(config.retentionDays, now);
-    // #205: newest prod-live merge per repo. An older merge not yet on prod is
-    // superseded (its SHA was rolled up into that deploy) and must not show as
-    // 'awaiting/overdue' — its content already shipped via the newer merge.
+    const deployMap = this.effectiveDeploy();
+    // #205: newest terminal-live merge per repo. An older merge not yet on the
+    // terminal env is superseded (its SHA was rolled up into that deploy) and
+    // must not show as 'awaiting/overdue' — its content already shipped via the newer merge.
     const newestProdMergedAt = new Map<string, string>();
     for (const rec of trackedMerged) {
-      if (rec.prodLiveAt == null) continue;
+      const dc = deployMap[rec.repo];
+      const te = dc ? this.envOrder(dc).at(-1) ?? null : null;
+      const terminalLive = !!(te && rec.envLive[te]);
+      if (!terminalLive) continue;
       const cur = newestProdMergedAt.get(rec.repo);
       if (cur == null || rec.mergedAt > cur) newestProdMergedAt.set(rec.repo, rec.mergedAt);
     }
     for (const rec of trackedMerged) {
       if (config.exclude.includes(rec.repo)) continue; // exclude applies on reconfigure too
       const np = newestProdMergedAt.get(rec.repo);
-      const superseded = rec.prodLiveAt == null && np != null && rec.mergedAt < np;
+      const dc = deployMap[rec.repo];
+      const te = dc ? this.envOrder(dc).at(-1) ?? null : null;
+      const terminalLive = !!(te && rec.envLive[te]);
+      const superseded = !terminalLive && np != null && rec.mergedAt < np;
       const view = this.viewForMergedPr(rec, now, superseded);
       if (view) push(rec.repo, view);
     }
 
-    const deployMap = this.effectiveDeploy();
     const repos = [...byRepo.entries()]
       .map(([repo, prs]) => {
         const queue = this.buildQueueView(repo, repoGroupProgress.get(repo) ?? [], now);
@@ -2636,7 +2772,7 @@ export class Poller extends EventEmitter {
     const prevStage = this.stages.get(key) ?? null;
     const rawStage = classify({
       pr, prev: prevStage, ciProgress, queueProgress,
-      deploy: { hasDeploy: pr.repo in this.effectiveDeploy(), qaLive: null, prodLive: null, propagating: false, deployProgress: null },
+      deploy: { hasDeploy: pr.repo in this.effectiveDeploy(), firstLive: null, terminalLive: null, firstEnv: null, terminalEnv: null, propagating: false, deployProgress: null },
       retentionDays: config.retentionDays, now, requiredCheckPrefixes: prefixes,
       rollupWorkflowName: rollupWf,
     });
@@ -2688,6 +2824,8 @@ export class Poller extends EventEmitter {
       queueAheadCount, costMinutes, costDollars, costDollarsPartial,
       checks: this.checkViews(pr, now, prefixes),
       timeline: null,
+      firstEnv: this.deployEnvsFor(pr.repo)?.firstEnv ?? null,
+      terminalEnv: this.deployEnvsFor(pr.repo)?.terminalEnv ?? null,
       touchesWorkflows: pr.touchesWorkflows,
       workflowImpact: pr.touchesWorkflows && pr.headSha
         ? this.workflowImpactCache.get(`${pr.repo}\u0000${pr.headSha}`) ?? null
@@ -2698,24 +2836,29 @@ export class Poller extends EventEmitter {
   private viewForMergedPr(rec: MergedPrRecord, now: Date, superseded = false): PrView | null {
     const { history, config } = this.deps;
     const dc = this.effectiveDeploy()[rec.repo];
-    const qaSha = this.envShas.get(`${rec.repo}/qa`);
-    const prodSha = this.envShas.get(`${rec.repo}/prod`);
-    // #205: a superseded merge (its SHA rolled up into a newer prod deploy — a
+    const dcOrder = dc ? this.envOrder(dc) : null;
+    const firstEnv = dcOrder?.[0] ?? null;
+    const terminalEnv = dcOrder?.at(-1) ?? null;
+    const firstSha = firstEnv ? this.envShas.get(`${rec.repo}/${firstEnv}`) : undefined;
+    const terminalSha = terminalEnv ? this.envShas.get(`${rec.repo}/${terminalEnv}`) : undefined;
+    // #205: a superseded merge (its SHA rolled up into a newer terminal-env deploy — a
     // sub-PR merged to a feature branch, or a squash artifact) has effectively
-    // shipped to QA+prod. Treat it as live so it never sits 'qa-deploying
+    // shipped to all envs. Treat it as live so it never sits 'qa-deploying
     // overdue' waiting for a SHA that will never deploy on its own.
     const deploy: DeployInfo = superseded
-      ? { hasDeploy: !!dc, qaLive: true, prodLive: true, propagating: false, deployProgress: null }
+      ? { hasDeploy: !!dc, firstLive: true, terminalLive: true, firstEnv, terminalEnv, propagating: false, deployProgress: null }
       : {
           hasDeploy: !!dc,
-          qaLive: rec.qaLiveAt ? true : (qaSha == null ? null : false),
-          prodLive: rec.prodLiveAt ? true : (prodSha == null ? null : false),
+          firstLive: (firstEnv && rec.envLive[firstEnv]) ? true : (firstSha == null ? null : false),
+          terminalLive: (terminalEnv && rec.envLive[terminalEnv]) ? true : (terminalSha == null ? null : false),
+          firstEnv,
+          terminalEnv,
           // no squash sha yet, or sha not visible in the clone even after fetch
           propagating: !rec.mergeCommitSha || this.propagating.has(`${rec.repo}#${rec.number}`),
           deployProgress: null,
         };
-    if (dc && !rec.qaLiveAt && deploy.qaLive === false) {
-      const gap = history.medianDeployGap(rec.repo, 'qa') ?? 600;
+    if (dc && firstEnv && !rec.envLive[firstEnv] && deploy.firstLive === false) {
+      const gap = history.medianDeployGap(rec.repo, firstEnv) ?? 600;
       const elapsed = (now.getTime() - Date.parse(rec.mergedAt)) / 1000;
       deploy.deployProgress = {
         percent: Math.min(Math.round((elapsed / gap) * 100), 97),
@@ -2748,10 +2891,11 @@ export class Poller extends EventEmitter {
       // missing waypoints stay null, the UI omits those segments
       timeline: { createdAt: rec.createdAt, firstGreenAt: rec.firstGreenAt,
         enqueuedAt: rec.enqueuedAt, mergedAt: rec.mergedAt,
-        qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt },
+        qaLiveAt: rec.qaLiveAt, prodLiveAt: rec.prodLiveAt,
+        envLive: rec.envLive },
       touchesWorkflows: false, workflowImpact: null,
       groupChecks: null, mergeEtaSim: null, costMinutes: null, costDollars: null,
-      costDollarsPartial: false };
+      costDollarsPartial: false, firstEnv, terminalEnv };
   }
 
   private checkViews(pr: PrSnapshot, now: Date, prefixes?: string[]): CheckView[] {
