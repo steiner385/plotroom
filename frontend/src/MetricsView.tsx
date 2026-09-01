@@ -19,7 +19,7 @@ import { CONTROL_DEFINITIONS, DEFS, defTitle } from './definitions';
 import {
   type MetricsSection,
   WINDOWS, WINDOW_DAYS, HOUR_BUCKET_MAX_DAYS, POOL_COLORS,
-  windowBuckets, align, alignCounts, alignBand, deltaText,
+  windowBuckets, align, alignCounts, alignBand, trendOf,
   fmtHours, fmtCount, fmtPct, fmtMinutes, fmtDollars,
   calibrationHeadline, METRICS_SECTIONS, SECTION_STORAGE_KEY,
   resolveInitialSection, resolveRecLink,
@@ -503,7 +503,7 @@ export function MetricsView({ now, focusCostNonce }: {
                 <MetricStat key={tier.event} label={`${tier.event} p50 wait`}
                   def={DEFS.runnerWaitP50}
                   value={tier.p50.value != null ? formatDur(tier.p50.value) : '–'}
-                  delta={deltaText(tier.p50)} />
+                  trend={trendOf(tier.p50, true)} />
               ))}
             </div>
             {tiers.map((tier) => (
@@ -527,7 +527,7 @@ export function MetricsView({ now, focusCostNonce }: {
                 <MetricStat key={rp.pool} label={`${rp.pool} p50 wait`}
                   def={DEFS.poolWaitP50}
                   value={rp.p50.value != null ? formatDur(rp.p50.value) : '–'}
-                  delta={deltaText(rp.p50)} />
+                  trend={trendOf(rp.p50, true)} />
               ))}
             </div>
             {pools.map((rp) => (
@@ -835,13 +835,13 @@ export function MetricsView({ now, focusCostNonce }: {
             <div className="metric-row">
               <MetricStat label="merges" def={DEFS.queueMerges}
                 value={String(q.merges.value ?? 0)}
-                delta={deltaText(q.merges)} />
+                trend={trendOf(q.merges, false)} />
               <MetricStat label="time in queue (p50)" def={DEFS.queueWaitP50}
                 value={q.queueWaitP50.value != null ? formatDur(q.queueWaitP50.value) : '–'}
-                delta={deltaText(q.queueWaitP50)} />
+                trend={trendOf(q.queueWaitP50, true)} />
               <MetricStat label="group run (p50)" def={DEFS.groupRunP50}
                 value={q.groupRunP50.value != null ? formatDur(q.groupRunP50.value) : '–'}
-                delta={deltaText(q.groupRunP50)} />
+                trend={trendOf(q.groupRunP50, true)} />
             </div>
             <ChartBlock label={`merges per ${noun}`}>
               <AreaSeries points={alignCounts(axis, q.mergesPerBucket)} kind={kind}
@@ -1355,13 +1355,13 @@ export function MetricsView({ now, focusCostNonce }: {
             <div className="metric-row">
               <MetricStat label="merged" def={DEFS.velocityMerged}
                 value={String(v.merged.value ?? 0)}
-                delta={deltaText(v.merged)} />
+                trend={trendOf(v.merged, false)} />
               <MetricStat label="merge → QA (p50)" def={DEFS.mergeToQa}
                 value={v.mergeToQaP50.value != null ? formatDur(v.mergeToQaP50.value) : '–'}
-                delta={deltaText(v.mergeToQaP50)} />
+                trend={trendOf(v.mergeToQaP50, true)} />
               <MetricStat label="avg PR lifespan" def={DEFS.lifespan}
                 value={v.lifespanMeanHours.value != null ? fmtHours(v.lifespanMeanHours.value) : '–'}
-                delta={deltaText(v.lifespanMeanHours)} />
+                trend={trendOf(v.lifespanMeanHours, true)} />
             </div>
             <ChartBlock label={`merged per ${noun}`}>
               <AreaSeries points={alignCounts(axis, v.mergedPerBucket)} kind={kind}
