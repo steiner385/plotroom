@@ -60,7 +60,7 @@
     "react-dom": "^19"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "express": "^4.22.2",
     "yaml": "^2.9.0"
   },
