@@ -207,7 +207,7 @@ function PrRowInner({ pr, hasDeploy, queueCulprit = null, expandable = true }: P
             eta && <span className={`eta ${s.overdue ? 'overdue' : ''}`}>{eta}</span>
           )}
         </div>
-        <MetroTrack stage={s} hasDeploy={hasDeploy} />
+        <MetroTrack stage={s} hasDeploy={hasDeploy} firstEnv={pr.firstEnv} terminalEnv={pr.terminalEnv} />
         {/* sub-line vocabulary tooltips (issue #66): the definitions of every
             recognized term in the line, from the shared SUBLINE_TERMS map */}
         {sub && <div className="sub" title={subLineTitle(sub)}>{sub}</div>}
@@ -261,10 +261,10 @@ function PrRowInner({ pr, hasDeploy, queueCulprit = null, expandable = true }: P
           rendered above any check panels; omitted when no segment has both
           endpoint timestamps (Waterfall itself returns null then, but the
           label must not render either). */}
-      {open && pr.timeline && waterfallSegments(pr.timeline).length > 0 && (
+      {open && pr.timeline && waterfallSegments(pr.timeline, pr.firstEnv, pr.terminalEnv).length > 0 && (
         <div className="check-sections waterfall-section">
           <div className="panel-label">where did the time go</div>
-          <Waterfall timeline={pr.timeline} />
+          <Waterfall timeline={pr.timeline} firstEnv={pr.firstEnv} terminalEnv={pr.terminalEnv} />
         </div>
       )}
       {open && pr.groupChecks && pr.groupChecks.length > 0 ? (
