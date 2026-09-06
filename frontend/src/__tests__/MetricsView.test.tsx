@@ -403,14 +403,18 @@ describe('MetricsView', () => {
     // runner waits (+50%) are in performance; queue stats (+100%, ≈ prev) are in throughput.
     fireEvent.click(screen.getByTestId('metrics-subtab-throughput'));
     fireEvent.click(screen.getByTestId('metrics-subtab-performance'));
-    // runner waits: 45 vs 30 → +50%; queue merges: 8 vs 4 → +100%
-    expect(screen.getByText('+50% vs prev')).toBeInTheDocument();
-    expect(screen.getAllByText('+100% vs prev').length).toBeGreaterThanOrEqual(1);
-    // equal windows → "≈ prev" (queueWait 480 vs 480 and merged 5 vs 5)
-    expect(screen.getAllByText('≈ prev').length).toBeGreaterThanOrEqual(2);
-    // prev null (merge_group runner wait, group run, lifespan) → no delta rendered for those stats
+    // delta-vs-baseline arrows (#258): runner waits 45 vs 30 → +50% (rising
+    // latency, lowerIsBetter → bad ▲); queue merges 8 vs 4 → +100% (more
+    // throughput → good ▲). aria-label carries the % vs prev window.
+    const wait = screen.getByLabelText('+50% vs prev window');
+    expect(wait.textContent).toBe('▲');
+    expect(wait).toHaveClass('trend-arrow--bad');
+    expect(screen.getAllByLabelText('+100% vs prev window').length).toBeGreaterThanOrEqual(1);
+    // equal windows (queueWait 480 vs 480, merged 5 vs 5) → flat → no arrow (noise suppressed)
+    expect(screen.queryByText('≈ prev')).toBeNull();
+    // prev null (merge_group runner wait, group run, lifespan) → no trend arrow for those stats
     const mg = screen.getByText('merge_group p50 wait').closest('.metric-stat')! as HTMLElement;
-    expect(mg.querySelector('.metric-delta')).toBeNull();
+    expect(mg.querySelector('.trend-arrow')).toBeNull();
   });
 
   it('repos with zero data in a panel are omitted entirely', async () => {

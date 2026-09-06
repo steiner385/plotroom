@@ -2,6 +2,8 @@ import type { RepoQueueView, QueueGroupView, MergeEtaSimulation, QueueHealthStat
 import { formatDur } from './format';
 import { scrollBehavior } from './motion';
 import { DEFS, defTitle } from './definitions';
+import { computeTrend } from './lib/trend';
+import { TrendArrow } from './TrendArrow';
 
 const MAX_NUMBERS_PER_CAR = 6;
 
@@ -148,6 +150,13 @@ function OpsStrip({ queue }: { queue: RepoQueueView }) {
       {oldest != null && (
         <span className="ops-stat" title={defTitle(DEFS.oldestWait)}>
           oldest wait ~{formatDur(oldest)}</span>
+      )}
+      {queue.queueWaitP50?.value != null && (
+        <span className="ops-stat" title="queue-wait p50 — recent 7d vs prior 7d">
+          wait p50 ~{formatDur(queue.queueWaitP50.value)}
+          <TrendArrow trend={computeTrend(queue.queueWaitP50.value, queue.queueWaitP50.prev, { lowerIsBetter: true })}
+            baselineLabel="vs prior week" />
+        </span>
       )}
     </div>
   );

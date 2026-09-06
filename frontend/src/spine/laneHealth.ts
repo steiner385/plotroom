@@ -1,4 +1,5 @@
 import type { DashboardState, Lane } from '../types';
+import { greenRateTrend } from '../lib/trend';
 import { prCiLane } from './lanes/prCiLane';
 import { mergeQueueLane } from './lanes/mergeQueueLane';
 import { mainLane } from './lanes/mainLane';
@@ -20,6 +21,9 @@ export function buildLaneHealth(state: DashboardState | null): LaneHealth[] {
   const prc = state ? prCiLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const mq = state ? mergeQueueLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const ml = state ? mainLane(repos) : { status: 'blind' as const, summary: 'loading…' };
+  // Degrading-green trend (#258) from the representative main-commit series — the
+  // same series MainPanel renders (first repo with a non-empty series).
+  const mainTrend = greenRateTrend(repos.map((r) => r.laneHealth).find((h) => h?.mainSeries?.length)?.mainSeries);
   const dp = state ? deployLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const sl = state ? scheduledLane(repos) : { status: 'blind' as const, summary: 'loading…' };
   const fl = state ? failuresLane(repos) : { status: 'blind' as const, summary: 'loading…' };
@@ -48,7 +52,8 @@ export function buildLaneHealth(state: DashboardState | null): LaneHealth[] {
     { id: 'merge-queue', title: 'Merge queue', glyphPosition: 'dot', wiredness: 'wired', gating: true,
       status: mq.status, summary: mq.summary, costChip: stageDollars('queue') },
     { id: 'main', title: 'main', glyphPosition: 'dot', wiredness: 'wired', gating: true,
-      status: ml.status, summary: ml.summary, costChip: stageDollars('main') },
+      status: ml.status, summary: ml.summary, costChip: stageDollars('main'),
+      trend: mainTrend.significant ? mainTrend : undefined },
     { id: 'deploy', title: 'Deploy', glyphPosition: 'dot',
       wiredness: deployWired ? 'wired' : 'not-wired', gating: false,
       status: dp.status, summary: dp.summary },
