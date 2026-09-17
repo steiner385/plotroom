@@ -27,11 +27,11 @@ jobs:
       contents: read
       id-token: write        # required: lets npm mint the OIDC token for trusted publishing
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
