@@ -27,7 +27,7 @@ jobs:
       contents: read
       id-token: write        # required: lets npm mint the OIDC token for trusted publishing
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
 
