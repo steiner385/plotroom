@@ -435,6 +435,20 @@ describe('QueueTrain ops strip (issue #39)', () => {
     expect(screen.getByText('oldest wait ~30m')).toBeInTheDocument();
   });
 
+  it('shows the queue-wait p50 with a rising trend arrow (#258)', () => {
+    const queue = { ...baseQueue, queueWaitP50: { value: 300, prev: 200 } }; // +50% rising → bad ▲
+    render(<QueueTrain queue={queue} />);
+    expect(screen.getByText(/wait p50 ~5m/)).toBeInTheDocument();
+    const arrow = screen.getByLabelText('+50% vs prior week');
+    expect(arrow.textContent).toBe('▲');
+    expect(arrow).toHaveClass('trend-arrow--bad');
+  });
+
+  it('shows no queue-wait arrow on a pre-#258 payload (no queueWaitP50)', () => {
+    const { container } = render(<QueueTrain queue={baseQueue} />);
+    expect(container.querySelector('.trend-arrow')).toBeNull();
+  });
+
   it('cap-backlog: amber badge with the remediation visible AND in the tooltip', () => {
     const detail = 'cap-backlog: demand exceeds runner cap — wait or raise cap';
     const queue = { ...baseQueue,

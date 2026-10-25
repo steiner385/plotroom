@@ -2,6 +2,7 @@ import { memo, useEffect, useRef } from 'react';
 import type { Lane } from '../types';
 import { LANE_GLYPH, LANE_WORD } from './laneStatus';
 import { LANE_DEFINITIONS } from '../definitions';
+import { TrendArrow } from '../TrendArrow';
 
 interface Props {
   lane: Lane; expanded: boolean; onToggle: () => void;
@@ -32,6 +33,7 @@ function SpineLaneInner({ lane, expanded, onToggle, focusNonce }: Props) {
       {glyph}
       <span className="spine-title" title={help}>{lane.title}</span>
       <span className="spine-summary">{lane.summary}</span>
+      {lane.trend && <TrendArrow trend={lane.trend} baselineLabel="vs earlier" />}
       <CostChip lane={lane} />
       {lane.efficiencyChip && <span className="spine-effic" aria-hidden="true">{lane.efficiencyChip}</span>}
     </>

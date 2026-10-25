@@ -488,6 +488,28 @@ function p50Stat(cur: number[], prev: number[]): HeadlineStat {
   };
 }
 
+/**
+ * Per-repo queue-wait p50 {value, prev} split at `since` (#258 slice 3): the
+ * live Pipeline trend reuses the exact Metrics windowing so the two never drift.
+ * A repo appears when it has samples in EITHER window; an empty window → null in
+ * the stat. Pure — the poller feeds it `history.queueWaitsSince(prevSince)`.
+ */
+export function queueWaitStatsByRepo(
+  rows: { repo: string; at: string; waitSecs: number }[], since: string,
+): Map<string, HeadlineStat> {
+  const { cur, prev } = splitWindow(rows, (r) => r.at, since);
+  const curByRepo = groupBy(cur, (r) => r.repo);
+  const prevByRepo = groupBy(prev, (r) => r.repo);
+  const out = new Map<string, HeadlineStat>();
+  for (const repo of new Set([...curByRepo.keys(), ...prevByRepo.keys()])) {
+    out.set(repo, p50Stat(
+      (curByRepo.get(repo) ?? []).map((r) => r.waitSecs),
+      (prevByRepo.get(repo) ?? []).map((r) => r.waitSecs),
+    ));
+  }
+  return out;
+}
+
 const mean = (xs: number[]): number => xs.reduce((s, x) => s + x, 0) / xs.length;
 
 /** Top-N cap for the slowest-jobs leaderboard (per repo). */

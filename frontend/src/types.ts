@@ -3,6 +3,7 @@
 // re-exported so existing frontend importers are unchanged.
 import type { NotificationEventType, NotificationKind } from '../../shared/notification-events';
 export type { NotificationEventType, NotificationKind };
+import type { Trend } from './lib/trend';
 
 export type StageId = 'ci' | 'parked' | 'ready' | 'queue' | 'qa-deploy' | 'awaiting-prod' | 'merged';
 export interface StageResult {
@@ -145,6 +146,9 @@ export interface RepoQueueView {
   trainsPerHour?: number;
   batchSuccessRatePct?: number | null;
   ejects24h?: number;
+  /** Queue-wait p50 over the recent 7d vs the prior 7d (#258) — drives the live
+   *  queue-wait trend arrow in the ops strip. Absent on pre-#258 payloads. */
+  queueWaitP50?: { value: number | null; prev: number | null } | null;
 }
 export interface DashboardState {
   generatedAt: string; staleSince: string | null;
@@ -596,6 +600,9 @@ export interface LaneView {
   summary: string;            // ≤200 chars, truncated '…'
   costChip?: { dollars: number; days: number } | null;
   efficiencyChip?: string | null;
+  /** Delta-vs-baseline trend for the lane (#258); rendered as the shared arrow
+   *  next to the summary. Currently the main lane's degrading-green signal. */
+  trend?: Trend;
   wiredness: 'wired' | 'not-wired';
   gating: boolean;
 }
