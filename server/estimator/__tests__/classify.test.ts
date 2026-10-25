@@ -16,7 +16,7 @@ const pr = (over: Partial<PrSnapshot>): PrSnapshot => ({
 });
 const input = (over: Partial<ClassifyInput>): ClassifyInput => ({
   pr: pr({}), prev: null, ciProgress: null, queueProgress: null,
-  deploy: { hasDeploy: false, qaLive: null, prodLive: null, propagating: false, deployProgress: null },
+  deploy: { hasDeploy: false, firstLive: null, terminalLive: null, firstEnv: null, terminalEnv: null, propagating: false, deployProgress: null },
   retentionDays: 7, now: NOW, ...over,
 });
 
@@ -214,13 +214,13 @@ describe('classify', () => {
 
   it('merged deploy-repo lifecycle: deploying → propagating → awaiting-prod → drop on prod', () => {
     const merged = pr({ mergedAt: '2026-06-10T11:00:00Z' });
-    const base = { hasDeploy: true, qaLive: false, prodLive: false, propagating: false,
+    const base = { hasDeploy: true, firstLive: false, terminalLive: false, firstEnv: 'qa', terminalEnv: 'prod', propagating: false,
       deployProgress: { percent: 40, etaSeconds: 180, overdue: false } };
     expect(classify(input({ pr: merged, deploy: base }))!.stage).toBe('qa-deploy');
     expect(classify(input({ pr: merged, deploy: { ...base, propagating: true } }))!.substate).toBe('propagating');
-    expect(classify(input({ pr: merged, deploy: { ...base, qaLive: true } }))!.stage).toBe('awaiting-prod');
-    expect(classify(input({ pr: merged, deploy: { ...base, qaLive: true, prodLive: true } }))).toBeNull();
-    expect(classify(input({ pr: merged, deploy: { ...base, qaLive: null } }))!.substate).toBe('unknown');
+    expect(classify(input({ pr: merged, deploy: { ...base, firstLive: true } }))!.stage).toBe('awaiting-prod');
+    expect(classify(input({ pr: merged, deploy: { ...base, firstLive: true, terminalLive: true } }))).toBeNull();
+    expect(classify(input({ pr: merged, deploy: { ...base, firstLive: null } }))!.substate).toBe('unknown');
   });
 
   // Item 4 — CI-done trust guard

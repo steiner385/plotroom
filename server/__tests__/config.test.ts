@@ -57,6 +57,7 @@ describe('loadConfig', () => {
     const dc = cfg.deploy['acme/widgets'];
     expect(dc.cloneUrl).toBe('https://github.com/acme/widgets.git');
     expect(dc.defaultBranch).toBe('main');
+    expect(dc.order).toEqual(['qa']);
     expect(dc.environments).toEqual([
       { name: 'qa', healthUrl: 'https://qa.widgets.dev/health', auto: true, shaKey: 'commitSha' },
     ]);
@@ -73,15 +74,21 @@ describe('loadConfig', () => {
     expect(loadConfig(path).deploy['acme/widgets'].environments[0].shaKey).toBe('gitSha');
   });
 
-  it('throws on a bogus env name after normalization', () => {
+  it('arbitrary env names are accepted — staging/production normalizes with order, no throw', () => {
     const path = writeConfig({
       deploy: {
         'acme/widgets': {
-          environments: [{ name: 'staging', healthUrl: 'https://x/health' }],
+          environments: [
+            { name: 'staging', healthUrl: 'h' },
+            { name: 'production', healthUrl: 'h2' },
+          ],
         },
       },
     });
-    expect(() => loadConfig(path)).toThrow(/acme\/widgets.*"qa" or "prod".*staging/);
+    const dc = loadConfig(path).deploy['acme/widgets'];
+    expect(dc.order).toEqual(['staging', 'production']);
+    expect(dc.environments[0]!.auto).toBe(true);   // first env auto by default
+    expect(dc.environments[1]!.auto).toBe(false);  // second env not auto by default
   });
 
   it('throws when an environment is missing healthUrl', () => {
@@ -219,6 +226,7 @@ describe('loadConfig', () => {
     const dc = loadConfig(path).deploy['acme/widgets'];
     expect(dc.cloneUrl).toBe('git@github.com:acme/widgets.git');
     expect(dc.defaultBranch).toBe('trunk');
+    expect(dc.order).toEqual(['prod']);
     expect(dc.environments[0]).toEqual({
       name: 'prod', healthUrl: 'https://widgets.dev/health', auto: true, shaKey: 'commitSha' });
   });
@@ -232,6 +240,7 @@ describe('repoSettings', () => {
       rollupJobId: 'ci',
       workflowPath: '.github/workflows/ci.yml',
       batchSize: DEFAULTS.batchSize,
+      autoDiscoverDeploy: false,
     });
   });
 
@@ -254,6 +263,7 @@ describe('repoSettings', () => {
       rollupJobId: 'rollup',
       workflowPath: '.github/workflows/main.yml',
       batchSize: 12,
+      autoDiscoverDeploy: false,
     });
     expect(repoSettings(config, 'acme/gizmos').batchSize).toBe(4);
     expect(repoSettings(config, 'acme/gizmos').rollupJobId).toBe('ci');
@@ -281,6 +291,7 @@ batchSize: 12
       rollupJobId: 'rollup',
       workflowPath: '.github/workflows/main.yml',
       batchSize: 12,
+      autoDiscoverDeploy: false,
     });
   });
 
@@ -322,7 +333,8 @@ deploy:
 
   it('an instance config deploy entry overrides the in-repo block whole-entry (instance-override case)', () => {
     const instanceDc = { cloneUrl: 'https://github.com/acme/gizmos.git', defaultBranch: 'main',
-      environments: [{ name: 'qa' as const, healthUrl: 'https://qa.instance.dev/health', auto: true, shaKey: 'commitSha' }] };
+      order: ['qa'],
+      environments: [{ name: 'qa', healthUrl: 'https://qa.instance.dev/health', auto: true, shaKey: 'commitSha' }] };
     const config: AppConfig = { ...DEFAULTS, deploy: { 'acme/gizmos': instanceDc } };
     const map = effectiveDeployMap(config, new Map([['acme/gizmos', fileWithDeploy]]));
     expect(map['acme/gizmos']).toBe(instanceDc); // the override object itself — not field-merged
@@ -433,6 +445,7 @@ deploy:
 
   it('instance-override deploy entries are exempt (the operator wrote them)', () => {
     const instanceDc = { cloneUrl: 'https://anywhere.example/repo.git', defaultBranch: 'main',
+      order: ['qa'],
       environments: [{ name: 'qa' as const, healthUrl: 'https://qa.anywhere.example/health',
         auto: true, shaKey: 'commitSha' }] };
     const cfg: AppConfig = { ...withAllowlist(['github.com']), deploy: { 'acme/gizmos': instanceDc } };
@@ -1195,5 +1208,40 @@ describe('loadConfig allowMissingPrivateKey (#202 — inline App key for embedde
   it('still validates appId even with the option set', () => {
     expect(() => loadConfig(writeConfig({ tokenSource: 'app', app: { appId: 0 } }),
       { allowMissingPrivateKey: true })).toThrow(/appId/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 12: per-repo autoDiscoverDeploy opt-in flag (default OFF)
+// ---------------------------------------------------------------------------
+describe('effectiveRepoSettings — autoDiscoverDeploy', () => {
+  it('defaults to false when neither instance override nor fileCfg sets it', () => {
+    const s = effectiveRepoSettings('acme/widgets', DEFAULTS);
+    expect(s.autoDiscoverDeploy).toBe(false);
+  });
+
+  it('is true when set in the instance repos override', () => {
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: true } } };
+    expect(effectiveRepoSettings('acme/widgets', config).autoDiscoverDeploy).toBe(true);
+  });
+
+  it('is true when set in the in-repo fileCfg', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: true\n')!;
+    expect(effectiveRepoSettings('acme/widgets', DEFAULTS, fileCfg).autoDiscoverDeploy).toBe(true);
+  });
+
+  it('instance override wins over fileCfg (false override beats true fileCfg)', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: true\n')!;
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: false } } };
+    expect(effectiveRepoSettings('acme/widgets', config, fileCfg).autoDiscoverDeploy).toBe(false);
+  });
+
+  it('instance override true wins over fileCfg false', () => {
+    const fileCfg = parseRepoConfig('acme/widgets', 'autoDiscoverDeploy: false\n')!;
+    const config: AppConfig = { ...DEFAULTS,
+      repos: { 'acme/widgets': { autoDiscoverDeploy: true } } };
+    expect(effectiveRepoSettings('acme/widgets', config, fileCfg).autoDiscoverDeploy).toBe(true);
   });
 });

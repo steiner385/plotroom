@@ -17,6 +17,14 @@ describe('trackState', () => {
     expect(labels(stage({}), false)).toEqual(['CI', 'Queue', 'Merged']);
   });
 
+  it('labels the deploy nodes with the real env names when provided (#258 generalization)', () => {
+    expect(trackState(stage({}), true, 'staging', 'production').map((n) => n.label))
+      .toEqual(['CI', 'Queue', 'Merged', 'staging', 'production']);
+    // null/absent env names keep the QA/Prod fallback (pre-upgrade payloads)
+    expect(trackState(stage({}), true, null, null).map((n) => n.label))
+      .toEqual(['CI', 'Queue', 'Merged', 'QA', 'Prod']);
+  });
+
   it('ci → CI active, rest pending', () => {
     expect(statuses(stage({ stage: 'ci' }), true))
       .toEqual(['active', 'pending', 'pending', 'pending', 'pending']);

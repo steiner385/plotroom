@@ -5,19 +5,23 @@ import { formatDur } from './format';
 export type NodeStatus = 'done' | 'active' | 'fail' | 'pending' | 'parked';
 export interface TrackNode { label: string; status: NodeStatus; }
 
-const DEPLOY_LABELS = ['CI', 'Queue', 'Merged', 'QA', 'Prod'];
 const SIMPLE_LABELS = ['CI', 'Queue', 'Merged'];
+/** Deploy-repo lifecycle labels — the last two name the real first/terminal env
+ *  (#258), falling back to QA/Prod for pre-upgrade payloads or deploy-less repos. */
+const deployLabels = (firstEnv?: string | null, terminalEnv?: string | null) =>
+  ['CI', 'Queue', 'Merged', firstEnv ?? 'QA', terminalEnv ?? 'Prod'];
 
 /**
  * Pure mapper: stage/substate → per-node track state.
- * Deploy repos get a 5-node lifecycle (CI/Queue/Merged/QA/Prod), simple repos 3 nodes.
- * Parked draft/conflicting relabel the CI node with the substate (amber `!`);
- * ci-failed / group-failed render as red ✗ at the CI / Queue node respectively;
- * queue/unmergeable (needs a rebase) and queue/queue-blocked (cascade victim —
- * stuck behind a conflicting entry) both render the Queue node as amber `!`.
+ * Deploy repos get a 5-node lifecycle (CI/Queue/Merged/{firstEnv}/{terminalEnv}),
+ * simple repos 3 nodes. Parked draft/conflicting relabel the CI node with the
+ * substate (amber `!`); ci-failed / group-failed render as red ✗ at the CI / Queue
+ * node respectively; queue/unmergeable (needs a rebase) and queue/queue-blocked
+ * (cascade victim — stuck behind a conflicting entry) render the Queue node amber `!`.
  */
-export function trackState(stage: StageResult, hasDeploy: boolean): TrackNode[] {
-  const labels = hasDeploy ? DEPLOY_LABELS : SIMPLE_LABELS;
+export function trackState(stage: StageResult, hasDeploy: boolean,
+  firstEnv?: string | null, terminalEnv?: string | null): TrackNode[] {
+  const labels = hasDeploy ? deployLabels(firstEnv, terminalEnv) : SIMPLE_LABELS;
   const nodes: TrackNode[] = labels.map((label) => ({ label, status: 'pending' as NodeStatus }));
   const doneThrough = (idx: number) => {
     for (let i = 0; i <= idx && i < nodes.length; i++) nodes[i]!.status = 'done';
@@ -105,8 +109,9 @@ function segment(prev: TrackNode, percent: number | null, key: string) {
   return <i key={key} className="seg" />;
 }
 
-export function MetroTrack({ stage, hasDeploy }: { stage: StageResult; hasDeploy: boolean }) {
-  const nodes = trackState(stage, hasDeploy);
+export function MetroTrack({ stage, hasDeploy, firstEnv, terminalEnv }:
+  { stage: StageResult; hasDeploy: boolean; firstEnv?: string | null; terminalEnv?: string | null }) {
+  const nodes = trackState(stage, hasDeploy, firstEnv, terminalEnv);
   const currentIdx = nodes.findIndex((n) => n.status === 'active' || n.status === 'fail' || n.status === 'parked');
   const lastDone = nodes.reduce((acc, n, i) => (n.status === 'done' ? i : acc), 0);
   const pos = currentIdx >= 0 ? currentIdx : lastDone;

@@ -465,7 +465,8 @@ export async function createPrDashboardBackend(
         (repo, name, event) => poller.resolvePool(repo, name, event), poller.poolHealth(),
         config.costPerMinute ?? null, config.poolMeta ?? null,
         (repo, sha) => poller.prNumberForSha(repo, sha), config.costAutoRate,
-        (repo) => poller.settingsFor(repo).requiredCheckPrefixes ?? []);
+        (repo) => poller.settingsFor(repo).requiredCheckPrefixes ?? [],
+        (repo) => poller.deployEnvsFor(repo));
       metricsMemo.set(key, { at: Date.now(), payload });
       return payload;
     },

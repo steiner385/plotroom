@@ -33,6 +33,16 @@ describe('waterfallSegments', () => {
     expect(segs.map((s) => s.id)).toEqual(['toFirstGreen', 'qaDeploy', 'awaitingProd']);
   });
 
+  it('resolves the deploy segments from envLive[firstEnv/terminalEnv] for arbitrary-env repos (#258)', () => {
+    // legacy qaLiveAt/prodLiveAt are null (non-qa/prod repo); envLive carries the real ones
+    const t: PrTimeline = { createdAt: null, firstGreenAt: null, enqueuedAt: null,
+      mergedAt: '2026-06-10T10:00:00Z', qaLiveAt: null, prodLiveAt: null,
+      envLive: { staging: '2026-06-10T10:20:00Z', production: '2026-06-10T12:20:00Z' } };
+    const segs = waterfallSegments(t, 'staging', 'production');
+    expect(segs.map((s) => s.id)).toEqual(['qaDeploy', 'awaitingProd']);
+    expect(segs.map((s) => (s.endMs - s.startMs) / 60_000)).toEqual([20, 120]);
+  });
+
   it('drops unparseable and negative-duration pairs', () => {
     expect(waterfallSegments({ ...FULL, createdAt: 'garbage' }).map((s) => s.id))
       .toEqual(['greenToEnqueued', 'queue', 'qaDeploy', 'awaitingProd']);

@@ -18,10 +18,13 @@ export function deployLane(repos: DashboardState['repos']): { status: LaneStatus
   const reachable = envs.filter((e) => e.reachable);
   if (reachable.length === 0) return { status: 'blind', summary: 'no signal — /health unreachable' };
 
-  const awaitingProd = deploys.reduce((n, d) => n + d.awaitingProd, 0);
   const short = (sha: string | null) => (sha ? sha.slice(0, 6) : '—');
   const envParts = reachable.map((e) => `${e.name} ${short(e.liveSha)}`);
   const parts = [...envParts];
-  if (awaitingProd > 0) parts.push(`${awaitingProd} awaiting prod`);
+  for (const d of deploys) {
+    if (d.awaitingProd > 0) {
+      parts.push(`${d.awaitingProd} awaiting ${d.terminalEnv ?? 'prod'}`);
+    }
+  }
   return { status: 'green', summary: parts.join(' · ') };
 }

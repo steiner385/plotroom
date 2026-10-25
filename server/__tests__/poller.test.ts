@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Poller, RetryThrottle, describeError, ingestCheckSet, ingestGroupFailures, maxPlausibleSuccessSecs, rerunInProgressFor, computePrCost, type DashboardState } from '../poller';
+import { Poller, RetryThrottle, describeError, ingestCheckSet, ingestGroupFailures, maxPlausibleSuccessSecs, rerunInProgressFor, computePrCost, DEPLOY_DISCOVERY_INTERVAL_MS, type DashboardState } from '../poller';
 import { HistoryStore } from '../history';
 import { deriveCiGraph } from '../required-checks';
 import type { CheckRun } from '../types';
@@ -24,6 +24,7 @@ const CONFIG: AppConfig = {
     'acme/widgets': {
       cloneUrl: 'https://github.com/acme/widgets.git',
       defaultBranch: 'main',
+      order: ['qa', 'prod'],
       environments: [
         { name: 'qa', healthUrl: 'https://qa.widgets.example.com/health', auto: true, shaKey: 'commitSha' },
         { name: 'prod', healthUrl: 'https://widgets.example.com/health', auto: false, shaKey: 'commitSha' },
@@ -2637,6 +2638,7 @@ describe('Poller in-repo .pr-dashboard.yml (Z1)', () => {
       rollupJobId: 'rollup',                          // in-repo
       workflowPath: '.github/workflows/ci.yml',       // default
       batchSize: 12,                                  // in-repo
+      autoDiscoverDeploy: false,
     });
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]))
@@ -2700,7 +2702,8 @@ describe('Poller in-repo .pr-dashboard.yml (Z1)', () => {
     expect(blobCalls(client)).toBe(1);
     expect(p.settingsFor('acme/widgets')).toEqual({
       requiredCheckPrefixes: undefined, rollupJobId: 'ci',
-      workflowPath: '.github/workflows/ci.yml', batchSize: DEFAULTS.batchSize });
+      workflowPath: '.github/workflows/ci.yml', batchSize: DEFAULTS.batchSize,
+      autoDiscoverDeploy: false });
     t += 60_000;
     await p.deployOnce();            // within 24h — throttled
     expect(blobCalls(client)).toBe(1);
@@ -5255,6 +5258,7 @@ describe('PrView.timeline (issue #50)', () => {
       createdAt: '2026-06-09T08:00:00Z', firstGreenAt: '2026-06-09T09:00:00Z',
       enqueuedAt: '2026-06-09T09:30:00Z', mergedAt: '2026-06-10T10:00:00Z',
       qaLiveAt: '2026-06-10T10:20:00Z', prodLiveAt: null,
+      envLive: { qa: '2026-06-10T10:20:00Z' },
     });
   });
 
@@ -5268,6 +5272,7 @@ describe('PrView.timeline (issue #50)', () => {
     expect(pr.timeline).toEqual({
       createdAt: null, firstGreenAt: null, enqueuedAt: null,
       mergedAt: '2026-06-10T10:00:00Z', qaLiveAt: null, prodLiveAt: null,
+      envLive: {},
     });
   });
 
@@ -5947,5 +5952,378 @@ describe('per-repo deploy status on DashboardState (Deploy lane, Spec 2)', () =>
     await p.deployOnce();
     const repo = p.buildState().repos.find((r) => r.repo === 'acme/widgets');
     expect(repo?.deploy).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7 review: env-order generalization guards (non-qa/prod names + single-env)
+// ---------------------------------------------------------------------------
+
+describe('Poller env-order generalization (non-qa/prod names + single-env)', () => {
+  const ALL_EVENTS_ON: NotificationsConfig = {
+    enabled: false, command: [], digest: { enabled: false, hourLocal: 8 },
+    events: { 'ci-failed': true, 'group-failed': true, 'queue-blocked': true,
+      ready: true, overdue: true, 'prod-live': true, 'queue-stalled': true,
+      'duration-regression': true, 'runner-starvation': true, 'budget-breach': true },
+  };
+
+  // Reuse the standard merged-PR sweep fixture (PR 8951, mergeCommit squash8951).
+  // The health URL and sha names are intentionally non-qa/prod so any re-hardcoding
+  // would break these tests.
+
+  it('(a) multi-env non-qa/prod: terminalLive fires on terminal env (production), NOT on first env (staging)', async () => {
+    // Repo configured with order: ['staging', 'production'] — names chosen to
+    // prove the notifier gates on terminalEnv, not on the literal string 'prod'.
+    const config: AppConfig = {
+      ...CONFIG,
+      deploy: {
+        'acme/widgets': {
+          cloneUrl: 'https://github.com/acme/widgets.git',
+          defaultBranch: 'main',
+          order: ['staging', 'production'],
+          environments: [
+            { name: 'staging', healthUrl: 'https://staging.widgets.example.com/health', auto: true, shaKey: 'commitSha' },
+            { name: 'production', healthUrl: 'https://production.widgets.example.com/health', auto: false, shaKey: 'commitSha' },
+          ],
+        },
+      },
+    };
+    const notifier = new Notifier({ config: () => ALL_EVENTS_ON });
+    const terminalLiveSpy = vi.spyOn(notifier, 'terminalLive');
+
+    // Phase 1: staging live, production not yet.
+    const shasPhase1 = {
+      'https://staging.widgets.example.com/health': 'squash8951',
+      'https://production.widgets.example.com/health': 'oldSha-prod',
+    };
+    // Mutable clock: phase 2 must advance past ANCESTRY_THROTTLE_MS (60s) — the
+    // same SHA flows staging→production, so production's (mergeSha, deployedSha)
+    // ancestry pair is identical to the one staging already checked in phase 1.
+    // With a frozen clock that pair would be throttled and production would never
+    // be marked live until a later cycle.
+    let clock = NOW;
+    const deploy = fakeDeploy(shasPhase1, { 'squash8951': 'yes', 'oldSha-prod': 'no' });
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy,
+      config, now: () => clock, notifier });
+    await p.sweepOnce();   // ingests merged #8951 (mergeCommitSha squash8951)
+    await p.deployOnce();
+
+    // staging is live: PR is 'awaiting-prod'; terminalLive must NOT have fired yet
+    const prAfterStaging = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!
+      .prs.find((x) => x.number === 8951)!;
+    expect(prAfterStaging.stage.stage).toBe('awaiting-prod');
+    expect(terminalLiveSpy).not.toHaveBeenCalled();
+
+    // Phase 2: production also goes live (clock advanced past the throttle).
+    shasPhase1['https://production.widgets.example.com/health'] = 'squash8951';
+    clock = new Date(NOW.getTime() + 120_000);
+    // ancestry already 'yes' for squash8951, so production will be marked live too.
+    await p.deployOnce();
+
+    // terminalLive must fire exactly once, for the terminal env 'production'.
+    expect(terminalLiveSpy).toHaveBeenCalledTimes(1);
+    expect(terminalLiveSpy).toHaveBeenCalledWith('acme/widgets', 8951, 'feat: allowance', 'production');
+    // The PR leaves the board (terminalLive → null from viewForMergedPr).
+    const prAfterProd = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!
+      .prs.find((x) => x.number === 8951);
+    expect(prAfterProd).toBeUndefined();
+  });
+
+  it('(b) single-env: PR leaves board and terminalLive fires when the sole env goes live', async () => {
+    // A repo with order: ['production'] — firstEnv === terminalEnv.  Proves that
+    // the single-env path (no intermediate envs) treats the one env as both first
+    // and terminal, so the PR exits the board and the notifier fires in one step.
+    const config: AppConfig = {
+      ...CONFIG,
+      deploy: {
+        'acme/widgets': {
+          cloneUrl: 'https://github.com/acme/widgets.git',
+          defaultBranch: 'main',
+          order: ['production'],
+          environments: [
+            { name: 'production', healthUrl: 'https://production.widgets.example.com/health', auto: true, shaKey: 'commitSha' },
+          ],
+        },
+      },
+    };
+    const notifier = new Notifier({ config: () => ALL_EVENTS_ON });
+    const terminalLiveSpy = vi.spyOn(notifier, 'terminalLive');
+
+    const deploy = fakeDeploy(
+      { 'https://production.widgets.example.com/health': 'squash8951' },
+      { 'squash8951': 'yes' },
+    );
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy,
+      config, now: () => NOW, notifier });
+    await p.sweepOnce();
+    await p.deployOnce();
+
+    // PR is off the board — single env is terminal, so terminalLive=true → viewForMergedPr returns null.
+    const prs = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs;
+    expect(prs.find((x) => x.number === 8951)).toBeUndefined();
+    // terminalLive fired exactly once for the sole env, passing the env name.
+    expect(terminalLiveSpy).toHaveBeenCalledTimes(1);
+    expect(terminalLiveSpy).toHaveBeenCalledWith('acme/widgets', 8951, 'feat: allowance', 'production');
+  });
+});
+
+describe('Poller.deployEnvsFor (task 8b)', () => {
+  it('returns firstEnv/terminalEnv for a configured multi-env repo', () => {
+    const config: AppConfig = {
+      ...DEFAULTS,
+      ancestrySource: 'clone',
+      owners: ['acme'],
+      deploy: {
+        'acme/widgets': {
+          cloneUrl: 'https://github.com/acme/widgets.git',
+          defaultBranch: 'main',
+          order: ['staging', 'production'],
+          environments: [
+            { name: 'staging', healthUrl: 'https://staging.example.com/health', auto: true, shaKey: 'commitSha' },
+            { name: 'production', healthUrl: 'https://prod.example.com/health', auto: false, shaKey: 'commitSha' },
+          ],
+        },
+      },
+    };
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config, now: () => NOW });
+    expect(p.deployEnvsFor('acme/widgets')).toEqual({ firstEnv: 'staging', terminalEnv: 'production' });
+  });
+
+  it('returns null for a repo not in the deploy map', () => {
+    const config: AppConfig = { ...DEFAULTS, ancestrySource: 'clone', owners: ['acme'] };
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config, now: () => NOW });
+    expect(p.deployEnvsFor('acme/widgets')).toBeNull();
+  });
+
+  it('single-env repo: firstEnv === terminalEnv', () => {
+    const config: AppConfig = {
+      ...DEFAULTS,
+      ancestrySource: 'clone',
+      owners: ['acme'],
+      deploy: {
+        'acme/widgets': {
+          cloneUrl: 'https://github.com/acme/widgets.git',
+          defaultBranch: 'main',
+          order: ['production'],
+          environments: [
+            { name: 'production', healthUrl: 'https://prod.example.com/health', auto: true, shaKey: 'commitSha' },
+          ],
+        },
+      },
+    };
+    const p = new Poller({ router: asRouter(fakeClient()), history, deploy: noDeploy(), config, now: () => NOW });
+    const result = p.deployEnvsFor('acme/widgets');
+    expect(result).not.toBeNull();
+    expect(result!.firstEnv).toBe('production');
+    expect(result!.terminalEnv).toBe('production');
+    expect(result!.firstEnv).toBe(result!.terminalEnv);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 13: auto-discover deploy config from GitHub (autoDiscoverDeploy)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fake REST client for deploy-discovery: dispatches on path prefix to return
+ * canned /environments, /deployments, and /deployments/{id}/statuses responses.
+ * Extends the existing fakeClient() pattern by adding `restGet`.
+ */
+function fakeDiscoveryClient(
+  envNames: string[],
+  deployments: Array<{ id: number; environment: string; sha: string; created_at: string }>,
+  statuses: Record<number, { state: string; created_at: string } | null>,
+) {
+  const base = fakeClient();
+  const restGet = vi.fn(async (path: string) => {
+    if (path.includes('/environments')) {
+      return { environments: envNames.map((name) => ({ name })) };
+    }
+    if (path.includes('/deployments?')) {
+      return deployments;
+    }
+    // /repos/{owner}/{name}/deployments/{id}/statuses?per_page=1
+    const m = path.match(/\/deployments\/(\d+)\/statuses/);
+    if (m) {
+      const id = Number(m[1]);
+      const s = statuses[id];
+      if (s == null) return [];
+      return [s];
+    }
+    throw new Error(`unexpected restGet path: ${path}`);
+  });
+  return { ...base, restGet };
+}
+
+describe('Poller auto-discover deploy (task 13)', () => {
+  // A config where acme/widgets has autoDiscoverDeploy=true but NO hand-written
+  // deploy block.  The sweep will discover the repo; deploy discovery then reads
+  // environments + deployments + statuses from GitHub and synthesises a DeployConfig.
+  const DISCOVER_CONFIG: AppConfig = {
+    ...DEFAULTS,
+    ancestrySource: 'clone',
+    owners: ['acme', 'octo'],
+    repos: { 'acme/widgets': { autoDiscoverDeploy: true } },
+    deploy: {},  // no hand-written deploy config
+  };
+
+  // A deployment to 'production' whose status is 'success'
+  const DEPLOY_ID = 42;
+  const LIVE_SHA = 'sha9abc';
+  const DEPLOY_TIME = '2026-06-10T10:00:00Z';
+
+  it('DEPLOY_DISCOVERY_INTERVAL_MS is exported and equals 6 hours', () => {
+    expect(DEPLOY_DISCOVERY_INTERVAL_MS).toBe(6 * 3600_000);
+  });
+
+  it('after sweepOnce + deployOnce: opted-in repo appears in effectiveDeploy with correct order', async () => {
+    const client = fakeDiscoveryClient(
+      ['production'],
+      [{ id: DEPLOY_ID, environment: 'production', sha: LIVE_SHA, created_at: DEPLOY_TIME }],
+      { [DEPLOY_ID]: { state: 'success', created_at: DEPLOY_TIME } },
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy: noDeploy(),
+      config: DISCOVER_CONFIG,
+      now: () => NOW,
+    });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const deployMap = p.effectiveDeploy();
+    expect(deployMap['acme/widgets']).toBeDefined();
+    expect(deployMap['acme/widgets'].order).toEqual(['production']);
+  });
+
+  it('after sweepOnce + deployOnce: hasDeploy is true in buildState for the auto-discovered repo', async () => {
+    const client = fakeDiscoveryClient(
+      ['production'],
+      [{ id: DEPLOY_ID, environment: 'production', sha: LIVE_SHA, created_at: DEPLOY_TIME }],
+      { [DEPLOY_ID]: { state: 'success', created_at: DEPLOY_TIME } },
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy: noDeploy(),
+      config: DISCOVER_CONFIG,
+      now: () => NOW,
+    });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const state = p.buildState();
+    const repoState = state.repos.find((r) => r.repo === 'acme/widgets');
+    expect(repoState?.hasDeploy).toBe(true);
+  });
+
+  it('merged PR whose mergeCommitSha is an ancestor of the live sha gets marked live and leaves the board', async () => {
+    // The sweep discovers PR 8951 as merged (mergeCommit.oid = 'squash8951').
+    // The discovery sets LIVE_SHA to 'sha9abc'. isAncestor('squash8951', 'sha9abc') = 'yes'.
+    const client = fakeDiscoveryClient(
+      ['production'],
+      [{ id: DEPLOY_ID, environment: 'production', sha: LIVE_SHA, created_at: DEPLOY_TIME }],
+      { [DEPLOY_ID]: { state: 'success', created_at: DEPLOY_TIME } },
+    );
+    const deploy = fakeDeploy(
+      {}, // no healthUrl probes — the synthesised env has empty healthUrl
+      { [LIVE_SHA]: 'yes' },
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy,
+      config: DISCOVER_CONFIG,
+      now: () => NOW,
+    });
+    await p.sweepOnce();   // discovers PR 8951 merged w/ mergeCommitSha='squash8951'
+    await p.deployOnce();  // discovers production live at LIVE_SHA; squash8951 is ancestor → markEnvLive
+    // PR 8951 is the terminal env so it leaves the board
+    const prs = p.buildState().repos.find((r) => r.repo === 'acme/widgets')!.prs;
+    expect(prs.find((x) => x.number === 8951)).toBeUndefined();
+  });
+
+  it('repo WITHOUT autoDiscoverDeploy is NOT auto-discovered even when GitHub returns environments', async () => {
+    // acme/widgets NOT in repos config (defaults to autoDiscoverDeploy: false)
+    const configNoDiscover: AppConfig = {
+      ...DEFAULTS,
+      ancestrySource: 'clone',
+      owners: ['acme', 'octo'],
+      deploy: {},
+      // no repos override → autoDiscoverDeploy defaults false
+    };
+    const client = fakeDiscoveryClient(
+      ['production'],
+      [{ id: DEPLOY_ID, environment: 'production', sha: LIVE_SHA, created_at: DEPLOY_TIME }],
+      { [DEPLOY_ID]: { state: 'success', created_at: DEPLOY_TIME } },
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy: noDeploy(),
+      config: configNoDiscover,
+      now: () => NOW,
+    });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const deployMap = p.effectiveDeploy();
+    expect(deployMap['acme/widgets']).toBeUndefined();
+  });
+
+  it('hand-written deploy config overrides an auto-discovered one for the same repo', async () => {
+    // Both autoDiscoverDeploy (would synthesize 'production') AND a hand-written
+    // config with 'qa' + 'prod' exist. The hand-written config must win.
+    const configWithBoth: AppConfig = {
+      ...DEFAULTS,
+      ancestrySource: 'clone',
+      owners: ['acme', 'octo'],
+      repos: { 'acme/widgets': { autoDiscoverDeploy: true } },
+      deploy: {
+        'acme/widgets': {
+          cloneUrl: 'https://github.com/acme/widgets.git',
+          defaultBranch: 'main',
+          order: ['qa', 'prod'],
+          environments: [
+            { name: 'qa', healthUrl: 'https://qa.widgets.example.com/health', auto: true, shaKey: 'commitSha' },
+            { name: 'prod', healthUrl: 'https://widgets.example.com/health', auto: false, shaKey: 'commitSha' },
+          ],
+        },
+      },
+    };
+    const client = fakeDiscoveryClient(
+      ['production'],
+      [{ id: DEPLOY_ID, environment: 'production', sha: LIVE_SHA, created_at: DEPLOY_TIME }],
+      { [DEPLOY_ID]: { state: 'success', created_at: DEPLOY_TIME } },
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy: noDeploy(),
+      config: configWithBoth,
+      now: () => NOW,
+    });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const deployMap = p.effectiveDeploy();
+    // Hand-written config wins: order should be ['qa', 'prod'], not ['production']
+    expect(deployMap['acme/widgets'].order).toEqual(['qa', 'prod']);
+  });
+
+  it('repo with no GitHub environments does not end up in discoveredDeploy', async () => {
+    const client = fakeDiscoveryClient(
+      [], // no environments
+      [],
+      {},
+    );
+    const p = new Poller({
+      router: asRouter(client as unknown as GithubClient),
+      history,
+      deploy: noDeploy(),
+      config: DISCOVER_CONFIG,
+      now: () => NOW,
+    });
+    await p.sweepOnce();
+    await p.deployOnce();
+    const deployMap = p.effectiveDeploy();
+    expect(deployMap['acme/widgets']).toBeUndefined();
   });
 });
