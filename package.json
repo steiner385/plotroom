@@ -86,10 +86,10 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "supertest": "^7.3.1",
-    "tsc-alias": "^1.9.8",
+    "tsc-alias": "^1.9.9",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vite": "^8.3.4",
+    "vite": "^8.3.5",
     "vite-plugin-dts": "^5.1.2",
     "vitest": "^4.1.11"
   }
